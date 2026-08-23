@@ -1,141 +1,91 @@
 import { describe, expect, test } from "bun:test";
 import type * as acp from "@agentclientprotocol/sdk";
-import { FxTelegramProjector } from "../src/fx/projector";
-import type { FxAcpEvent, FxMirrorMode } from "../src/fx/types";
+import { AcpProjector } from "../src/fx/projector";
 
-const started: FxAcpEvent = {
-  type: "session_started",
-  sessionId: "session-1",
-  agentName: "FX",
-  agentVersion: "0.0.4",
-  model: "zai/glm-5.2",
-  mode: "ask",
-  availableModelCount: 229,
-};
+const update = (value: object) => value as acp.SessionUpdate;
 
-function update(value: object): FxAcpEvent {
-  return {
-    type: "session_update",
-    update: value as acp.SessionUpdate,
-  };
-}
-
-function projector(mode: FxMirrorMode): FxTelegramProjector {
-  const result = new FxTelegramProjector(mode);
-  result.apply(started);
-  return result;
-}
-
-describe("FX Telegram projector", () => {
-  test("timeline retains one mutable line per tool call", () => {
-    const view = projector("timeline");
-    view.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "First paragraph." },
+describe("generic ACP projector", () => {
+  test("accumulates prose and patches one tool call without hardcoded tool names", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "First paragraph.\n\n" } }));
+    projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "1", title: "Searching", name: "custom_search",
+      kind: "search", status: "pending", rawInput: { query: "drafts" }, content: [],
     }));
-    view.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "tool-1",
-      title: "Reading",
-      kind: "read",
-      status: "pending",
-      content: [],
+    projector.apply(update({
+      sessionUpdate: "tool_call_update", toolCallId: "1", title: "Searching 12 files", status: "completed",
+      rawOutput: { matches: 3 },
     }));
-
-    const pending = view.apply(update({
-      sessionUpdate: "tool_call_update",
-      toolCallId: "tool-1",
-      title: "Reading package.json",
-      status: "in_progress",
-    }))!;
-    expect(pending.text).toContain("λ … Reading package.json · read");
-    expect(pending.text.match(/λ/gu)).toHaveLength(1);
-
-    const complete = view.apply(update({
-      sessionUpdate: "tool_call_update",
-      toolCallId: "tool-1",
-      status: "completed",
-      content: [{
-        type: "content",
-        content: { type: "text", text: "package contents" },
-      }],
-    }))!;
-    expect(complete.text).toContain("λ ✓ Reading package.json · read");
-    expect(complete.text).not.toContain("package contents");
+    projector.apply(update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Final paragraph." } }));
+    const snapshot = projector.snapshot();
+    expect(snapshot.prose).toBe("First paragraph.\n\nFinal paragraph.");
+    expect(snapshot.tools).toHaveLength(1);
+    expect(snapshot.tools[0]).toMatchObject({ title: "Searching 12 files", status: "completed", input: { query: "drafts" }, output: { matches: 3 } });
   });
 
-  test("collapse removes a completed tool when prose resumes", () => {
-    const view = projector("collapse");
-    view.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Paragraph one." },
-    }));
-    view.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "tool-1",
-      title: "Searching",
-      kind: "search",
-      status: "in_progress",
-      content: [],
-    }));
-    expect(view.apply(update({
-      sessionUpdate: "tool_call_update",
-      toolCallId: "tool-1",
-      title: "Searching sendMessageDraft",
-      status: "completed",
-    }))!.text).toContain("λ ✓ Searching sendMessageDraft · search");
-
-    const final = view.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Final **marked** paragraph." },
-    }))!;
-    expect(final.text).toContain("Paragraph one.");
-    expect(final.text).toContain("Final marked paragraph.");
-    expect(final.text).not.toContain("λ");
-    expect(final.entities).toContainEqual({
-      type: "bold",
-      offset: final.text.indexOf("marked"),
-      length: 6,
-    });
+  test("renders mutable thinking during a turn and removes it from the final", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({ sessionUpdate: "tool_call", toolCallId: "1", title: "Running tests", status: "in_progress", content: [] }));
+    const draft = projector.rich({ final: false, collapseTools: true });
+    expect(draft.blocks?.some((block) => block.type === "thinking")).toBeTrue();
+    projector.apply(update({ sessionUpdate: "tool_call_update", toolCallId: "1", status: "completed" }));
+    const final = projector.rich({ final: true, collapseTools: true });
+    expect(final.blocks).toBeUndefined();
+    expect(final.markdown).toContain("<details><summary>Worked for");
+    expect(final.markdown).not.toContain("tg-thinking");
   });
 
-  test("raw includes diagnostics, inputs, and bounded tool results", () => {
-    const view = projector("raw");
-    view.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "warning: startup context" },
+  test("retains the dynamic slash command catalog", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [{ name: "status", description: "Show status" }, { name: "model", description: "Switch model", input: { hint: "model" } }],
     }));
-    const frame = view.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "tool-1",
-      title: "terminal.exec bun --version",
-      kind: "execute",
-      status: "completed",
-      rawInput: { action: "exec", command: "bun --version" },
-      content: [{
-        type: "content",
-        content: { type: "text", text: "1.3.14" },
-      }],
-    }))!;
-
-    expect(frame.text).toContain("⚙ warning: startup context");
-    expect(frame.text).toContain('input: {"action":"exec","command":"bun --version"}');
-    expect(frame.text).toContain("result: 1.3.14");
+    expect(projector.snapshot().commands[1]).toEqual({ name: "model", description: "Switch model", input: { hint: "model" } });
   });
 
-  test("timeline exposes structured arguments when ACP supplies rawInput", () => {
-    const view = projector("timeline");
-    const frame = view.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "tool-terminal",
-      title: "Using terminal",
-      kind: "execute",
-      status: "pending",
-      rawInput: { action: "exec", command: "bun --version" },
-      content: [],
-    }))!;
+  test("keeps fx startup diagnostics out of assistant prose", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "[context] skill catalog omitted 10 entries" },
+    }));
+    projector.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Actual answer." },
+    }));
+    expect(projector.snapshot().prose).toBe("Actual answer.");
+    expect(projector.snapshot().diagnostics).toEqual(["[context] skill catalog omitted 10 entries"]);
+    const final = projector.rich({ final: true, collapseTools: true });
+    expect(final.markdown).toContain("1 𝒇x diagnostic");
+  });
 
-    expect(frame.text).toContain("λ ○ Using terminal · execute");
-    expect(frame.text).toContain('input: {"action":"exec","command":"bun --version"}');
+  test("passes completed assistant Markdown to Telegram Rich Messages without rewriting it", () => {
+    const projector = new AcpProjector();
+    const markdown = "# Result\n\nA **bold** sentence with `code`.\n\n| A | B |\n|---|---|\n| 1 | 2 |";
+    projector.apply(update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: markdown } }));
+    expect(projector.rich({ final: true, collapseTools: true })).toEqual({ markdown });
+    const draft = projector.rich({ final: false, collapseTools: true });
+    expect(draft.markdown).toBeUndefined();
+    expect(draft.blocks?.filter((block) => block.type === "paragraph").map((block) => block.text)).toEqual([
+      "# Result", "A **bold** sentence with `code`.", "| A | B |\n|---|---|\n| 1 | 2 |",
+    ]);
+  });
+
+  test("redacts Telegram-token-shaped secrets across streamed prose and tool details", () => {
+    const projector = new AcpProjector();
+    const token = `123456789:${"A".repeat(30)}`;
+    projector.apply(update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Never echo ${token.slice(0, 20)}` } }));
+    projector.apply(update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: token.slice(20) } }));
+    projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "secret", title: `Using ${token}`,
+      status: "completed", rawInput: { token }, content: [],
+    }));
+    const final = JSON.stringify(projector.rich({ final: true, collapseTools: false }));
+    const draft = JSON.stringify(projector.rich({ final: false, collapseTools: false }));
+    expect(final).not.toContain(token);
+    expect(draft).not.toContain(token);
+    expect(final).toContain("[redacted Telegram token]");
+    expect(projector.plainFinal(true)).not.toContain(token);
   });
 });

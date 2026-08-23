@@ -1,7 +1,13 @@
 node_modules/
 .env
+.env.*
+!.env.example
 *.log
 logs/
 .tgfx/
 *.tldraw
 *.tldr
+prototypes/
+.DS_Store
+coverage/
+*.tgz

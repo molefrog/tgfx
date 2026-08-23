@@ -1,289 +1,176 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { FormattedTextBuilder } from "../formatting";
-import type { TelegramStreamFrame } from "../stream";
-import type { FxAcpEvent, FxMirrorMode } from "./types";
+import type { InputRichMessageWithoutUpload } from "grammy/types";
+import { redactSecrets } from "../secrets";
 
-interface TextSegment {
-  type: "text";
-  text: string;
-  diagnostic: boolean;
+type RichBlock = NonNullable<InputRichMessageWithoutUpload["blocks"]>[number];
+export type ToolState = {
+  id: string; title: string; name?: string; kind?: string; status: string;
+  input?: unknown; output?: unknown; content: unknown[]; startedAt: number; finishedAt?: number;
+};
+export type TimelineSnapshot = {
+  prose: string; thought: string; tools: ToolState[];
+  commands: Array<{ name: string; description: string; input?: { hint: string } }>;
+  diagnostics: string[]; changedAt: number;
+};
+
+function stringify(value: unknown, limit = 4_000): string {
+  if (value === undefined) return "";
+  let text: string;
+  try { text = typeof value === "string" ? value : JSON.stringify(value, null, 2); }
+  catch { text = String(value); }
+  text = redactSecrets(text);
+  return text.length > limit ? `${text.slice(0, limit)}\n…` : text;
 }
 
-interface ToolSegment {
-  type: "tool";
-  id: string;
-  title: string;
-  kind: string;
-  status: string;
-  content?: string;
-  rawInput?: unknown;
-  rawOutput?: unknown;
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
-interface SystemSegment {
-  type: "system";
-  text: string;
-}
+export class AcpProjector {
+  private prose = "";
+  private thought = "";
+  private tools = new Map<string, ToolState>();
+  private commands: TimelineSnapshot["commands"] = [];
+  private diagnostics: string[] = [];
+  private changedAt = Date.now();
+  readonly startedAt = Date.now();
 
-interface PlanSegment {
-  type: "plan";
-  entries: acp.PlanEntry[];
-}
-
-type Segment = TextSegment | ToolSegment | SystemSegment | PlanSegment;
-
-function isDiagnostic(text: string): boolean {
-  return /^(?:\[context\]|skill discovery warning:|warning:)/iu.test(text.trimStart());
-}
-
-function toolContent(update: { content?: acp.ToolCallContent[] | null }): string | undefined {
-  const text = update.content
-    ?.flatMap((item) => {
-      if (item.type !== "content" || item.content.type !== "text") return [];
-      return [item.content.text];
-    })
-    .join("\n")
-    .trim();
-  return text || undefined;
-}
-
-function oneLine(text: string, limit = 180): string {
-  const compact = text.replace(/\s+/gu, " ").trim();
-  return compact.length <= limit ? compact : `${compact.slice(0, limit - 1)}…`;
-}
-
-function toolGlyph(status: string): string {
-  switch (status) {
-    case "completed":
-      return "✓";
-    case "failed":
-      return "✗";
-    case "in_progress":
-      return "…";
-    default:
-      return "○";
-  }
-}
-
-export class FxTelegramProjector {
-  private readonly segments: Segment[] = [];
-  private readonly tools = new Map<string, ToolSegment>();
-  private session?: Extract<FxAcpEvent, { type: "session_started" }>;
-  private stopReason?: string;
-
-  constructor(readonly mode: FxMirrorMode) {}
-
-  apply(event: FxAcpEvent): TelegramStreamFrame | undefined {
-    switch (event.type) {
-      case "session_started":
-        this.session = event;
-        break;
-      case "permission_requested":
-        this.applyPermission(event.request);
-        break;
-      case "turn_completed":
-        this.stopReason = event.stopReason;
-        break;
-      case "session_update":
-        this.applyUpdate(event.update);
-        break;
-    }
-
-    return this.render();
-  }
-
-  private addText(text: string, diagnostic = isDiagnostic(text)): void {
-    const last = this.segments.at(-1);
-    if (last?.type === "text" && last.diagnostic === diagnostic) {
-      last.text += text;
-      return;
-    }
-    this.segments.push({ type: "text", text, diagnostic });
-  }
-
-  private applyPermission(request: acp.RequestPermissionRequest): void {
-    const id = request.toolCall.toolCallId;
-    let tool = this.tools.get(id);
-    if (!tool) {
-      tool = {
-        type: "tool",
-        id,
-        title: request.toolCall.title ?? "Permission requested",
-        kind: request.toolCall.kind ?? "other",
-        status: request.toolCall.status ?? "pending",
-      };
-      this.tools.set(id, tool);
-      this.segments.push(tool);
-    }
-    tool.title = request.toolCall.title ?? tool.title;
-    tool.kind = request.toolCall.kind ?? tool.kind;
-    tool.status = request.toolCall.status ?? tool.status;
-    tool.rawInput = request.toolCall.rawInput;
-  }
-
-  private applyUpdate(update: acp.SessionUpdate): void {
+  apply(update: acp.SessionUpdate): void {
+    this.changedAt = Date.now();
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
-        if (update.content.type === "text") this.addText(update.content.text);
-        return;
-      case "agent_thought_chunk":
-        if (update.content.type === "text" && this.mode === "raw") {
-          this.segments.push({
-            type: "system",
-            text: `thought: ${update.content.text}`,
-          });
+        if (update.content.type === "text") {
+          const text = update.content.text;
+          if (text.startsWith("[context] ") || text.startsWith("skill discovery warning:")) {
+            this.diagnostics.push(text.trim());
+          } else {
+            this.prose += text;
+          }
         }
         return;
-      case "tool_call": {
-        const tool: ToolSegment = {
-          type: "tool",
-          id: update.toolCallId,
-          title: update.title,
-          kind: update.kind ?? "other",
-          status: update.status ?? "pending",
-          content: toolContent(update),
-          rawInput: update.rawInput,
-          rawOutput: update.rawOutput,
-        };
-        this.tools.set(tool.id, tool);
-        this.segments.push(tool);
+      case "agent_thought_chunk":
+        if (update.content.type === "text") this.thought += update.content.text;
         return;
-      }
+      case "tool_call":
+        this.tools.set(update.toolCallId, {
+          id: update.toolCallId, title: update.title,
+          ...(update.name ? { name: update.name } : {}),
+          ...(update.kind ? { kind: update.kind } : {}),
+          status: update.status ?? "pending", input: update.rawInput, output: update.rawOutput,
+          content: update.content ? [...update.content] : [], startedAt: Date.now(),
+          ...(update.status === "completed" || update.status === "failed" ? { finishedAt: Date.now() } : {}),
+        });
+        return;
       case "tool_call_update": {
-        const tool = this.tools.get(update.toolCallId);
-        if (!tool) return;
-        if (update.title != null) tool.title = update.title;
-        if (update.kind != null) tool.kind = update.kind;
-        if (update.status != null) tool.status = update.status;
-        if (update.rawInput !== undefined) tool.rawInput = update.rawInput;
-        if (update.rawOutput !== undefined) tool.rawOutput = update.rawOutput;
-        const content = toolContent(update);
-        if (content !== undefined) tool.content = content;
-        return;
-      }
-      case "plan": {
-        const existing = this.segments.find(
-          (segment): segment is PlanSegment => segment.type === "plan",
-        );
-        if (existing) existing.entries = update.entries;
-        else this.segments.push({ type: "plan", entries: update.entries });
+        const previous = this.tools.get(update.toolCallId) ?? {
+          id: update.toolCallId, title: update.title ?? "Tool", status: "pending", content: [], startedAt: Date.now(),
+        };
+        const status = update.status ?? previous.status;
+        this.tools.set(update.toolCallId, {
+          ...previous,
+          ...(update.title ? { title: update.title } : {}),
+          ...(update.kind ? { kind: update.kind } : {}),
+          ...(update.rawInput !== undefined ? { input: update.rawInput } : {}),
+          ...(update.rawOutput !== undefined ? { output: update.rawOutput } : {}),
+          ...(update.content ? { content: [...update.content] } : {}), status,
+          ...(status === "completed" || status === "failed" ? { finishedAt: previous.finishedAt ?? Date.now() } : {}),
+        });
         return;
       }
       case "available_commands_update":
-        if (this.mode === "raw") {
-          this.segments.push({
-            type: "system",
-            text: `${update.availableCommands.length} FX slash commands advertised`,
-          });
-        }
+        this.commands = update.availableCommands.map((command) => ({
+          name: command.name, description: command.description,
+          ...(command.input ? { input: command.input } : {}),
+        }));
         return;
-      case "usage_update":
-        if (this.mode === "raw") {
-          this.segments.push({
-            type: "system",
-            text: `context ${update.used}/${update.size} tokens`,
-          });
-        }
-        return;
-      default:
-        if (this.mode === "raw") {
-          this.segments.push({
-            type: "system",
-            text: `ACP update: ${update.sessionUpdate}`,
-          });
-        }
+      default: return;
     }
   }
 
-  private shouldRenderCollapsedTool(tool: ToolSegment): boolean {
-    const toolIndex = this.segments.indexOf(tool);
-    const newerTool = this.segments.slice(toolIndex + 1).some(
-      (segment) => segment.type === "tool",
-    );
-    const laterText = this.segments.slice(toolIndex + 1).some(
-      (segment) => segment.type === "text"
-        && !segment.diagnostic
-        && segment.text.trim().length > 0,
-    );
-    return !newerTool && !laterText;
+  snapshot(): TimelineSnapshot {
+    return {
+      prose: redactSecrets(this.prose), thought: redactSecrets(this.thought), tools: [...this.tools.values()],
+      commands: [...this.commands], diagnostics: this.diagnostics.map(redactSecrets), changedAt: this.changedAt,
+    };
   }
 
-  private render(): TelegramStreamFrame | undefined {
-    if (!this.session) return undefined;
-    const blocks: Array<(builder: FormattedTextBuilder) => void> = [];
-
-    blocks.push((builder) => {
-      builder.appendEntityText(
-        `${this.session!.agentName} ${this.session!.agentVersion}`,
-        "bold",
-      );
-      builder.appendPlain(" · ");
-      builder.appendEntityText(this.session!.model, "code");
-      builder.appendPlain(` · ${this.mode}`);
-    });
-
-    for (const segment of this.segments) {
-      if (segment.type === "text") {
-        if (segment.diagnostic && this.mode !== "raw") continue;
-        const text = segment.text.trim();
-        if (!text) continue;
-        blocks.push((builder) => {
-          if (segment.diagnostic) builder.appendPlain(`⚙ ${text}`);
-          else builder.appendMarkdown(text);
-        });
-        continue;
-      }
-
-      if (segment.type === "system") {
-        if (this.mode !== "raw") continue;
-        blocks.push((builder) => builder.appendPlain(`[${segment.text}]`));
-        continue;
-      }
-
-      if (segment.type === "plan") {
-        if (this.mode === "collapse") continue;
-        blocks.push((builder) => {
-          builder.appendEntityText("Plan", "bold");
-          for (const entry of segment.entries) {
-            const marker = entry.status === "completed"
-              ? "✓"
-              : entry.status === "in_progress" ? "→" : "○";
-            builder.appendPlain(`\n${marker} ${entry.content}`);
-          }
-        });
-        continue;
-      }
-
-      if (this.mode === "collapse" && !this.shouldRenderCollapsedTool(segment)) {
-        continue;
-      }
-
-      blocks.push((builder) => {
-        const line = `λ ${toolGlyph(segment.status)} ${segment.title} · ${segment.kind}`;
-        builder.appendEntityText(line, "code");
-
-        if (segment.rawInput !== undefined) {
-          builder.appendPlain(`\ninput: ${oneLine(JSON.stringify(segment.rawInput))}`);
-        }
-        if (this.mode === "raw" && segment.content) {
-          builder.appendPlain(`\nresult: ${oneLine(segment.content)}`);
-        }
-        if (this.mode === "raw" && segment.rawOutput !== undefined) {
-          builder.appendPlain(`\nraw output: ${oneLine(JSON.stringify(segment.rawOutput))}`);
-        }
+  rich(options: { final: boolean; collapseTools: boolean; includeTools?: boolean }): InputRichMessageWithoutUpload {
+    const snapshot = this.snapshot();
+    if (options.final) return { markdown: this.finalMarkdown(options.collapseTools, options.includeTools ?? true) };
+    const blocks: RichBlock[] = [];
+    if (snapshot.prose.trim()) {
+      for (const paragraph of snapshot.prose.trim().split(/\n\s*\n/)) blocks.push({ type: "paragraph", text: paragraph });
+    }
+    const includeTools = options.includeTools ?? true;
+    const active = snapshot.tools.filter((tool) => !tool.finishedAt);
+    const completed = snapshot.tools.filter((tool) => tool.finishedAt);
+    if (includeTools && !options.collapseTools) {
+      for (const tool of snapshot.tools) blocks.push(this.toolBlock(tool));
+    } else if (includeTools && completed.length && active.length === 0) {
+      const elapsed = Math.max(1, Math.round((Date.now() - this.startedAt) / 1000));
+      blocks.push({
+        type: "details", summary: `Worked for ${elapsed}s · ${completed.length} tool${completed.length === 1 ? "" : "s"}`,
+        blocks: completed.map((tool) => ({ type: "paragraph" as const, text: `${tool.status === "failed" ? "✗" : "✓"} ${redactSecrets(tool.title)}` })),
       });
     }
+    const activity = active.at(-1);
+    const text = activity ? `λ ${redactSecrets(activity.title)}`
+      : snapshot.thought.trim() ? `λ ${snapshot.thought.trim().slice(-600)}` : "λ Thinking…";
+    blocks.push({ type: "thinking", text });
+    if (blocks.length === 0) blocks.push({ type: "paragraph", text: "Thinking…" });
+    return { blocks };
+  }
 
-    if (this.stopReason && this.stopReason !== "end_turn" && this.mode === "raw") {
-      blocks.push((builder) => builder.appendPlain(`[stopped: ${this.stopReason}]`));
+  private finalMarkdown(collapseTools: boolean, includeTools: boolean): string {
+    const snapshot = this.snapshot();
+    const parts: string[] = [];
+    if (snapshot.prose.trim()) parts.push(snapshot.prose.trim());
+    if (includeTools && snapshot.tools.length) {
+      if (collapseTools) {
+        const elapsed = Math.max(1, Math.round((Date.now() - this.startedAt) / 1000));
+        const rows = snapshot.tools.map((tool) =>
+          `<p>${tool.status === "failed" ? "✗" : "✓"} ${escapeHtml(redactSecrets(tool.title))}</p>`
+        ).join("");
+        parts.push(
+          `<details><summary>Worked for ${elapsed}s · ${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"}</summary>${rows}</details>`,
+        );
+      } else {
+        parts.push(...snapshot.tools.map((tool) => this.toolMarkdown(tool)));
+      }
     }
+    if (snapshot.diagnostics.length) {
+      const rows = snapshot.diagnostics.map((text) => `<p>${escapeHtml(text)}</p>`).join("");
+      parts.push(
+        `<details><summary>${snapshot.diagnostics.length} 𝒇x diagnostic${snapshot.diagnostics.length === 1 ? "" : "s"}</summary>${rows}</details>`,
+      );
+    }
+    return parts.join("\n\n") || "Done.";
+  }
 
-    const builder = new FormattedTextBuilder();
-    blocks.forEach((block, index) => {
-      if (index > 0) builder.appendPlain("\n\n");
-      block(builder);
-    });
+  private toolMarkdown(tool: ToolState): string {
+    const input = stringify(tool.input);
+    const output = stringify(tool.output);
+    const body = [input && `<pre><code class="language-json">${escapeHtml(input)}</code></pre>`,
+      output && `<pre><code class="language-json">${escapeHtml(output)}</code></pre>`]
+      .filter(Boolean).join("") || `<p>${escapeHtml(tool.status)}</p>`;
+    return `<details><summary>${tool.finishedAt ? (tool.status === "failed" ? "✗" : "✓") : "λ"} ${escapeHtml(redactSecrets(tool.title))}</summary>${body}</details>`;
+  }
 
-    return builder.build();
+  private toolBlock(tool: ToolState): RichBlock {
+    const details: RichBlock[] = [];
+    const input = stringify(tool.input);
+    const output = stringify(tool.output);
+    if (input) details.push({ type: "pre", language: "json", text: input });
+    if (output) details.push({ type: "pre", language: "json", text: output });
+    if (details.length === 0) details.push({ type: "paragraph", text: tool.status });
+    return { type: "details", summary: `${tool.finishedAt ? (tool.status === "failed" ? "✗" : "✓") : "λ"} ${redactSecrets(tool.title)}`, blocks: details };
+  }
+
+  plainFinal(includeTools: boolean): string {
+    const snapshot = this.snapshot();
+    const parts = [snapshot.prose.trim()];
+    if (includeTools && snapshot.tools.length) parts.push(snapshot.tools.map((tool) => `${tool.status === "failed" ? "✗" : "✓"} ${redactSecrets(tool.title)}`).join("\n"));
+    return parts.filter(Boolean).join("\n\n") || "Done.";
   }
 }

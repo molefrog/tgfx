@@ -1,3 +1,0 @@
-TELEFX_RESOURCE_SENTINEL=NEBULA_5827
-This file exists only to verify that FX resolves an ACP resource_link instead
-of merely exposing the linked file's name or URI to the model.

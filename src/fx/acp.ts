@@ -1,289 +1,283 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
-import type { FxAcpEvent } from "./types";
-import { AcpTranscript } from "./transcript";
 
-class AsyncQueue<T> implements AsyncIterableIterator<T> {
-  private values: T[] = [];
-  private waiters: Array<{
-    resolve: (result: IteratorResult<T>) => void;
-    reject: (error: unknown) => void;
-  }> = [];
-  private ended = false;
-  private failure: unknown;
+export type FxSessionInfo = {
+  sessionId: string;
+  agentName: string;
+  agentVersion: string;
+  model: string;
+  mode: string;
+  replacedPrevious: boolean;
+};
 
-  push(value: T): void {
-    if (this.ended) return;
-    const waiter = this.waiters.shift();
-    if (waiter) waiter.resolve({ value, done: false });
-    else this.values.push(value);
+export type FxPermissionHandler = (
+  request: acp.RequestPermissionRequest,
+) => Promise<acp.RequestPermissionResponse>;
+
+type McpOptions = { command: string; args: string[]; env: Record<string, string> };
+type Deferred<T> = { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void };
+const START_TIMEOUT_MS = 30_000;
+const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
+
+export function sanitizeFxEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean = { ...environment };
+  delete clean.TELEGRAM_BOT_TOKEN;
+  for (const name of Object.keys(clean)) {
+    if (name.startsWith("TGFX_MCP_") || name.startsWith("TGFX_INTERNAL_TELEGRAM_")) delete clean[name];
   }
-
-  end(): void {
-    if (this.ended) return;
-    this.ended = true;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter.resolve({ value: undefined, done: true });
-    }
-  }
-
-  fail(error: unknown): void {
-    if (this.ended) return;
-    this.failure = error;
-    this.ended = true;
-    for (const waiter of this.waiters.splice(0)) waiter.reject(error);
-  }
-
-  next(): Promise<IteratorResult<T>> {
-    const value = this.values.shift();
-    if (value !== undefined) return Promise.resolve({ value, done: false });
-    if (this.failure !== undefined) return Promise.reject(this.failure);
-    if (this.ended) return Promise.resolve({ value: undefined, done: true });
-
-    return new Promise((resolve, reject) => {
-      this.waiters.push({ resolve, reject });
-    });
-  }
-
-  [Symbol.asyncIterator](): AsyncIterableIterator<T> {
-    return this;
-  }
+  return clean;
 }
 
-function selectValue(
-  options: acp.SessionConfigOption[] | null | undefined,
-  id: string,
-): { current: string; count: number; values: string[] } | undefined {
-  const option = options?.find(
-    (candidate) => candidate.id === id && candidate.type === "select",
-  );
-  if (!option || option.type !== "select") return undefined;
-
-  const values = option.options.flatMap((candidate) =>
-    "value" in candidate
-      ? [candidate.value]
-      : candidate.options.map((nested) => nested.value)
-  );
-
-  return {
-    current: option.currentValue,
-    count: values.length,
-    values,
-  };
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 
-async function stopProcess(process: ChildProcessWithoutNullStreams): Promise<void> {
-  if (process.exitCode !== null || process.signalCode !== null) return;
-  process.kill("SIGTERM");
+function selectValue(options: acp.SessionConfigOption[] | null | undefined, id: string): string | undefined {
+  const option = options?.find((candidate) => candidate.id === id && candidate.type === "select");
+  return option?.type === "select" ? option.currentValue : undefined;
+}
 
+function rejectPermission(request: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
+  const option = request.options.find((item) => item.kind === "reject_once")
+    ?? request.options.find((item) => item.kind === "reject_always");
+  return option
+    ? { outcome: { outcome: "selected", optionId: option.optionId } }
+    : { outcome: { outcome: "cancelled" } };
+}
+
+function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch { /* fall back to the direct child below */ }
+  }
+  child.kill(signal);
+}
+
+async function waitForExit(child: ChildProcessWithoutNullStreams, milliseconds: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   await Promise.race([
-    new Promise<void>((resolve) => process.once("exit", () => resolve())),
-    Bun.sleep(1_000),
+    new Promise<void>((resolve) => child.once("exit", () => resolve())),
+    Bun.sleep(milliseconds),
   ]);
+}
 
-  if (process.exitCode === null && process.signalCode === null) {
-    process.kill("SIGKILL");
+async function terminate(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  signalProcessTree(child, "SIGTERM");
+  await waitForExit(child, 2_000);
+  if (child.exitCode === null && child.signalCode === null) {
+    signalProcessTree(child, "SIGKILL");
+    await waitForExit(child, 1_000);
   }
 }
 
-async function executeFxTurn(options: {
-  queue: AsyncQueue<FxAcpEvent>;
-  prompt: string;
-  workspace: string;
-  binary: string;
-  model?: string;
-  transcriptPath?: string;
-  signal: AbortSignal;
-}): Promise<void> {
-  const { queue, prompt, workspace, binary, model, transcriptPath, signal } = options;
-  const transcript = transcriptPath
-    ? await AcpTranscript.create(transcriptPath)
-    : undefined;
-  const args = ["acp", ...(model ? ["--model", model] : [])];
-  const fx = spawn(binary, args, {
-    cwd: workspace,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let processError: Error | undefined;
-  const spawnFailure = new Promise<never>((_resolve, reject) => {
-    fx.once("error", (error) => {
-      processError = error;
-      reject(error);
+export class FxRouteSession {
+  private child?: ChildProcessWithoutNullStreams;
+  private context?: acp.ClientContext;
+  private sessionId?: string;
+  private connectTask?: Promise<void>;
+  private ready = deferred<FxSessionInfo>();
+  private closeGate = deferred<void>();
+  private currentPermission?: FxPermissionHandler;
+  private updateListeners = new Set<(update: acp.SessionUpdate) => void | Promise<void>>();
+  private closed = false;
+  private connectionError?: unknown;
+  private stderr = "";
+
+  constructor(private readonly options: {
+    workspace: string;
+    binary: string;
+    model?: string;
+    previousSessionId?: string;
+    mcp?: McpOptions;
+    onUpdate?: (update: acp.SessionUpdate) => void | Promise<void>;
+  }) {
+    if (options.onUpdate) this.updateListeners.add(options.onUpdate);
+  }
+
+  async start(): Promise<FxSessionInfo> {
+    if (!this.connectTask) {
+      this.connectTask = this.connect().catch((error) => { this.connectionError = error; });
+    }
+    return Promise.race([
+      this.ready.promise,
+      Bun.sleep(START_TIMEOUT_MS).then(() => { throw new Error("fx ACP did not initialize within 30 seconds"); }),
+    ]);
+  }
+
+  private async connect(): Promise<void> {
+    const args = ["acp", ...(this.options.model ? ["--model", this.options.model] : [])];
+    const child = spawn(this.options.binary, args, {
+      cwd: this.options.workspace,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      // Bun loads `.env` into the host process. FX and its ordinary shell tools
+      // must never inherit the Telegram token; only the scoped MCP subprocess
+      // receives credentials through its ACP launch descriptor.
+      env: sanitizeFxEnvironment(process.env),
     });
-  });
+    this.child = child;
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-16_384); });
+    const spawnError = deferred<never>();
+    child.once("error", (error) => spawnError.reject(error));
 
-  let stderr = "";
-  fx.stderr.setEncoding("utf8");
-  fx.stderr.on("data", (chunk: string) => {
-    stderr = (stderr + chunk).slice(-8_192);
-  });
-
-  const abort = () => void stopProcess(fx);
-  signal.addEventListener("abort", abort, { once: true });
-
-  try {
-    const processInput = Writable.toWeb(fx.stdin) as unknown as WritableStream<
-      Uint8Array
-    >;
-    const processOutput = Readable.toWeb(fx.stdout) as unknown as ReadableStream<
-      Uint8Array
-    >;
-    const input = transcript?.tapWritable(processInput) ?? processInput;
-    const output = transcript?.tapReadable(processOutput) ?? processOutput;
+    const input = Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>;
+    const output = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
     const stream = acp.ndJsonStream(input, output);
-
-    const client = acp
-      .client({ name: "telefx" })
-      .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
-        // The first POC runs a fixed read-only prompt. Unexpected permission
-        // requests are surfaced to Telegram and rejected, never auto-approved.
-        const rejection = params.options.find(
-          (option) => option.kind === "reject_once",
-        ) ?? params.options.find((option) => option.kind === "reject_always");
-
-        queue.push({
-          type: "permission_requested",
-          request: params,
-          selectedOptionId: rejection?.optionId,
-        });
-
-        if (!rejection) return { outcome: { outcome: "cancelled" } };
-        return {
-          outcome: {
-            outcome: "selected",
-            optionId: rejection.optionId,
-          },
-        };
+    const app = acp.client({ name: "tgfx" })
+      .onNotification(acp.methods.client.session.update, async ({ params }) => {
+        for (const listener of this.updateListeners) await listener(params.update);
+      })
+      .onRequest(acp.methods.client.session.requestPermission, async ({ params }) => {
+        return this.currentPermission ? this.currentPermission(params) : rejectPermission(params);
       });
 
-    const connection = client.connectWith(stream, async (ctx) => {
+    const connection = app.connectWith(stream, async (ctx) => {
+      this.context = ctx;
       const initialized = await ctx.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: {
-          session: { configOptions: { boolean: {} } },
-        },
-        clientInfo: {
-          name: "telefx",
-          title: "telefx Telegram bridge",
-          version: "0.1.0",
-        },
+        clientCapabilities: { session: { configOptions: { boolean: {} } } },
+        clientInfo: { name: "tgfx", title: "𝒕𝒈(𝒇x)", version: "0.1.0" },
       });
+      const mcpServers: acp.McpServer[] = this.options.mcp ? [{
+        name: "telegram",
+        command: this.options.mcp.command,
+        args: this.options.mcp.args,
+        env: Object.entries(this.options.mcp.env).map(([name, value]) => ({ name, value })),
+      }] : [];
 
-      await ctx.buildSession(workspace).withSession(async (session) => {
-        const modelOption = selectValue(
-          session.newSessionResponse.configOptions,
-          "model",
-        );
-        const modeOption = selectValue(
-          session.newSessionResponse.configOptions,
-          "mode",
-        );
+      let response: acp.NewSessionResponse | acp.LoadSessionResponse;
+      let replacedPrevious = false;
+      if (this.options.previousSessionId && initialized.agentCapabilities?.loadSession) {
+        try {
+          response = await ctx.request(acp.methods.agent.session.load, {
+            sessionId: this.options.previousSessionId,
+            cwd: this.options.workspace,
+            mcpServers,
+          });
+          this.sessionId = this.options.previousSessionId;
+        } catch {
+          replacedPrevious = true;
+          const created = await ctx.request(acp.methods.agent.session.new, {
+            cwd: this.options.workspace,
+            mcpServers,
+          });
+          response = created;
+          this.sessionId = created.sessionId;
+        }
+      } else {
+        replacedPrevious = Boolean(this.options.previousSessionId);
+        const created = await ctx.request(acp.methods.agent.session.new, {
+          cwd: this.options.workspace,
+          mcpServers,
+        });
+        response = created;
+        this.sessionId = created.sessionId;
+      }
 
-        if (
-          modeOption
-          && modeOption.current !== "ask"
-          && modeOption.values.includes("ask")
-        ) {
+      const configOptions = "configOptions" in response ? response.configOptions : undefined;
+      const modes = "modes" in response ? response.modes : undefined;
+      const mode = modes?.currentModeId ?? selectValue(configOptions, "mode") ?? "ask";
+      const model = selectValue(configOptions, "model") ?? this.options.model ?? "default";
+      if (mode !== "ask") {
+        const canSetMode = modes?.availableModes.some((candidate) => candidate.id === "ask");
+        if (canSetMode) {
+          await ctx.request(acp.methods.agent.session.setMode, {
+            sessionId: this.sessionId,
+            modeId: "ask",
+          });
+        } else {
+          // Compatibility with agents that model permission mode as a config
+          // option instead of ACP's dedicated session mode state.
+          const option = configOptions?.find((candidate) => candidate.id === "mode" && candidate.type === "select");
+          const canAsk = option?.type === "select" && option.options.some((entry) =>
+            "value" in entry ? entry.value === "ask" : entry.options.some((nested) => nested.value === "ask")
+          );
+          if (!canAsk) throw new Error(`fx ACP does not expose the required ask mode (current: ${mode})`);
           await ctx.request(acp.methods.agent.session.setConfigOption, {
-            sessionId: session.sessionId,
+            sessionId: this.sessionId,
             configId: "mode",
             value: "ask",
           });
         }
-
-        queue.push({
-          type: "session_started",
-          sessionId: session.sessionId,
-          agentName: initialized.agentInfo?.title
-            ?? initialized.agentInfo?.name
-            ?? "fx",
-          agentVersion: initialized.agentInfo?.version ?? "unknown",
-          model: modelOption?.current ?? model ?? "unknown",
-          mode: "ask",
-          availableModelCount: modelOption?.count ?? 0,
-        });
-
-        const resultPromise = session.prompt(prompt);
-        for (;;) {
-          if (signal.aborted) throw signal.reason ?? new Error("FX turn aborted");
-          const message = await session.nextUpdate();
-
-          if (message.kind === "stop") {
-            queue.push({
-              type: "turn_completed",
-              stopReason: message.stopReason,
-            });
-            break;
-          }
-
-          queue.push({ type: "session_update", update: message.update });
-        }
-
-        await resultPromise;
+      }
+      const sessionId = this.sessionId;
+      if (!sessionId) throw new Error("fx did not return a session ID");
+      this.ready.resolve({
+        sessionId,
+        agentName: initialized.agentInfo?.title ?? initialized.agentInfo?.name ?? "fx",
+        agentVersion: initialized.agentInfo?.version ?? "unknown",
+        model,
+        mode: "ask",
+        replacedPrevious,
       });
+      await this.closeGate.promise;
     });
-    await Promise.race([connection, spawnFailure]);
-  } catch (error) {
-    // A failed spawn can close stdio just before Node delivers the child
-    // process error event. Give that event one tick so the useful ENOENT wins
-    // over the SDK's generic "connection closed" error.
-    if (!processError) {
+
+    try {
+      await Promise.race([connection, spawnError.promise]);
+      if (!this.closed) throw new Error(`fx ACP connection closed${this.stderr ? `: ${this.stderr.trim()}` : ""}`);
+    } catch (error) {
+      this.ready.reject(error);
+      if (!this.closed) throw error;
+    }
+  }
+
+  onUpdate(listener: (update: acp.SessionUpdate) => void | Promise<void>): () => void {
+    this.updateListeners.add(listener);
+    return () => this.updateListeners.delete(listener);
+  }
+
+  async prompt(
+    blocks: acp.ContentBlock[],
+    handlers: { permission?: FxPermissionHandler; signal?: AbortSignal } = {},
+  ): Promise<acp.PromptResponse> {
+    const bytes = Buffer.byteLength(JSON.stringify(blocks));
+    if (bytes > MAX_PROMPT_BYTES) {
+      throw new Error(`Telegram prompt is too large for ACP (${bytes} bytes; limit ${MAX_PROMPT_BYTES})`);
+    }
+    await this.start();
+    if (this.connectionError) throw this.connectionError;
+    if (!this.context || !this.sessionId) throw new Error("fx ACP session is not ready");
+    if (handlers.signal?.aborted) throw handlers.signal.reason;
+    this.currentPermission = handlers.permission;
+    const abort = () => void this.cancel();
+    handlers.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      return await this.context.request(acp.methods.agent.session.prompt, {
+        sessionId: this.sessionId,
+        prompt: blocks,
+      });
+    } finally {
+      handlers.signal?.removeEventListener("abort", abort);
+      this.currentPermission = undefined;
+    }
+  }
+
+  async cancel(): Promise<void> {
+    if (this.context && this.sessionId) {
+      await this.context.notify(acp.methods.agent.session.cancel, { sessionId: this.sessionId }).catch(() => undefined);
+    }
+  }
+
+  async dispose(options: { closeSession?: boolean } = {}): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    if (options.closeSession && this.context && this.sessionId) {
       await Promise.race([
-        spawnFailure.catch(() => undefined),
-        Bun.sleep(25),
+        this.context.request(acp.methods.agent.session.close, { sessionId: this.sessionId }).catch(() => undefined),
+        Bun.sleep(1_000),
       ]);
     }
-    if (processError) {
-      throw new Error(`Unable to start ${binary}: ${processError.message}`, {
-        cause: processError,
-      });
-    }
-    if (stderr.trim() && error instanceof Error) {
-      throw new Error(`${error.message}\nfx stderr: ${stderr.trim()}`, {
-        cause: error,
-      });
-    }
-    throw error;
-  } finally {
-    signal.removeEventListener("abort", abort);
-    await stopProcess(fx);
-    await transcript?.close();
-  }
-}
-
-export async function* streamFxAcp(options: {
-  prompt: string;
-  workspace: string;
-  binary?: string;
-  model?: string;
-  transcriptPath?: string;
-  signal?: AbortSignal;
-}): AsyncGenerator<FxAcpEvent> {
-  const queue = new AsyncQueue<FxAcpEvent>();
-  const controller = new AbortController();
-  const forwardAbort = () => controller.abort(options.signal?.reason);
-  options.signal?.addEventListener("abort", forwardAbort, { once: true });
-
-  const execution = executeFxTurn({
-    queue,
-    prompt: options.prompt,
-    workspace: options.workspace,
-    binary: options.binary ?? "fx",
-    model: options.model,
-    transcriptPath: options.transcriptPath,
-    signal: controller.signal,
-  }).then(
-    () => queue.end(),
-    (error) => queue.fail(error),
-  );
-
-  try {
-    for await (const event of queue) yield event;
-    await execution;
-  } finally {
-    controller.abort(new Error("FX event consumer closed"));
-    options.signal?.removeEventListener("abort", forwardAbort);
-    await execution.catch(() => undefined);
+    this.closeGate.resolve();
+    if (this.child) await terminate(this.child);
+    await this.connectTask;
   }
 }

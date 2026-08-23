@@ -1,25 +1,62 @@
 # 𝒕𝒈(𝒇x)
 
-Tiny, local Telegram bridge for [fx](https://github.com/vercel-labs/fx).
+Run a local [𝒇x](https://github.com/vercel-labs/fx) agent through one Telegram
+bot. `tgfx` lazily starts `fx acp` in the current folder, sends allowed Telegram
+messages into a route-specific 𝒇x session, streams rich drafts in private chats,
+and delivers a permanent rich response when the turn finishes.
 
-`tgfx` runs in the current directory, starts `fx acp`, turns approved Telegram
-messages into FX turns, and renders the result back into Telegram. FX remains the
-agent; tgfx only owns transport, routing, rendering, and delivery reliability.
+𝒇x remains the agent. `tgfx` owns only Telegram transport, scoped Telegram MCP
+actions, rendering, approvals, and the small recovery journal needed between
+processes.
 
-One process owns exactly one bot and the current workspace. The same bot cannot
-run in another workspace until the first `tgfx` process stops.
+## Run from source
 
-Startup requires an explicit Telegram user/chat allowlist and a control chat for
-approvals. Messages outside that allowlist are silently dropped.
+Requirements: macOS or Linux, [Bun](https://bun.sh), an authenticated `fx 0.0.5`
+or newer, and a Telegram bot token from BotFather.
 
-Reliability is explicit: durable inbound acceptance, ordered turns, best-effort
-drafts, at-least-once final replies, and no blind replay of uncertain FX or MCP
-side effects.
+```bash
+bun install
+bun link
 
-Display name: **𝒕𝒈(𝒇x)** · repository: `telegram-fx` · package/CLI: `tgfx`
+cd /path/to/your/project
+tgfx
+```
 
-> Status: design RFC. The current proof-of-concept code is experimental evidence
-> and will be replaced. The behavior described below is not shipped yet.
+The first run validates the token, then either gives you a private Telegram
+deep link for one-click owner pairing or accepts one numeric user/chat ID for an
+advanced setup. It verifies the control chat by sending a setup message and
+writes non-secret settings to `.tgfx/config.json`. Add more principals later with
+`tgfx access`. The token goes to the operating-system credential store under the
+bot's numeric ID. `TELEGRAM_BOT_TOKEN` may be used instead and is never saved by
+`tgfx`.
 
-Read the [project specification](./doc/SPEC.md). Architecture canvases remain
-local design artifacts and are not stored in the repository.
+One process owns one bot and one current folder. A machine-wide lock prevents the
+same bot from polling in two workspaces at once. Messages outside the required
+numeric allowlist are discarded without retaining their content.
+
+## Useful commands
+
+```text
+tgfx [--model <id>] [--no-streaming] [--no-collapse-tools]
+tgfx auth
+tgfx access [--allow-user <id>] [--allow-chat <id>]
+tgfx admin --chat <group-id> --capabilities pins,topics,...
+tgfx routes
+tgfx doctor
+```
+
+Telegram has `/fx`, `/cancel`, `/new`, `/retry`, and `/discard`. Commands
+advertised by the active 𝒇x ACP session are added to that chat's slash menu. When
+`--model` pins the process model, `/model` is intentionally omitted.
+
+Private chats stream complete Rich Message snapshots through Telegram's draft
+API. Groups and `--no-streaming` receive one final message. `--no-collapse-tools`
+keeps the 𝒇x tool timeline visible; otherwise completed tools are compacted.
+
+The local `.tgfx/state.sqlite` file is an operational journal, not a chat archive:
+accepted inbound and final-delivery bodies are scrubbed after success, drafts are
+not stored, raw ACP transcripts are off, and opaque references prevent the model
+from choosing raw Telegram IDs or Bot API file URLs.
+
+Read the full [specification](./doc/SPEC.md). Local whiteboards and experiments
+are intentionally excluded from the repository.
