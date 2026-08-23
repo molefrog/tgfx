@@ -49,7 +49,7 @@ describe("Telegram renderer boundaries", () => {
     const directory = await mkdtemp(join(tmpdir(), "tgfx-renderer-"));
     const state = new StateStore(join(directory, "state.sqlite"));
     try {
-      state.registerBot({ id: "1", displayName: "Bot" });
+      state.ensurePollState("1");
       state.ensureRoute({ key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" });
       state.createOutbox({
         effectKey: "final:1:1", botId: "1", routeKey: "1:2:0", kind: "rich_final",
@@ -67,7 +67,7 @@ describe("Telegram renderer boundaries", () => {
       await recoverOutbox(api, state);
 
       expect(sent).toEqual(["Recovered answer"]);
-      expect(state.pendingOutbox()).toHaveLength(0);
+      expect(state.recoverableOutbox()).toHaveLength(0);
       expect(state.messageReferenceByTelegramId("1", "2", "91")?.owned_by_bot).toBe(1);
     } finally {
       state.close();

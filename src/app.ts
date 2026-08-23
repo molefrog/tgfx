@@ -134,7 +134,7 @@ export class TgfxApp {
     log?: (message: string) => void;
   }) {
     this.state = new StateStore(options.paths.database);
-    this.state.registerBot(options.bot);
+    this.state.ensurePollState(options.bot.id);
   }
 
   private log(message: string): void { (this.options.log ?? console.log)(message); }
@@ -190,7 +190,7 @@ export class TgfxApp {
     for (const [id, waiter] of this.permissionWaiters) {
       const reject = waiter.options.find((option) => option.kind === "reject_once")
         ?? waiter.options.find((option) => option.kind === "reject_always");
-      this.state.expireApproval(id);
+      this.state.expireInteraction(id);
       expiredCards.push(this.options.telegram.editReplyMarkup(
         this.options.config.controlChat.chatId,
         waiter.messageId,
@@ -729,8 +729,10 @@ export class TgfxApp {
         await this.options.telegram.answerCallback(callback.id, "This approval belongs to the control chat");
         return;
       }
-      const accepted = this.state.resolveApproval(id, value);
-      if (!accepted) this.state.expireApproval(id);
+      const approval = this.state.interaction(id);
+      const accepted = approval?.kind.startsWith("telegram_admin:") === true
+        && this.state.resolveInteraction(id, value);
+      if (!accepted) this.state.expireInteraction(id);
       await this.options.telegram.answerCallback(callback.id, accepted ? `Action ${value}d` : "This approval expired");
       if ("message_id" in callback.message) {
         await this.options.telegram.editReplyMarkup(route.chatId, callback.message.message_id, {
@@ -747,12 +749,17 @@ export class TgfxApp {
       const waiter = this.permissionWaiters.get(id);
       const option = waiter?.options[Number(value)];
       if (!waiter || !option) {
-        this.state.expireApproval(id);
+        this.state.expireInteraction(id);
+        await this.options.telegram.answerCallback(callback.id, "This permission request expired");
+        return;
+      }
+      const approval = this.state.interaction(id);
+      if (approval?.kind !== "fx_permission" || !this.state.resolveInteraction(id, option.optionId)) {
+        this.state.expireInteraction(id);
         await this.options.telegram.answerCallback(callback.id, "This permission request expired");
         return;
       }
       this.permissionWaiters.delete(id);
-      this.state.resolveApproval(id, option.optionId);
       waiter.resolve({ outcome: { outcome: "selected", optionId: option.optionId } });
       await this.options.telegram.answerCallback(callback.id, option.name);
       if ("message_id" in callback.message) {
@@ -949,9 +956,13 @@ export class TgfxApp {
   ): Promise<acp.RequestPermissionResponse> {
     const id = crypto.randomUUID().replaceAll("-", "");
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-    this.state.createApproval({
+    this.state.createInteraction({
       id, botId: this.options.bot.id, routeKey: route.key, kind: "fx_permission",
-      prompt: request.toolCall.title ?? "𝒇x tool permission", options: request.options, expiresAt,
+      payload: {
+        prompt: request.toolCall.title ?? "𝒇x tool permission",
+        options: request.options,
+      },
+      expiresAt,
     });
     const keyboard = request.options.map((option, index) => [{
       text: option.name,
@@ -965,9 +976,8 @@ export class TgfxApp {
         this.options.config.controlChat.topicId,
         { reply_markup: { inline_keyboard: keyboard } },
       );
-      this.state.setApprovalMessage(id, String(card.message_id));
     } catch (error) {
-      this.state.expireApproval(id);
+      this.state.expireInteraction(id);
       throw error;
     }
     return new Promise<acp.RequestPermissionResponse>((resolve) => {
@@ -983,9 +993,10 @@ export class TgfxApp {
       });
       void (async () => {
         while (!settled && !signal?.aborted && Date.now() < Date.parse(expiresAt)) {
-          const approval = this.state.approval(id);
-          if (approval?.state === "resolved" && approval.result) {
-            const selected = request.options.find((option) => option.optionId === approval.result);
+          const approval = this.state.interaction(id);
+          if (approval?.state === "resolved" && approval.result_json) {
+            const result = JSON.parse(approval.result_json) as unknown;
+            const selected = request.options.find((option) => option.optionId === result);
             if (selected) {
               finish({ outcome: { outcome: "selected", optionId: selected.optionId } });
               return;
@@ -996,7 +1007,7 @@ export class TgfxApp {
         if (settled) return;
         const reject = request.options.find((option) => option.kind === "reject_once")
           ?? request.options.find((option) => option.kind === "reject_always");
-        if (this.state.expireApproval(id)) {
+        if (this.state.expireInteraction(id)) {
           await this.options.telegram.editReplyMarkup(
             this.options.config.controlChat.chatId,
             card.message_id,

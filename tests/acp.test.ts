@@ -58,10 +58,8 @@ describe("FX ACP transport", () => {
       const info = await session.start();
       expect(info).toEqual({
         sessionId: "fake-new-session",
-        agentName: "Fake 𝒇x",
         agentVersion: "9.9.9",
         model: "pinned-model",
-        mode: "ask",
         replacedPrevious: true,
       });
 

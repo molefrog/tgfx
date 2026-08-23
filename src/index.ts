@@ -16,7 +16,7 @@ import { acquireRuntimeLock } from "./lock";
 import { runTelegramMcpServer } from "./mcp/server";
 import { getBotToken, setBotToken, tokenFromEnvironment } from "./secrets";
 import { StateStore } from "./state";
-import { TelegramApi } from "./telegram/api";
+import { adminCapabilitiesForMember, TelegramApi } from "./telegram/api";
 import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairing";
 import type { BotIdentity, TgfxConfig } from "./types";
 import { inspectFx } from "./fx/preflight";
@@ -175,7 +175,7 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
   if (pairedUpdateId !== undefined) {
     const state = new StateStore(paths.database);
     try {
-      state.registerBot(bot);
+      state.ensurePollState(bot.id);
       state.advanceCursor(bot.id, pairedUpdateId + 1);
     } finally { state.close(); }
   }
@@ -245,9 +245,7 @@ async function runtime(paths = workspacePaths(), options: { json?: boolean } = {
       throw new Error(`This bot has a webhook configured (${webhook.url}); tgfx needs long polling.`);
     }
     if (prompted) await setBotToken(bot.id, token);
-    await updateBotIndex({
-      botId: bot.id, username: bot.username, workspace: paths.workspace, updatedAt: new Date().toISOString(),
-    });
+    await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
     return { paths, config, token, telegram, bot, fxBinary, release };
   } catch (error) {
     await release();
@@ -286,7 +284,7 @@ const authCommand = defineCommand({
         if (previous !== bot.id) note(`Switched from bot ${previous}. Existing route history remains partitioned by bot ID.`);
       }
       if (!environmentToken) await setBotToken(bot.id, token);
-      await updateBotIndex({ botId: bot.id, username: bot.username, workspace: paths.workspace, updatedAt: new Date().toISOString() });
+      await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
       outro(`Connected @${bot.username ?? bot.id}.`);
     } finally {
       await release();
@@ -372,17 +370,9 @@ const adminCommand = defineCommand({
           if (member.status !== "administrator" && member.status !== "creator") {
             throw new Error("The bot is not an administrator in that chat.");
           }
-          if (member.status === "administrator") {
-            const rights: Record<string, boolean | undefined> = {
-              pins: member.can_pin_messages,
-              topics: member.can_manage_topics,
-              delete_messages: member.can_delete_messages,
-              moderation: member.can_restrict_members,
-              join_requests: member.can_invite_users,
-            };
-            const missing = capabilities.filter((capability) => !rights[capability]);
-            if (missing.length) throw new Error(`The bot lacks Telegram rights for: ${missing.join(", ")}`);
-          }
+          const granted = adminCapabilitiesForMember(member);
+          const missing = capabilities.filter((capability) => !granted.has(capability as TgfxConfig["admin"]["capabilities"][number]));
+          if (missing.length) throw new Error(`The bot lacks Telegram rights for: ${missing.join(", ")}`);
           config.admin = { chatIds: [args.chat], capabilities: capabilities as TgfxConfig["admin"]["capabilities"] };
         }
         await saveConfig(paths, config);
@@ -445,15 +435,8 @@ const doctorCommand = defineCommand({
           for (const chatId of config.admin.chatIds) {
             try {
               const member = await telegram.api.getChatMember(chatId, Number(bot.id));
-              const creator = member.status === "creator";
-              const rights: Record<TgfxConfig["admin"]["capabilities"][number], boolean> = {
-                pins: creator || (member.status === "administrator" && Boolean(member.can_pin_messages)),
-                topics: creator || (member.status === "administrator" && Boolean(member.can_manage_topics)),
-                delete_messages: creator || (member.status === "administrator" && Boolean(member.can_delete_messages)),
-                moderation: creator || (member.status === "administrator" && Boolean(member.can_restrict_members)),
-                join_requests: creator || (member.status === "administrator" && Boolean(member.can_invite_users)),
-              };
-              const missing = config.admin.capabilities.filter((capability) => !rights[capability]);
+              const granted = adminCapabilitiesForMember(member);
+              const missing = config.admin.capabilities.filter((capability) => !granted.has(capability));
               checks.push({
                 check: `admin ${chatId}`,
                 ok: missing.length === 0,
@@ -485,11 +468,6 @@ const doctorCommand = defineCommand({
   },
 });
 
-const mcpCommand = defineCommand({
-  meta: { name: "mcp", description: "Internal Telegram MCP stdio server", hidden: true },
-  async run() { await runTelegramMcpServer(); },
-});
-
 const startArgs = {
   model: { type: "string", description: "Pass the exact model ID to fx acp" },
   streaming: { type: "boolean", description: "Use private-chat rich drafts", negativeDescription: "Send one final message per turn" },
@@ -498,9 +476,16 @@ const startArgs = {
   "no-color": { type: "boolean", description: "Disable terminal color" },
 } as const;
 
-const startCommand = defineCommand({
+const main = defineCommand({
   meta: { name: "tgfx", version: VERSION, description: "Run 𝒇x in this folder through one Telegram bot" },
   args: startArgs,
+  subCommands: {
+    auth: authCommand,
+    access: accessCommand,
+    admin: adminCommand,
+    routes: routesCommand,
+    doctor: doctorCommand,
+  },
   async run({ args }) {
     if (args.noColor) process.env.NO_COLOR = "1";
     const resolved = await runtime(workspacePaths(), { json: Boolean(args.json) });
@@ -538,26 +523,8 @@ const startCommand = defineCommand({
   },
 });
 
-const main = defineCommand({
-  meta: { name: "tgfx", version: VERSION, description: "Run 𝒇x in this folder through one Telegram bot" },
-  args: startArgs,
-  subCommands: {
-    auth: authCommand,
-    access: accessCommand,
-    admin: adminCommand,
-    routes: routesCommand,
-    doctor: doctorCommand,
-    mcp: mcpCommand,
-  },
-});
-
 // MCP stdio owns stdout. Bypass Citty and Clack completely so no terminal UI
 // byte can corrupt its newline-delimited JSON-RPC channel.
 const requested = process.argv[2];
-const subcommands = new Set(["auth", "access", "admin", "routes", "doctor"]);
 if (requested === "mcp") await runTelegramMcpServer();
-else if (requested === "--help" || requested === "-h" || requested === "--version" || requested === "-v" || (requested && subcommands.has(requested))) {
-  await runMain(main);
-} else {
-  await runMain(startCommand);
-}
+else await runMain(main);

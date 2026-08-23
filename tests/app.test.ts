@@ -347,8 +347,8 @@ describe("tgfx host pipeline", () => {
     expect(events.find((entry) => entry.event === "permission_result")?.value.outcome.optionId).toBe("allow");
     const state = new StateStore(paths.database);
     try {
-      expect(state.db.query("SELECT state,result FROM approval_requests").get()).toEqual({
-        state: "resolved", result: "allow",
+      expect(state.db.query("SELECT state,result_json FROM telegram_interactions WHERE kind='fx_permission'").get()).toEqual({
+        state: "resolved", result_json: JSON.stringify("allow"),
       });
     } finally { state.close(); }
   });

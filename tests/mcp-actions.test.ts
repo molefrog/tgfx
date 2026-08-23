@@ -60,7 +60,7 @@ describe("Telegram MCP actions", () => {
     const database = join(workspace, ".tgfx", "state.sqlite");
     const files = join(workspace, ".tgfx", "files");
     const state = new StateStore(database);
-    state.registerBot({ id: "100", displayName: "Bot" });
+    state.ensurePollState("100");
     const inbound: InboundMessage = {
       updateId: 1,
       event: "message.created",
@@ -172,7 +172,7 @@ describe("Telegram MCP actions", () => {
     const files = join(workspace, ".tgfx", "files");
     const routeKey = "100:-9:0";
     const state = new StateStore(database);
-    state.registerBot({ id: "100", displayName: "Bot" });
+    state.ensurePollState("100");
     const inbound: InboundMessage = {
       updateId: 1, event: "message.created",
       route: { key: routeKey, botId: "100", chatId: "-9", topicId: "0", chatKind: "supergroup" },
@@ -245,13 +245,15 @@ describe("Telegram MCP actions", () => {
         try {
           let id: string | undefined;
           for (let attempt = 0; attempt < 100 && !id; attempt++) {
-            id = approvalState.db.query<{ approval_id: string }, []>(`
-              SELECT approval_id FROM approval_requests WHERE state='pending' ORDER BY updated_at DESC LIMIT 1
-            `).get()?.approval_id;
+            id = approvalState.db.query<{ interaction_id: string }, []>(`
+              SELECT interaction_id FROM telegram_interactions
+              WHERE state='pending' AND kind LIKE 'telegram_admin:%'
+              ORDER BY updated_at DESC LIMIT 1
+            `).get()?.interaction_id;
             if (!id) await Bun.sleep(10);
           }
           if (!id) throw new Error("admin approval was not created");
-          expect(approvalState.resolveApproval(id, "approve")).toBeTrue();
+          expect(approvalState.resolveInteraction(id, "approve")).toBeTrue();
         } finally { approvalState.close(); }
         const response = await operation;
         if (response.isError) throw new Error(JSON.stringify(response));

@@ -1,4 +1,5 @@
 import type { InputRichMessageWithoutUpload } from "grammy/types";
+import { setTimeout as delay } from "node:timers/promises";
 import type { RendererConfig, Route } from "../types";
 import { AcpProjector } from "../fx/projector";
 import { StateStore } from "../state";
@@ -39,24 +40,6 @@ export function splitTelegramText(text: string, limit = 4_000): string[] {
   return parts;
 }
 
-function abortableSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  if (!signal) return Bun.sleep(milliseconds);
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("Operation cancelled"));
-  return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(done, milliseconds);
-    const abort = () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
-      reject(signal.reason ?? new Error("Operation cancelled"));
-    };
-    function done() {
-      signal!.removeEventListener("abort", abort);
-      resolve();
-    }
-    signal.addEventListener("abort", abort, { once: true });
-  });
-}
-
 async function retryTelegram<T>(
   operation: () => Promise<T>,
   markAttempt?: () => void,
@@ -72,7 +55,7 @@ async function retryTelegram<T>(
       lastError = error;
       if (!isRetryableTelegramError(error) || attempt === RETRY_DELAYS_MS.length) break;
       const seconds = error instanceof TelegramError ? error.retryAfter : undefined;
-      await abortableSleep(seconds ? seconds * 1_000 : RETRY_DELAYS_MS[attempt]!, signal);
+      await delay(seconds ? seconds * 1_000 : RETRY_DELAYS_MS[attempt]!, undefined, { signal });
     }
   }
   throw lastError;
@@ -141,7 +124,7 @@ export class TurnRenderer {
           }
         }
       }
-      await abortableSleep(this.config.updateEveryMs, this.draftAbort.signal).catch(() => undefined);
+      await delay(this.config.updateEveryMs, undefined, { signal: this.draftAbort.signal }).catch(() => undefined);
     }
   }
 

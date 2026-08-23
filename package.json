@@ -10,8 +10,7 @@
   "files": [
     "src",
     "doc",
-    "README.md",
-    "tsconfig.json"
+    "README.md"
   ],
   "type": "module",
   "bin": {

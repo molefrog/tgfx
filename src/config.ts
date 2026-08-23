@@ -111,9 +111,7 @@ export async function pruneWorkspaceFiles(paths: WorkspacePaths, maxAgeMs = 7 * 
 
 export type BotIndexRecord = {
   botId: string;
-  username?: string;
   workspace: string;
-  updatedAt: string;
 };
 
 export async function findBotIndex(botId: string): Promise<BotIndexRecord | undefined> {

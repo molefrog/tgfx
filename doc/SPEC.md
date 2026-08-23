@@ -975,7 +975,7 @@ tgfx uses a few small storage locations:
 | Location | Contents | Lifetime |
 | --- | --- | --- |
 | OS credential store through `Bun.secrets` | Telegram bot token, keyed by actual bot ID | Until the user removes or rotates it. Bun uses macOS Keychain, Linux Secret Service/libsecret, or Windows Credential Manager. |
-| `~/.config/tgfx/bots.json` | Non-secret index of known bot IDs and usernames | Until removed. Needed because credential stores do not provide a portable enumeration API. |
+| `~/.config/tgfx/bots.json` | Non-secret mapping from bot ID to its last workspace | Until removed. Used to protect unfinished work when the bot moves between folders. |
 | `<user-state>/tgfx/locks/<bot_id>.lock` | Machine-wide process lock plus diagnostic workspace/PID metadata | Held while that bot is active; safely reclaimable after process death. |
 | `<workspace>/.tgfx/config.json` | Active bot ID and non-secret renderer/route defaults | Project-local. |
 | `<workspace>/.tgfx/state.sqlite` | Poll cursor, used routes, FX session references, and temporary inbox/outbox/effect/approval recovery rows | Operational; completed payloads expire. |
@@ -1002,8 +1002,8 @@ capabilities, and message payloads by default.
 
 The credential key is stable and inspectable in code: `service = "dev.tgfx"`
 and `name = "telegram:<bot_id>"`. Token rotation for the same bot overwrites that
-one secret. The global non-secret bot index lets onboarding find the bot ID again
-without requiring credential-store enumeration.
+one secret. The global non-secret bot index maps that validated ID to its last
+workspace so tgfx can require an explicit handoff when unfinished work exists.
 
 ### What SQLite is for
 
@@ -1033,9 +1033,6 @@ present and uses `"0"` outside a topic, avoiding SQLite's special `NULL` behavio
 inside unique constraints.
 
 ```text
-bot_accounts
-  bot_id PK, username, display_name, verified_at
-
 telegram_poll_state
   bot_id PK, next_offset, updated_at
 
@@ -1044,9 +1041,6 @@ routes
   bot_id, chat_id, topic_id, chat_kind
   session_id, generation
   dynamic_commands_json, last_prompt_json, updated_at
-
-scope_state
-  route_key PK -> routes, active_turn_id, last_inbox_id, updated_at
 
 telegram_principals
   ref PK, bot_id, route_key, principal_kind, telegram_id
@@ -1073,6 +1067,7 @@ telegram_outbox
 telegram_interactions
   interaction_id PK, bot_id, route_key, kind
   payload_json, state, result_json, expires_at, updated_at
+  -- choices, polls, join requests, FX permissions, and admin approvals
 
 managed_pins
   (bot_id, route_key) PK, message_ref, updated_at
@@ -1081,10 +1076,6 @@ effect_ledger
   effect_key PK, bot_id, route_key, tool_name
   state                          -- running/complete/unknown/failed
   result_json, error, created_at, updated_at
-
-approval_requests
-  approval_id PK, bot_id, route_key, kind, prompt, options_json
-  state, result, telegram_message_id, expires_at, updated_at
 
 context_capabilities
   context_ref PK, bot_id, route_key, chat_id, topic_id
@@ -1095,10 +1086,7 @@ context_capabilities
 Relationships:
 
 ```text
-bot_accounts 1 ── 1 telegram_poll_state
-bot_accounts 1 ── N routes
-routes       1 ── 0..1 scope_state
-routes       1 ── N inbox / outbox / interactions / effects / approvals
+routes       1 ── N inbox / outbox / interactions / effects
 routes       1 ── N principals / messages / context_capabilities
 routes       1 ── 0..1 managed_pins
 principals   1 ── N messages
@@ -1114,9 +1102,9 @@ operation; a stable local ID alone does not make a Telegram send idempotent.
 `telegram_messages` and `telegram_principals` are reference indexes, not content
 archives. They retain the minimum Telegram IDs needed to resolve opaque refs for
 the active FX session generation and are pruned with that generation. Interaction
-payloads retain only bounded button, poll, or join-request validation state until
-completion or expiry. Message bodies are still removed with completed inbox and
-outbox recovery payloads.
+payloads retain only bounded button, poll, join-request, or approval validation
+state until completion or expiry. Message bodies are still removed with
+completed inbox and outbox recovery payloads.
 
 Ephemeral draft frames are coalesced in memory and never written per token. The
 permanent final delivery enters the outbox; explicit MCP side effects use the

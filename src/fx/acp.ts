@@ -4,10 +4,8 @@ import { Readable, Writable } from "node:stream";
 
 export type FxSessionInfo = {
   sessionId: string;
-  agentName: string;
   agentVersion: string;
   model: string;
-  mode: string;
   replacedPrevious: boolean;
 };
 
@@ -16,7 +14,6 @@ export type FxPermissionHandler = (
 ) => Promise<acp.RequestPermissionResponse>;
 
 type McpOptions = { command: string; args: string[]; env: Record<string, string> };
-type Deferred<T> = { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void };
 const START_TIMEOUT_MS = 30_000;
 const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
 
@@ -27,13 +24,6 @@ export function sanitizeFxEnvironment(environment: NodeJS.ProcessEnv): NodeJS.Pr
     if (name.startsWith("TGFX_MCP_") || name.startsWith("TGFX_INTERNAL_TELEGRAM_")) delete clean[name];
   }
   return clean;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
 }
 
 function selectValue(options: acp.SessionConfigOption[] | null | undefined, id: string): string | undefined {
@@ -82,8 +72,8 @@ export class FxRouteSession {
   private context?: acp.ClientContext;
   private sessionId?: string;
   private connectTask?: Promise<void>;
-  private ready = deferred<FxSessionInfo>();
-  private closeGate = deferred<void>();
+  private ready = Promise.withResolvers<FxSessionInfo>();
+  private closeGate = Promise.withResolvers<void>();
   private currentPermission?: FxPermissionHandler;
   private updateListeners = new Set<(update: acp.SessionUpdate) => void | Promise<void>>();
   private closed = false;
@@ -125,7 +115,7 @@ export class FxRouteSession {
     this.child = child;
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-16_384); });
-    const spawnError = deferred<never>();
+    const spawnError = Promise.withResolvers<never>();
     child.once("error", (error) => spawnError.reject(error));
 
     const input = Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>;
@@ -212,10 +202,8 @@ export class FxRouteSession {
       if (!sessionId) throw new Error("fx did not return a session ID");
       this.ready.resolve({
         sessionId,
-        agentName: initialized.agentInfo?.title ?? initialized.agentInfo?.name ?? "fx",
         agentVersion: initialized.agentInfo?.version ?? "unknown",
         model,
-        mode: "ask",
         replacedPrevious,
       });
       await this.closeGate.promise;

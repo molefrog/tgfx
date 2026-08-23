@@ -14,7 +14,7 @@ function store(): StateStore {
   const root = mkdtempSync(join(tmpdir(), "tgfx-state-"));
   temporary.push(root);
   const state = new StateStore(join(root, "state.sqlite"));
-  state.registerBot({ id: "100", username: "test_bot", displayName: "Test" });
+  state.ensurePollState("100");
   return state;
 }
 
@@ -138,12 +138,13 @@ describe("SQLite operational journal", () => {
 
   test("uses compare-and-set for approvals and idempotency ledger", () => {
     const state = store();
-    state.createApproval({
-      id: "approval", botId: "100", routeKey: "100:42:0", kind: "test",
-      prompt: "Proceed?", options: ["yes", "no"], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    state.createInteraction({
+      id: "approval", botId: "100", routeKey: "100:42:0", kind: "fx_permission",
+      payload: { prompt: "Proceed?", options: ["yes", "no"] },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
-    expect(state.resolveApproval("approval", "yes")).toBeTrue();
-    expect(state.resolveApproval("approval", "no")).toBeFalse();
+    expect(state.resolveInteraction("approval", "yes")).toBeTrue();
+    expect(state.resolveInteraction("approval", "no")).toBeFalse();
     expect(state.beginEffect({ effectKey: "effect", botId: "100", routeKey: "100:42:0", toolName: "send" })).toBe("new");
     state.completeEffect("effect", { sent: true });
     expect(state.beginEffect({ effectKey: "effect", botId: "100", routeKey: "100:42:0", toolName: "send" })).toBe("complete");
@@ -161,17 +162,18 @@ describe("SQLite operational journal", () => {
       payload: { chatId: "42", topicId: "0", text: "answer" },
     });
     state.beginEffect({ effectKey: "unknown-effect", botId: "100", routeKey: "100:42:0", toolName: "send" });
-    state.createApproval({
-      id: "pending-approval", botId: "100", routeKey: "100:42:0", kind: "test",
-      prompt: "Proceed?", options: ["yes"], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    state.createInteraction({
+      id: "pending-approval", botId: "100", routeKey: "100:42:0", kind: "fx_permission",
+      payload: { prompt: "Proceed?", options: ["yes"] },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     expect(state.unfinished()).toEqual({ inbox: 1, outbox: 1, effects: 1, approvals: 1, total: 4 });
 
     state.abandonUnfinished("user chose workspace handoff");
 
     expect(state.inbox(id)).toMatchObject({ status: "discarded", payload_json: null });
-    expect(state.pendingOutbox()).toHaveLength(0);
-    expect(state.approval("pending-approval")?.state).toBe("expired");
+    expect(state.recoverableOutbox()).toHaveLength(0);
+    expect(state.interaction("pending-approval")?.state).toBe("expired");
     expect(state.unfinished().total).toBe(0);
     expect(state.beginEffect({
       effectKey: "unknown-effect", botId: "100", routeKey: "100:42:0", toolName: "send",

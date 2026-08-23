@@ -4,7 +4,7 @@ import { realpath, stat } from "node:fs/promises";
 import { basename, resolve, sep } from "node:path";
 import * as z from "zod/v4";
 import { StateStore } from "../state";
-import { TelegramApi } from "../telegram/api";
+import { adminCapabilitiesForMember, TelegramApi } from "../telegram/api";
 import type { AdminCapability, AttachmentRef } from "../types";
 import { safeDownloadPath, safeName, writeResponseLimited } from "./files";
 
@@ -97,14 +97,9 @@ export async function runTelegramMcpServer(): Promise<void> {
       for (const capability of env.adminCapabilities) capabilities.add(capability);
       return capabilities;
     }
-    const member = await telegram.api.getChatMember(routeChatId, Number(env.botId));
-    const creator = member.status === "creator";
-    if (creator || (member.status === "administrator" && member.can_pin_messages)) capabilities.add("pins");
-    if (creator || (member.status === "administrator" && member.can_manage_topics)) capabilities.add("topics");
-    if (creator || (member.status === "administrator" && member.can_delete_messages)) capabilities.add("delete_messages");
-    if (creator || (member.status === "administrator" && member.can_restrict_members)) capabilities.add("moderation");
-    if (creator || (member.status === "administrator" && member.can_invite_users)) capabilities.add("join_requests");
-    return capabilities;
+    return adminCapabilitiesForMember(
+      await telegram.api.getChatMember(routeChatId, Number(env.botId)),
+    );
   };
   const grantedAdminCapabilities = new Set<AdminCapability>();
   if (env.adminChatIds.includes(routeChatId)) {
@@ -164,9 +159,9 @@ export async function runTelegramMcpServer(): Promise<void> {
     }
     const id = crypto.randomUUID().replaceAll("-", "");
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-    state.createApproval({
+    state.createInteraction({
       id, botId: env.botId, routeKey: env.routeKey, kind: `telegram_admin:${capability}`,
-      prompt, options: ["approve", "deny"], expiresAt,
+      payload: { prompt, options: ["approve", "deny"] }, expiresAt,
     });
     let card;
     try {
@@ -176,20 +171,19 @@ export async function runTelegramMcpServer(): Promise<void> {
           { text: "Deny", callback_data: `mcp:${id}:deny` },
         ]] },
       });
-      state.setApprovalMessage(id, String(card.message_id));
     } catch (error) {
-      state.expireApproval(id);
+      state.expireInteraction(id);
       throw error;
     }
     while (Date.now() < Date.parse(expiresAt)) {
-      const approval = state.approval(id);
-      if (approval?.state === "resolved") {
-        if (approval.result === "approve") return;
+      const approval = state.interaction(id);
+      if (approval?.state === "resolved" && approval.result_json) {
+        if (JSON.parse(approval.result_json) === "approve") return;
         throw new Error("The Telegram administrator denied this action.");
       }
       await Bun.sleep(400);
     }
-    if (state.expireApproval(id)) {
+    if (state.expireInteraction(id)) {
       await telegram.editReplyMarkup(env.controlChat, card.message_id, {
         inline_keyboard: [[{ text: "Expired", callback_data: "resolved" }]],
       }).catch(() => undefined);

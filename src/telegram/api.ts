@@ -1,7 +1,8 @@
 import { Api, GrammyError, HttpError, InputFile } from "grammy";
-import type { BotCommand, Message, Update } from "grammy/types";
+import type { BotCommand, ChatMember, Message, Update } from "grammy/types";
 import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { redactSecrets } from "../secrets";
+import type { AdminCapability } from "../types";
 
 export class TelegramError extends Error {
   readonly retryAfter?: number;
@@ -29,28 +30,38 @@ function translate(error: unknown): never {
   throw error;
 }
 
+export function adminCapabilitiesForMember(member: ChatMember): Set<AdminCapability> {
+  const creator = member.status === "creator";
+  const administrator = member.status === "administrator" ? member : undefined;
+  const capabilities = new Set<AdminCapability>();
+  if (creator || administrator?.can_pin_messages) capabilities.add("pins");
+  if (creator || administrator?.can_manage_topics) capabilities.add("topics");
+  if (creator || administrator?.can_delete_messages) capabilities.add("delete_messages");
+  if (creator || administrator?.can_restrict_members) capabilities.add("moderation");
+  if (creator || administrator?.can_invite_users) capabilities.add("join_requests");
+  return capabilities;
+}
+
 export class TelegramApi {
   readonly api: Api;
-  constructor(readonly token: string, apiRoot?: string) {
+  constructor(token: string, apiRoot?: string) {
     this.api = new Api(token, apiRoot ? { apiRoot } : undefined);
   }
 
-  async getMe() {
-    try { return await this.api.getMe(); } catch (error) { translate(error); }
+  private async call<T>(operation: () => Promise<T>): Promise<T> {
+    try { return await operation(); } catch (error) { translate(error); }
   }
 
-  async getWebhookInfo() {
-    try { return await this.api.getWebhookInfo(); } catch (error) { translate(error); }
-  }
+  getMe() { return this.call(() => this.api.getMe()); }
+
+  getWebhookInfo() { return this.call(() => this.api.getWebhookInfo()); }
 
   async getUpdates(offset: number, timeout = 25, signal?: AbortSignal): Promise<Update[]> {
-    try {
-      return await this.api.getUpdates({
+    return this.call(() => this.api.getUpdates({
         offset,
         timeout,
         allowed_updates: ["message", "edited_message", "callback_query", "poll_answer", "chat_join_request"],
-      }, signal);
-    } catch (error) { translate(error); }
+      }, signal));
   }
 
   async sendText(
@@ -60,12 +71,10 @@ export class TelegramApi {
     options: Record<string, unknown> = {},
     signal?: AbortSignal,
   ): Promise<Message.TextMessage> {
-    try {
-      return await this.api.sendMessage(chatId, text, {
+    return this.call(() => this.api.sendMessage(chatId, text, {
         ...(topicId === "0" ? {} : { message_thread_id: Number(topicId) }),
         ...options,
-      } as never, signal);
-    } catch (error) { translate(error); }
+      } as never, signal));
   }
 
   async sendRich(
@@ -75,12 +84,10 @@ export class TelegramApi {
     options: Record<string, unknown> = {},
     signal?: AbortSignal,
   ) {
-    try {
-      return await this.api.sendRichMessage(chatId, richMessage, {
+    return this.call(() => this.api.sendRichMessage(chatId, richMessage, {
         ...(topicId === "0" ? {} : { message_thread_id: Number(topicId) }),
         ...options,
-      }, signal);
-    } catch (error) { translate(error); }
+      }, signal));
   }
 
   async sendRichDraft(
@@ -89,38 +96,29 @@ export class TelegramApi {
     richMessage: InputRichMessageWithoutUpload,
     signal?: AbortSignal,
   ): Promise<true> {
-    try { return await this.api.sendRichMessageDraft(Number(chatId), draftId, richMessage, {}, signal); }
-    catch (error) { translate(error); }
+    return this.call(() => this.api.sendRichMessageDraft(Number(chatId), draftId, richMessage, {}, signal));
   }
 
   async answerCallback(callbackQueryId: string, text?: string): Promise<true> {
-    try { return await this.api.answerCallbackQuery(callbackQueryId, text ? { text } : {}); }
-    catch (error) { translate(error); }
+    return this.call(() => this.api.answerCallbackQuery(callbackQueryId, text ? { text } : {}));
   }
 
   async editReplyMarkup(chatId: string, messageId: number, replyMarkup: unknown): Promise<unknown> {
-    try {
-      return await this.api.editMessageReplyMarkup(chatId, messageId, { reply_markup: replyMarkup as never });
-    } catch (error) { translate(error); }
+    return this.call(() => this.api.editMessageReplyMarkup(chatId, messageId, { reply_markup: replyMarkup as never }));
   }
 
   async setCommands(chatId: string, commands: BotCommand[]): Promise<true> {
-    try {
-      return await this.api.setMyCommands(commands, { scope: { type: "chat", chat_id: chatId } });
-    } catch (error) { translate(error); }
+    return this.call(() => this.api.setMyCommands(commands, { scope: { type: "chat", chat_id: chatId } }));
   }
 
   async deleteCommands(chatId: string): Promise<true> {
-    try { return await this.api.deleteMyCommands({ scope: { type: "chat", chat_id: chatId } }); }
-    catch (error) { translate(error); }
+    return this.call(() => this.api.deleteMyCommands({ scope: { type: "chat", chat_id: chatId } }));
   }
 
   async sendFile(chatId: string, path: string, filename: string, caption?: string, topicId = "0") {
-    try {
-      return await this.api.sendDocument(chatId, new InputFile(path, filename), {
+    return this.call(() => this.api.sendDocument(chatId, new InputFile(path, filename), {
         ...(caption ? { caption } : {}),
         ...(topicId === "0" ? {} : { message_thread_id: Number(topicId) }),
-      });
-    } catch (error) { translate(error); }
+      }));
   }
 }

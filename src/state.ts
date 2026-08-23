@@ -59,13 +59,6 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 
-CREATE TABLE IF NOT EXISTS bot_accounts (
-  bot_id TEXT PRIMARY KEY,
-  username TEXT,
-  display_name TEXT NOT NULL,
-  verified_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS telegram_poll_state (
   bot_id TEXT PRIMARY KEY,
   next_offset INTEGER NOT NULL DEFAULT 0,
@@ -82,13 +75,6 @@ CREATE TABLE IF NOT EXISTS routes (
   generation INTEGER NOT NULL DEFAULT 1,
   dynamic_commands_json TEXT NOT NULL DEFAULT '[]',
   last_prompt_json TEXT,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS scope_state (
-  route_key TEXT PRIMARY KEY REFERENCES routes(route_key) ON DELETE CASCADE,
-  active_turn_id TEXT,
-  last_inbox_id INTEGER,
   updated_at TEXT NOT NULL
 );
 
@@ -184,20 +170,6 @@ CREATE TABLE IF NOT EXISTS effect_ledger (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS approval_requests (
-  approval_id TEXT PRIMARY KEY,
-  bot_id TEXT NOT NULL,
-  route_key TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  prompt TEXT NOT NULL,
-  options_json TEXT NOT NULL,
-  state TEXT NOT NULL,
-  result TEXT,
-  telegram_message_id TEXT,
-  expires_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS context_capabilities (
   context_ref TEXT PRIMARY KEY,
   bot_id TEXT NOT NULL,
@@ -232,17 +204,11 @@ export class StateStore {
 
   close(): void { this.db.close(); }
 
-  registerBot(bot: { id: string; username?: string; displayName: string }): void {
-    this.db.query(`
-      INSERT INTO bot_accounts(bot_id, username, display_name, verified_at)
-      VALUES ($id, $username, $displayName, $now)
-      ON CONFLICT(bot_id) DO UPDATE SET
-        username=excluded.username, display_name=excluded.display_name, verified_at=excluded.verified_at
-    `).run({ id: bot.id, username: bot.username ?? null, displayName: bot.displayName, now: now() });
+  ensurePollState(botId: string): void {
     this.db.query(`
       INSERT INTO telegram_poll_state(bot_id, next_offset, updated_at)
       VALUES ($botId, 0, $now) ON CONFLICT(bot_id) DO NOTHING
-    `).run({ botId: bot.id, now: now() });
+    `).run({ botId, now: now() });
   }
 
   nextOffset(botId: string): number {
@@ -269,7 +235,10 @@ export class StateStore {
       inbox: count("telegram_inbox", "status IN ('received','dispatching','running','interrupted','failed')"),
       outbox: count("telegram_outbox", "status IN ('pending','sending','failed')"),
       effects: count("effect_ledger", "state IN ('running','unknown')"),
-      approvals: count("approval_requests", "state='pending'"),
+      approvals: count(
+        "telegram_interactions",
+        "state='pending' AND (kind='fx_permission' OR kind LIKE 'telegram_admin:%')",
+      ),
     };
     return { ...result, total: result.inbox + result.outbox + result.effects + result.approvals };
   }
@@ -285,8 +254,6 @@ export class StateStore {
         UPDATE telegram_outbox SET status='abandoned',payload_json='{}',error=?,updated_at=?
         WHERE status IN ('pending','sending','failed')
       `).run(reason, timestamp);
-      this.db.query("UPDATE approval_requests SET state='expired',updated_at=? WHERE state='pending'")
-        .run(timestamp);
       this.db.query("UPDATE telegram_interactions SET state='expired',updated_at=? WHERE state='pending'")
         .run(timestamp);
       this.db.query(`
@@ -481,8 +448,8 @@ export class StateStore {
           commands: route.dynamic_commands_json, prompt: route.last_prompt_json, now: now(),
         });
         for (const table of [
-          "scope_state", "telegram_principals", "telegram_inbox", "telegram_outbox",
-          "telegram_interactions", "managed_pins", "effect_ledger", "approval_requests",
+          "telegram_principals", "telegram_inbox", "telegram_outbox",
+          "telegram_interactions", "managed_pins", "effect_ledger",
         ]) {
           this.db.query(`UPDATE ${table} SET route_key=? WHERE route_key=?`).run(newKey, route.route_key);
         }
@@ -528,8 +495,6 @@ export class StateStore {
     this.db.query("UPDATE telegram_principals SET expires_at=? WHERE route_key=?")
       .run(timestamp, routeKey);
     this.db.query("UPDATE telegram_interactions SET state='expired',updated_at=? WHERE route_key=? AND state='pending'")
-      .run(timestamp, routeKey);
-    this.db.query("UPDATE approval_requests SET state='expired',updated_at=? WHERE route_key=? AND state='pending'")
       .run(timestamp, routeKey);
   }
 
@@ -766,10 +731,6 @@ export class StateStore {
     `).all({ route: options.routeKey ?? null, failed: options.includeFailed ? 1 : 0 });
   }
 
-  pendingOutbox(): ReturnType<StateStore["recoverableOutbox"]> {
-    return this.recoverableOutbox();
-  }
-
   abandonOutbox(routeKey: string, reason: string): number {
     return this.db.query(`
       UPDATE telegram_outbox SET status='abandoned',payload_json='{}',error=$reason,updated_at=$now
@@ -853,49 +814,11 @@ export class StateStore {
       .run(unknown ? "unknown" : "failed", error, now(), effectKey);
   }
 
-  createApproval(input: {
-    id: string; botId: string; routeKey: string; kind: string; prompt: string;
-    options: unknown; expiresAt: string;
-  }): void {
-    this.db.query(`
-      INSERT INTO approval_requests(
-        approval_id,bot_id,route_key,kind,prompt,options_json,state,expires_at,updated_at
-      ) VALUES ($id,$bot,$route,$kind,$prompt,$options,'pending',$expires,$now)
-    `).run({
-      id: input.id, bot: input.botId, route: input.routeKey, kind: input.kind,
-      prompt: input.prompt, options: JSON.stringify(input.options),
-      expires: input.expiresAt, now: now(),
-    });
-  }
-
-  resolveApproval(id: string, result: string): boolean {
-    const changed = this.db.query(`
-      UPDATE approval_requests SET state='resolved',result=$result,updated_at=$now
-      WHERE approval_id=$id AND state='pending' AND expires_at>$now
-    `).run({ id, result, now: now() }).changes;
-    return changed === 1;
-  }
-
-  setApprovalMessage(id: string, messageId: string): void {
-    this.db.query(`
-      UPDATE approval_requests SET telegram_message_id=$message,updated_at=$now
-      WHERE approval_id=$id AND state='pending'
-    `).run({ id, message: messageId, now: now() });
-  }
-
-  expireApproval(id: string): boolean {
+  expireInteraction(id: string): boolean {
     return this.db.query(`
-      UPDATE approval_requests SET state='expired',updated_at=$now
-      WHERE approval_id=$id AND state='pending'
+      UPDATE telegram_interactions SET state='expired',updated_at=$now
+      WHERE interaction_id=$id AND state='pending'
     `).run({ id, now: now() }).changes === 1;
-  }
-
-  approval(id: string): {
-    state: string; result: string | null; expires_at: string; telegram_message_id: string | null;
-  } | undefined {
-    return this.db.query<any, [string]>(
-      "SELECT state,result,expires_at,telegram_message_id FROM approval_requests WHERE approval_id=?",
-    ).get(id) ?? undefined;
   }
 
   prune(): void {
@@ -910,7 +833,6 @@ export class StateStore {
       `).run(now());
       this.db.query("DELETE FROM telegram_principals WHERE expires_at<?").run(now());
       this.db.query("DELETE FROM telegram_interactions WHERE expires_at<?").run(now());
-      this.db.query("DELETE FROM approval_requests WHERE expires_at<?").run(now());
       this.db.query("DELETE FROM effect_ledger WHERE state IN ('complete','failed','abandoned') AND updated_at<?").run(retention);
     })();
   }
