@@ -2,18 +2,12 @@ import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userStateDirectory, type WorkspacePaths } from "./config";
 
-/**
- * `role` separates the polling process ("runtime") from short-lived setup
- * holders like `tgfx auth` ("setup"), so configuration commands only claim
- * "applied to the running bot" when a reloading poller actually holds the lock.
- */
 type LockRecord = {
   pid: number;
   botId: string;
   workspace: string;
   startedAt: string;
   lockId: string;
-  role?: "runtime" | "setup";
 };
 
 function processExists(pid: number): boolean {
@@ -62,32 +56,13 @@ async function acquireFile(path: string, record: LockRecord): Promise<() => Prom
   throw new Error(`Unable to acquire ${path}`);
 }
 
-/**
- * Reports the live tgfx process holding this bot's machine-wide lock, if any.
- * Configuration commands use this to say whether an edit reaches a running
- * bot immediately (it reloads config live) or waits for the next start.
- */
-export async function runningLock(botId: string): Promise<LockRecord | undefined> {
-  const path = join(userStateDirectory(), "locks", `${botId}.lock`);
-  let record: LockRecord | undefined;
-  try { record = JSON.parse(await readFile(path, "utf8")); }
-  catch { return undefined; }
-  if (!record || typeof record.pid !== "number" || !processExists(record.pid)) return undefined;
-  return record;
-}
-
-export async function acquireRuntimeLock(
-  paths: WorkspacePaths,
-  botId: string,
-  role: "runtime" | "setup" = "runtime",
-): Promise<() => Promise<void>> {
+export async function acquireRuntimeLock(paths: WorkspacePaths, botId: string): Promise<() => Promise<void>> {
   const record: LockRecord = {
     pid: process.pid,
     botId,
     workspace: paths.workspace,
     startedAt: new Date().toISOString(),
     lockId: crypto.randomUUID(),
-    role,
   };
   const releaseBot = await acquireFile(join(userStateDirectory(), "locks", `${botId}.lock`), record);
   try {

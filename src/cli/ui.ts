@@ -1,4 +1,5 @@
 import { version } from "../../package.json";
+import { parseArgs as parseNodeArgs } from "node:util";
 
 /**
  * Terminal voice for the tgfx CLI.
@@ -65,37 +66,9 @@ export function printError(error: unknown, debug: boolean): void {
   }
 }
 
-export function levenshtein(a: string, b: string): number {
-  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= a.length; i++) {
-    let diagonal = previous[0]!;
-    previous[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      const substitution = diagonal + (a[i - 1] === b[j - 1] ? 0 : 1);
-      diagonal = previous[j]!;
-      previous[j] = Math.min(previous[j]! + 1, previous[j - 1]! + 1, substitution);
-    }
-  }
-  return previous[b.length]!;
-}
-
-export function suggestion(input: string, candidates: readonly string[]): string | undefined {
-  let best: { name: string; distance: number } | undefined;
-  for (const candidate of candidates) {
-    const distance = levenshtein(input.toLowerCase(), candidate);
-    if (distance <= 2 && (!best || distance < best.distance)) best = { name: candidate, distance };
-  }
-  return best?.name;
-}
-
 /** Flags every command accepts; the dispatcher acts on them before parsing. */
 const GLOBAL_FLAGS: Record<string, "boolean"> = { "no-color": "boolean", debug: "boolean" };
 
-/**
- * A strict flag parser: every token must be a declared flag or, where allowed,
- * a positional argument. Unknown flags are errors, not surprises. Booleans are
- * tri-state — absent flags stay undefined so config defaults can apply.
- */
 export function parseArgs(
   tokens: string[],
   spec: {
@@ -103,33 +76,29 @@ export function parseArgs(
     positionals?: boolean;
   },
 ): { flags: Record<string, string | boolean>; positionals: string[] } {
-  const flags: Record<string, string | boolean> = {};
-  const positionals: string[] = [];
   const declared = { ...GLOBAL_FLAGS, ...spec.flags };
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index]!;
-    if (token.startsWith("--")) {
-      const equals = token.indexOf("=");
-      const name = equals === -1 ? token.slice(2) : token.slice(2, equals);
-      const kind = declared[name];
-      if (!kind) throw new CliError(`unknown flag --${name}`, "run tgfx --help to see what is supported");
-      if (kind === "boolean") {
-        if (equals !== -1) throw new CliError(`--${name} does not take a value`);
-        flags[name] = true;
-      } else {
-        const value = equals === -1 ? tokens[++index] : token.slice(equals + 1);
-        if (!value || (equals === -1 && value.startsWith("--"))) {
-          throw new CliError(`--${name} needs a value`);
-        }
-        flags[name] = value;
-      }
-    } else if (spec.positionals) {
-      positionals.push(token);
-    } else {
-      throw new CliError(`unexpected argument "${token}"`, "run tgfx --help to see what is supported");
-    }
+  const prefix = "tgfx-negative:";
+  const args = tokens.map((token) => /^-\d+(?:\/\d+)?$/.test(token) ? `${prefix}${token}` : token);
+  let parsed;
+  try {
+    parsed = parseNodeArgs({
+      args,
+      strict: true,
+      allowPositionals: Boolean(spec.positionals),
+      options: Object.fromEntries(Object.entries(declared).map(([name, type]) => [name, { type }])),
+    });
+  } catch (error) {
+    throw new CliError(error instanceof Error ? error.message : String(error), "run tgfx --help to see what is supported");
   }
-  return { flags, positionals };
+  const restore = (value: string): string => value.startsWith(prefix) ? value.slice(prefix.length) : value;
+  const flags = Object.fromEntries(Object.entries(parsed.values).map(([name, value]) => [
+    name,
+    typeof value === "string" ? restore(value) : value,
+  ])) as Record<string, string | boolean>;
+  for (const [name, type] of Object.entries(declared)) {
+    if (type === "string" && flags[name] === "") throw new CliError(`--${name} needs a value`);
+  }
+  return { flags, positionals: parsed.positionals.map(restore) };
 }
 
 export function helpText(): string {
@@ -139,7 +108,7 @@ export function helpText(): string {
     `${bold("tgfx")} ${dim(`${VERSION} — run a local fx agent through one Telegram bot`)}`,
     "",
     line("tgfx", "run fx in this folder (sets up on first run)"),
-    line("tgfx access", "who can talk to fx, where it's admin, who approves"),
+    line("tgfx access", "who can talk to fx, who approves, saved sessions"),
     line("tgfx allow <id…>", "add users or chats to the allowlist"),
     line("tgfx deny <id…>", "remove them"),
     line("tgfx approvals <chat>[/topic]", "route approval cards to a chat"),

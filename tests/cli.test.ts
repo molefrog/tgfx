@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { mkdirSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig, saveConfig, workspacePaths, type WorkspacePaths } from "../src/config";
@@ -53,13 +52,13 @@ async function workspace(): Promise<WorkspacePaths> {
 }
 
 describe("tgfx CLI", () => {
-  test("a mistyped command errors with a suggestion instead of starting the bot", async () => {
+  test("a mistyped command errors instead of starting the bot", async () => {
     const root = await mkdtemp(join(tmpdir(), "tgfx-cli-typo-"));
     temporary.push(root);
     const result = await tgfx(["acess"], { cwd: root });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain('unknown command "acess"');
-    expect(result.stderr).toContain("tgfx access");
+    expect(result.stderr).toContain("tgfx --help");
   });
 
   test("--help lists the command surface and exits cleanly", async () => {
@@ -86,7 +85,7 @@ describe("tgfx CLI", () => {
     const paths = await workspace();
     const result = await tgfx(["access", "--jsn"], { cwd: paths.workspace });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("unknown flag --jsn");
+    expect(result.stderr).toContain("Unknown option '--jsn'");
   });
 
   test("allow infers users from positive and chats from negative IDs", async () => {
@@ -96,7 +95,7 @@ describe("tgfx CLI", () => {
     expect(result.stderr).toContain("allowed chat -1002255001");
     expect(result.stderr).toContain("everyone in this chat");
     expect(result.stderr).toContain("allowed user 7");
-    expect(result.stderr).toContain("will apply on next start");
+    expect(result.stderr).toContain("restart tgfx to apply");
     const config = await loadConfig(paths);
     expect(config?.access.chatIds).toEqual(["-1002255001"]);
     expect(config?.access.userIds).toEqual(["42", "7"]);
@@ -165,7 +164,7 @@ describe("tgfx CLI", () => {
     expect(result.exitCode).toBe(0);
     const report = JSON.parse(result.stdout);
     expect(report.bot).toBe("100");
-    expect(report.access).toEqual([{ id: "42", kind: "user", title: null, username: null }]);
+    expect(report.access).toEqual([{ id: "42", kind: "user" }]);
     expect(report.approvals).toEqual({ chatId: "42", topicId: "0" });
   });
 
@@ -195,23 +194,5 @@ describe("tgfx CLI", () => {
     }
     const config = await loadConfig(paths);
     expect(config?.approvals).toEqual({ chatId: "-100987", topicId: "55" });
-  });
-
-  test("a legacy controlChat config still works through the CLI", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tgfx-cli-legacy-"));
-    temporary.push(root);
-    const paths = workspacePaths(root);
-    mkdirSync(paths.directory, { recursive: true });
-    await writeFile(paths.config, JSON.stringify({
-      version: 1,
-      activeBotId: "100",
-      access: { userIds: ["42"], chatIds: [] },
-      controlChat: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 800 },
-      admin: { chatIds: [], capabilities: [] },
-    }, null, 2));
-    const result = await tgfx(["access", "--json"], { cwd: paths.workspace });
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout).approvals).toEqual({ chatId: "42", topicId: "0" });
   });
 });

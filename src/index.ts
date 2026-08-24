@@ -2,31 +2,27 @@
 import { confirm, isCancel, note, password, select, spinner, text } from "@clack/prompts";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, realpath } from "node:fs/promises";
-import { renderUnicodeCompact } from "uqr";
 import { TgfxApp, type TgfxLogEvent } from "./app";
 import {
   findBotIndex,
   loadConfig,
   saveConfig,
   updateBotIndex,
-  updateConfig,
   workspacePaths,
   type WorkspacePaths,
 } from "./config";
-import { acquireRuntimeLock, runningLock } from "./lock";
+import { acquireRuntimeLock } from "./lock";
 import { runTelegramMcpServer } from "./mcp/server";
 import { deleteBotToken, getBotToken, setBotToken, tokenFromEnvironment } from "./secrets";
-import { StateStore, type ChatDirectoryRow } from "./state";
+import { StateStore } from "./state";
 import { adminCapabilitiesForMember, createTelegramApi, type TelegramApi } from "./telegram/api";
 import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairing";
-import type { AdminCapability, BotIdentity, TgfxConfig } from "./types";
+import type { BotIdentity, TgfxConfig } from "./types";
 import { inspectFx } from "./fx/preflight";
 import {
   banner,
   bold,
   CliError,
-  cyan,
   dim,
   green,
   helpText,
@@ -34,21 +30,12 @@ import {
   parseArgs,
   printError,
   red,
-  suggestion,
   VERSION,
   warn,
   yellow,
 } from "./cli/ui";
 
 const STDERR = { output: process.stderr };
-
-const CAPABILITY_LABELS: Record<AdminCapability, string> = {
-  pins: "pin messages and keep the bulletin",
-  topics: "manage forum topics",
-  delete_messages: "delete messages",
-  moderation: "ban or restrict members",
-  join_requests: "review join requests",
-};
 
 const DECIMAL_ID = /^-?\d+$/;
 
@@ -74,39 +61,10 @@ async function requireConfig(paths: WorkspacePaths): Promise<TgfxConfig> {
   return config;
 }
 
-/**
- * A config written before this redesign may carry a deliberately narrowed
- * admin profile that no longer applies. Say so once instead of silently
- * widening what the promote dialog now controls.
- */
-async function warnAboutLegacyConfig(paths: WorkspacePaths): Promise<void> {
-  let raw: Record<string, unknown>;
-  try { raw = JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>; }
-  catch { return; }
-  if (!raw || typeof raw !== "object" || !("admin" in raw || "controlChat" in raw)) return;
-  if ("admin" in raw) {
-    warn("this config predates zero-config admin: group admin tools now follow the bot's live Telegram rights");
-    process.stderr.write(`  ${dim("review each group's rights in its promote dialog, then check with tgfx access")}\n`);
-  }
-}
-
 async function requireToken(config: TgfxConfig): Promise<string> {
   const token = tokenFromEnvironment() ?? await getBotToken(config.activeBotId);
   if (!token) throw new CliError("the Telegram bot token is missing", "run tgfx auth to add it");
   return token;
-}
-
-/** Says whether a config edit reaches a live process (it reloads within a second). */
-async function applyNote(paths: WorkspacePaths, botId: string): Promise<string> {
-  const lock = await runningLock(botId);
-  if (lock && lock.role !== "setup") {
-    const [lockWorkspace, here] = await Promise.all([
-      realpath(lock.workspace).catch(() => lock.workspace),
-      realpath(paths.workspace).catch(() => paths.workspace),
-    ]);
-    if (lockWorkspace === here) return "applied to the running bot";
-  }
-  return "will apply on next start";
 }
 
 /** A decimal Telegram ID in canonical form: no leading zeros, no negative zero. */
@@ -114,25 +72,6 @@ function canonicalId(raw: string): string {
   const id = raw.trim();
   if (!DECIMAL_ID.test(id)) throw new CliError(`"${raw}" is not a decimal Telegram ID`);
   return String(BigInt(id));
-}
-
-/** Cached display names from the workspace journal, when it exists. */
-function withDirectory<T>(
-  paths: WorkspacePaths,
-  botId: string,
-  use: (lookup: (chatId: string) => ChatDirectoryRow | undefined) => T,
-): T {
-  if (!existsSync(paths.database)) return use(() => undefined);
-  const state = new StateStore(paths.database);
-  try {
-    return use((chatId) => state.chatInfo(botId, chatId));
-  } finally { state.close(); }
-}
-
-function displayName(row: ChatDirectoryRow | undefined, id: string): string {
-  if (row?.title) return row.title;
-  if (row?.username) return `@${row.username}`;
-  return id;
 }
 
 async function validateToken(token: string): Promise<{ telegram: TelegramApi; bot: BotIdentity }> {
@@ -179,7 +118,7 @@ async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promis
   const backlog = await telegram.getUpdates(-1, 0);
   let offset = (backlog.at(-1)?.update_id ?? -1) + 1;
   note(
-    `${renderUnicodeCompact(url)}\n\nScan with your phone, or open\n${url}\n\nThe link expires when setup exits.`,
+    `${url}\n\nOpen this link and press Start. The link expires when setup exits.`,
     "Connect your Telegram account",
     STDERR,
   );
@@ -335,7 +274,6 @@ async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}):
   const fxBinary = process.env.FX_BINARY ?? "fx";
   const fx = await inspectFx(fxBinary, paths.workspace);
   if (!options.json) ok(`fx ${fx.version} · ${fx.report.model} · ${fx.report.auth}`);
-  await warnAboutLegacyConfig(paths);
   let config = await loadConfig(paths);
   let token = tokenFromEnvironment();
   let prompted = false;
@@ -456,30 +394,20 @@ async function allowCommand(tokens: string[]): Promise<void> {
   }
   const ids = positionals.map(canonicalId);
   const paths = workspacePaths();
-  await requireConfig(paths);
-  const lines: Array<() => void> = [];
-  const config = await updateConfig(paths, (current) => {
-    if (!current) throw new CliError("this folder isn't set up yet", "run tgfx once to connect a bot");
-    lines.length = 0;
-    for (const id of ids) {
-      const kind = flags.chat || Number(id) < 0 ? "chat" : "user";
-      const list = kind === "chat" ? current.access.chatIds : current.access.userIds;
-      if (list.includes(id)) {
-        lines.push(() => warn(`${kind} ${id} is already allowed`));
-        continue;
-      }
-      list.push(id);
-      lines.push(() => {
-        const name = withDirectory(paths, current.activeBotId, (lookup) => displayName(lookup(id), id));
-        const label = name === id ? `${kind} ${id}` : `${name} (${kind} ${id})`;
-        ok(`allowed ${label}${kind === "chat" && Number(id) < 0 ? dim(" · everyone in this chat can invoke fx") : ""}`);
-      });
+  const config = await requireConfig(paths);
+  for (const id of ids) {
+    const kind = flags.chat || Number(id) < 0 ? "chat" : "user";
+    const list = kind === "chat" ? config.access.chatIds : config.access.userIds;
+    if (list.includes(id)) {
+      warn(`${kind} ${id} is already allowed`);
+      continue;
     }
-    return current;
-  });
-  for (const line of lines) line();
-  process.stderr.write(`  ${dim(await applyNote(paths, config!.activeBotId))}\n`);
-  if (flags.json) console.log(JSON.stringify(config!.access, null, 2));
+    list.push(id);
+    ok(`allowed ${kind} ${id}${kind === "chat" && Number(id) < 0 ? dim(" · everyone in this chat can invoke fx") : ""}`);
+  }
+  await saveConfig(paths, config);
+  process.stderr.write(`  ${dim("saved · restart tgfx to apply")}\n`);
+  if (flags.json) console.log(JSON.stringify(config.access, null, 2));
 }
 
 async function denyCommand(tokens: string[]): Promise<void> {
@@ -492,34 +420,32 @@ async function denyCommand(tokens: string[]): Promise<void> {
   }
   const ids = positionals.map(canonicalId);
   const paths = workspacePaths();
-  await requireConfig(paths);
-  const lines: Array<() => void> = [];
-  const config = await updateConfig(paths, (current) => {
-    if (!current) throw new CliError("this folder isn't set up yet", "run tgfx once to connect a bot");
-    lines.length = 0;
-    for (const id of ids) {
-      const inUsers = current.access.userIds.includes(id);
-      const inChats = current.access.chatIds.includes(id);
-      if (!inUsers && !inChats) {
-        lines.push(() => warn(`${id} was not on the allowlist`));
-        continue;
-      }
-      current.access.userIds = current.access.userIds.filter((value) => value !== id);
-      current.access.chatIds = current.access.chatIds.filter((value) => value !== id);
-      if (inUsers) lines.push(() => ok(`removed user ${id}`));
-      if (inChats) lines.push(() => ok(`removed chat ${id}`));
+  const config = await requireConfig(paths);
+  const notices: Array<{ warning?: boolean; message: string }> = [];
+  let changed = false;
+  for (const id of ids) {
+    const inUsers = config.access.userIds.includes(id);
+    const inChats = config.access.chatIds.includes(id);
+    if (!inUsers && !inChats) {
+      notices.push({ warning: true, message: `${id} was not on the allowlist` });
+      continue;
     }
-    if (current.access.userIds.length + current.access.chatIds.length === 0) {
-      throw new CliError("the allowlist cannot be empty", "allow another user or chat first, then deny this one");
-    }
-    return current;
-  });
-  for (const line of lines) line();
-  const remaining = config!.access.userIds.length + config!.access.chatIds.length;
+    config.access.userIds = config.access.userIds.filter((value) => value !== id);
+    config.access.chatIds = config.access.chatIds.filter((value) => value !== id);
+    changed = true;
+    if (inUsers) notices.push({ message: `removed user ${id}` });
+    if (inChats) notices.push({ message: `removed chat ${id}` });
+  }
+  if (config.access.userIds.length + config.access.chatIds.length === 0) {
+    throw new CliError("the allowlist cannot be empty", "allow another user or chat first, then deny this one");
+  }
+  if (changed) await saveConfig(paths, config);
+  for (const notice of notices) (notice.warning ? warn : ok)(notice.message);
+  const remaining = config.access.userIds.length + config.access.chatIds.length;
   process.stderr.write(
-    `  ${dim(`${remaining} principal${remaining === 1 ? "" : "s"} remain${remaining === 1 ? "s" : ""} · ${await applyNote(paths, config!.activeBotId)}`)}\n`,
+    `  ${dim(`${remaining} principal${remaining === 1 ? "" : "s"} remain${remaining === 1 ? "s" : ""} · saved · restart tgfx to apply`)}\n`,
   );
-  if (flags.json) console.log(JSON.stringify(config!.access, null, 2));
+  if (flags.json) console.log(JSON.stringify(config.access, null, 2));
 }
 
 async function approvalsCommand(tokens: string[]): Promise<void> {
@@ -531,23 +457,18 @@ async function approvalsCommand(tokens: string[]): Promise<void> {
   const config = await requireConfig(paths);
   if (!positionals.length) {
     if (flags.json) { console.log(JSON.stringify(config.approvals, null, 2)); return; }
-    const name = withDirectory(paths, config.activeBotId, (lookup) =>
-      displayName(lookup(config.approvals.chatId), config.approvals.chatId));
     const target = `${config.approvals.chatId}${config.approvals.topicId === "0" ? "" : `/${config.approvals.topicId}`}`;
-    console.log(`approvals → ${name === config.approvals.chatId ? target : `${name} (${target})`}`);
+    console.log(`approvals → ${target}`);
     return;
   }
   if (positionals.length > 1) throw new CliError("approvals takes one chat", "example: tgfx approvals -1002255001/55");
   const target = parseChatTarget(positionals[0]!);
   const token = await requireToken(config);
   await createTelegramApi(token).api.getChat(target.chatId);
-  const saved = await updateConfig(paths, (current) => {
-    if (!current) throw new CliError("this folder isn't set up yet", "run tgfx once to connect a bot");
-    current.approvals = { chatId: target.chatId, topicId: target.topicId };
-    return current;
-  });
-  ok(`approvals go to ${target.chatId}${target.topicId === "0" ? "" : `/${target.topicId}`} · ${await applyNote(paths, saved!.activeBotId)}`);
-  if (flags.json) console.log(JSON.stringify(saved!.approvals, null, 2));
+  config.approvals = { chatId: target.chatId, topicId: target.topicId };
+  await saveConfig(paths, config);
+  ok(`approvals go to ${target.chatId}${target.topicId === "0" ? "" : `/${target.topicId}`} · restart tgfx to apply`);
+  if (flags.json) console.log(JSON.stringify(config.approvals, null, 2));
 }
 
 function since(iso: string): string {
@@ -567,26 +488,16 @@ async function accessCommand(tokens: string[]): Promise<void> {
   const config = await requireConfig(paths);
   const state = existsSync(paths.database) ? new StateStore(paths.database) : undefined;
   try {
-    const info = (id: string) => state?.chatInfo(config.activeBotId, id);
     const principals = [
-      ...config.access.userIds.map((id) => ({ id, kind: "user" as const, info: info(id) })),
-      ...config.access.chatIds.map((id) => ({ id, kind: "chat" as const, info: info(id) })),
+      ...config.access.userIds.map((id) => ({ id, kind: "user" as const })),
+      ...config.access.chatIds.map((id) => ({ id, kind: "chat" as const })),
     ];
     const routes = state?.routes().filter((route) => route.bot_id === config.activeBotId) ?? [];
     if (flags.json) {
       console.log(JSON.stringify({
         bot: config.activeBotId,
         workspace: paths.workspace,
-        access: principals.map((principal) => ({
-          id: principal.id,
-          kind: principal.kind,
-          title: principal.info?.title ?? null,
-          username: principal.info?.username ?? null,
-          ...(principal.kind === "chat" && Number(principal.id) < 0 ? {
-            adminStatus: principal.info?.admin_status ?? null,
-            adminRights: principal.info ? JSON.parse(principal.info.admin_rights_json) : [],
-          } : {}),
-        })),
+        access: principals,
         approvals: config.approvals,
         renderer: config.renderer,
         sessions: routes.map((route) => ({
@@ -600,54 +511,27 @@ async function accessCommand(tokens: string[]): Promise<void> {
       return;
     }
 
-    const botInfo = info(config.activeBotId);
-    const botLabel = botInfo?.username ? `@${botInfo.username}` : `bot ${config.activeBotId}`;
-    console.log(`${bold(botLabel)} ${dim("·")} ${dim(paths.workspace)}`);
+    console.log(`${bold(`bot ${config.activeBotId}`)} ${dim("·")} ${dim(paths.workspace)}`);
     console.log("");
     console.log(`  ${dim("can talk to fx")}`);
     for (const principal of principals) {
-      const name = displayName(principal.info, principal.id);
       const marks: string[] = [];
       if (principal.id === config.approvals.chatId) marks.push(yellow("approvals go here"));
-      if (principal.kind === "chat" && Number(principal.id) < 0) {
-        const status = principal.info?.admin_status;
-        marks.push(dim(status === "administrator" || status === "creator"
-          ? "everyone · bot is admin"
-          : status
-            ? "everyone · not an admin"
-            : "everyone"));
-      }
-      const label = name === principal.id
-        ? `${principal.kind} ${principal.id}`
-        : `${name.padEnd(16)} ${dim(`${principal.kind} ${principal.id}`)}`;
-      console.log(`  ${green("●")} ${label}${marks.length ? `   ${marks.join(" · ")}` : ""}`);
-      if (principal.kind === "chat" && Number(principal.id) < 0) {
-        const status = principal.info?.admin_status;
-        if (status === "administrator" || status === "creator") {
-          const rights = new Set(state?.chatAdminRights(config.activeBotId, principal.id) ?? []);
-          for (const capability of Object.keys(CAPABILITY_LABELS) as AdminCapability[]) {
-            const granted = rights.has(capability);
-            console.log(`      ${granted ? green("✓") : red("✗")} ${granted ? CAPABILITY_LABELS[capability] : dim(CAPABILITY_LABELS[capability])}`);
-          }
-        } else if (!status) {
-          console.log(`      ${dim("admin standing unknown — run tgfx doctor or start tgfx")}`);
-        }
-      }
+      if (principal.kind === "chat" && Number(principal.id) < 0) marks.push(dim("everyone"));
+      console.log(`  ${green("●")} ${principal.kind} ${principal.id}${marks.length ? `   ${marks.join(" · ")}` : ""}`);
     }
     if (config.access.chatIds.includes(config.approvals.chatId) === false
       && config.access.userIds.includes(config.approvals.chatId) === false) {
-      const name = displayName(info(config.approvals.chatId), config.approvals.chatId);
       const target = `${config.approvals.chatId}${config.approvals.topicId === "0" ? "" : `/${config.approvals.topicId}`}`;
       console.log("");
       console.log(`  ${dim("approvals")}`);
-      console.log(`  ${yellow("●")} ${name === config.approvals.chatId ? target : `${name} ${dim(target)}`}`);
+      console.log(`  ${yellow("●")} ${target}`);
     }
     if (routes.length) {
       console.log("");
       console.log(`  ${dim("sessions")}`);
       for (const route of routes) {
-        const name = displayName(info(route.chat_id), route.chat_id);
-        const label = route.topic_id === "0" ? name : `${name}/${route.topic_id}`;
+        const label = route.topic_id === "0" ? route.chat_id : `${route.chat_id}/${route.topic_id}`;
         const detail = route.session_id
           ? `session saved · gen ${route.generation} · ${since(route.updated_at)}`
           : "no session yet";
@@ -676,7 +560,7 @@ async function authCommand(tokens: string[]): Promise<void> {
   const environmentToken = tokenFromEnvironment();
   const token = environmentToken ?? await askForToken();
   const { bot, telegram } = await validateToken(token);
-  const release = await acquireRuntimeLock(paths, bot.id, "setup");
+  const release = await acquireRuntimeLock(paths, bot.id);
   try {
     let config = await loadConfig(paths);
     // The switch is confirmed before anything destructive: abandoning a
@@ -745,7 +629,6 @@ async function doctorCommand(tokens: string[]): Promise<void> {
         detail: tokenError ? `credential store unavailable · ${tokenError}` : "bot token missing · run tgfx auth",
       });
     } else {
-      const state = existsSync(paths.database) ? new StateStore(paths.database) : undefined;
       try {
         const { telegram, bot } = await validateToken(token);
         const webhook = await telegram.getWebhookInfo();
@@ -757,10 +640,6 @@ async function doctorCommand(tokens: string[]): Promise<void> {
         });
         try {
           const approvals = await telegram.api.getChat(config.approvals.chatId);
-          state?.upsertChatInfo({
-            botId: config.activeBotId, chatId: config.approvals.chatId, kind: approvals.type,
-            ...("title" in approvals && approvals.title ? { title: approvals.title } : {}),
-          });
           checks.push({
             check: "approvals chat",
             ok: true,
@@ -777,11 +656,6 @@ async function doctorCommand(tokens: string[]): Promise<void> {
               telegram.api.getChatMember(chatId, Number(bot.id)),
             ]);
             const granted = [...adminCapabilitiesForMember(member)];
-            state?.upsertChatInfo({
-              botId: config.activeBotId, chatId, kind: chat.type,
-              ...("title" in chat && chat.title ? { title: chat.title } : {}),
-            });
-            state?.setChatAdminStatus(config.activeBotId, chatId, member.status, granted);
             const admin = member.status === "administrator" || member.status === "creator";
             checks.push({
               check: `group ${"title" in chat && chat.title ? chat.title : chatId}`,
@@ -796,8 +670,6 @@ async function doctorCommand(tokens: string[]): Promise<void> {
         }
       } catch (error) {
         checks.push({ check: "Telegram", ok: false, detail: error instanceof Error ? error.message : String(error) });
-      } finally {
-        state?.close();
       }
     }
   }
@@ -825,7 +697,7 @@ async function doctorCommand(tokens: string[]): Promise<void> {
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
 }
 
-const COMMANDS: Record<string, { run: (tokens: string[]) => Promise<void>; hidden?: boolean }> = {
+const COMMANDS: Record<string, { run: (tokens: string[]) => Promise<void> }> = {
   access: { run: accessCommand },
   allow: { run: allowCommand },
   deny: { run: denyCommand },
@@ -851,11 +723,7 @@ if (first === "mcp") {
     else if (first !== undefined && !first.startsWith("-")) {
       const command = COMMANDS[first];
       if (!command) {
-        const near = suggestion(first, Object.keys(COMMANDS));
-        throw new CliError(
-          `unknown command "${first}"`,
-          near ? `did you mean ${cyan(`tgfx ${near}`)}? run tgfx --help for the full list` : "run tgfx --help for the full list",
-        );
+        throw new CliError(`unknown command "${first}"`, "run tgfx --help for the full list");
       }
       await command.run(argv.slice(1));
     } else {

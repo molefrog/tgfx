@@ -85,7 +85,7 @@ Telegram Bot API:
 2. On the first run, tgfx verifies the local FX installation, asks for the bot
    token in a hidden prompt, validates it with Telegram, and stores it in the
    operating system credential store under the bot's numeric ID.
-3. The recommended setup displays a QR code and private `t.me` deep link containing a
+3. The recommended setup displays a private `t.me` deep link containing a
    one-time nonce. Pressing **Start** proves the numeric user/chat pair without
    asking the user to look up IDs. Advanced setup can instead accept one numeric
    user or chat ID and a separate approvals chat; more principals can be added
@@ -180,11 +180,8 @@ tgfx 0.1.0
 │  ● Connect my Telegram account (recommended)
 │
 ◇  Connect your Telegram account
-│  ▄▄▄▄▄▄▄ ▄  ▄▄ ▄▄▄▄▄▄▄
-│  █ ▄▄▄ █ ▀█▄▀▄ █ ▄▄▄ █   (QR code)
-│  █▄▄▄▄▄█ █ ▀ █ █▄▄▄▄▄█
-│  Scan with your phone, or open
 │  https://t.me/my_fx_bot?start=tgfx_<one-time-nonce>
+│  Open this link and press Start.
 ◆  Connected Mole Frog (@molefrog)
 @my_fx_bot · polling · /Users/me/code/my-project · streaming · collapsed tools
 ```
@@ -236,9 +233,10 @@ tgfx 0.1.0
 12:04:19 Mole Frog · delivered 1 message · 8.2s
 ```
 
-Steady-state lines label chats by their cached title or username instead of a
-raw numeric ID once the bot has observed them. The wordmark stays plain ASCII
-in the terminal; the 𝒕𝒈(𝒇x) mark belongs to documentation.
+Steady-state lines use stable numeric chat/topic route IDs. `tgfx doctor`
+resolves live group names and rights when a human-readable diagnostic is
+needed, without maintaining a second chat directory. The wordmark stays plain
+ASCII in the terminal; the 𝒕𝒈(𝒇x) mark belongs to documentation.
 
 If the same bot is active in another folder, startup stops before polling:
 
@@ -393,13 +391,13 @@ The intended commands are deliberately limited. Each is one verb, one idea:
 
 | Command | Purpose |
 | --- | --- |
-| `tgfx` | Start in the current directory; onboard if needed. Any other unknown first word is an error with a suggestion, never an implicit start. |
-| `tgfx access` | The read-only map: who can talk to fx, where the bot is admin (with a per-permission checklist), where approvals go, and saved sessions. |
+| `tgfx` | Start in the current directory; onboard if needed. Any other unknown first word is an error, never an implicit start. |
+| `tgfx access` | The read-only map: numeric users and chats that can talk to fx, where approvals go, and saved sessions. |
 | `tgfx allow <id…>` | Add users or chats to the allowlist. Positive IDs are users, negative IDs are chats; `--chat` overrides. |
 | `tgfx deny <id…>` | Remove them. The allowlist can never become empty. |
 | `tgfx approvals <chat>[/topic]` | Route approval cards and failure notices to a chat; with no argument, show the current target. |
 | `tgfx auth [--remove]` | Add, rotate, or remove the Telegram bot token. |
-| `tgfx doctor` | Check FX, Telegram, the approvals chat, live admin rights, SQLite, and workspace access; refreshes the cached chat directory. |
+| `tgfx doctor` | Check FX, Telegram, the approvals chat, live admin rights, SQLite, and workspace access. |
 
 The run flags are `--model <id>`, `--streaming`/`--no-streaming`, and
 `--collapse-tools`/`--no-collapse-tools`; `--json`, `--no-color`, and `--debug`
@@ -444,37 +442,13 @@ automation, not for a second large configuration system.
 The token does not belong in this file. Allowlist and approvals-target IDs do:
 they are explicit workspace configuration, not model context or transient
 delivery state. SQLite continues to own route sessions and recovery state.
-Configs written before the approvals rename (`controlChat`, plus a static
-`admin` profile) migrate in memory on load and adopt this shape on their next
-save.
+### Configuration changes
 
-### Live configuration
-
-Every field in `config.json` applies to a running process without a restart.
-Configuration commands write the file atomically (temp file plus rename) under
-a small advisory write lock that also serializes the process's own rare write
-(supergroup migration), so read-modify-write edits never clobber each other.
-The runtime notices a change within a second — atomic writes always produce a
-fresh inode, so the (mtime, inode, size) triple catches even same-millisecond
-rewrites — re-validates through the same schema, and swaps the config in
-memory. The allowlist is consulted per incoming update, the approvals target
-per card, and renderer defaults per turn, so nothing needs a restart-required
-carve-out. A file that fails validation, or that names a different bot, never
-replaces the running configuration — tgfx logs one warning and keeps going.
-
-Live edits also reach work that is already in flight. The host republishes a
-live-access snapshot (allowlist, protected users, approvals target) into the
-workspace journal on every reload, and MCP sessions consult it on every call
-instead of trusting their launch environment — so `tgfx deny` revokes a
-running group's admin tool plane and `tgfx allow` protects a new user from
-moderation immediately. Approval cards are bound to the chat they were posted
-in: a live `tgfx approvals` change routes new cards to the new chat while
-pending cards stay answerable exactly where they already are. Command menus
-reconcile on reload as well — newly allowed chats gain the menu, denied chats
-lose it, and shutdown cleans up every chat a menu was actually installed in
-this run. `tgfx allow` and friends report which of the two worlds the edit
-landed in: `applied to the running bot` when this workspace's polling process
-holds the machine lock, `will apply on next start` otherwise.
+Configuration commands validate and atomically replace `config.json`. A running
+process keeps the configuration it started with, so `tgfx allow`, `tgfx deny`,
+and `tgfx approvals` explicitly tell the operator to restart tgfx. This keeps
+authorization, MCP capabilities, approval routing, and command menus on one
+consistent startup snapshot.
 
 ## Scope of the first release
 
@@ -916,12 +890,11 @@ per-action human gate. An admin tool executes only when all of these are true:
 3. the call's context and target refs resolve inside the same group and topic;
 4. any required single-use approval succeeds.
 
-`my_chat_member` updates keep the workspace's cached admin standing current, so
-`tgfx access` reports each group's per-permission checklist and promotions are
-noticed the moment they happen. The MCP tool catalog itself is published from
-live rights at session start; a mid-session promotion is picked up by the next
-session, while a mid-session demotion takes effect immediately through the
-execution-time re-check.
+The MCP tool catalog is published from live rights at session start. A
+mid-session promotion is picked up by the next session, while a mid-session
+demotion takes effect immediately through the execution-time re-check.
+`tgfx doctor` queries Telegram directly when the operator wants a current rights
+report.
 
 The intended v1 admin methods are:
 
@@ -1556,8 +1529,8 @@ From a clean machine and a real repository, a user can:
 8. use scoped attachment, file, choice, poll, reply, and reaction tools; react to
    a referenced message from an earlier turn without supplying a raw Telegram
    target ID or escaping the current route;
-9. promote the bot with selected rights in one allowed group, see those rights
-   in `tgfx access`, maintain the group's tgfx-owned pinned bulletin, manage a
+9. promote the bot with selected rights in one allowed group, verify those rights
+   with `tgfx doctor`, maintain the group's tgfx-owned pinned bulletin, manage a
    topic, and complete an approved moderation action without exposing a generic
    Bot API proxy or disturbing unrelated pins;
 10. understand failures from Telegram, FX, permissions, files, and recovery through

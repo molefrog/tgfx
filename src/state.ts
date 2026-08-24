@@ -43,17 +43,6 @@ export type ContextCapability = {
   expires_at: string;
 };
 
-export type ChatDirectoryRow = {
-  bot_id: string;
-  chat_id: string;
-  kind: string | null;
-  title: string | null;
-  username: string | null;
-  admin_status: string | null;
-  admin_rights_json: string;
-  updated_at: string;
-};
-
 export type MessageReference = {
   ref: string;
   bot_id: string;
@@ -199,37 +188,7 @@ CREATE TABLE IF NOT EXISTS context_capabilities (
 
 CREATE INDEX IF NOT EXISTS context_route_active
   ON context_capabilities(route_key, active, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS chat_directory (
-  bot_id TEXT NOT NULL,
-  chat_id TEXT NOT NULL,
-  kind TEXT,
-  title TEXT,
-  username TEXT,
-  admin_status TEXT,
-  admin_rights_json TEXT NOT NULL DEFAULT '[]',
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY(bot_id, chat_id)
-);
-
-CREATE TABLE IF NOT EXISTS workspace_kv (
-  key TEXT PRIMARY KEY,
-  value_json TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
 `;
-
-/**
- * The live access snapshot the host publishes for its MCP subprocesses. Env
- * variables bootstrap a session, but authorization-relevant values are read
- * from here on every call so `tgfx allow`/`deny`/`approvals` edits reach
- * sessions that are already running.
- */
-export type LiveAccess = {
-  allowedChats: string[];
-  protectedUsers: string[];
-  approvals: { chatId: string; topicId: string };
-};
 
 function now(): string { return new Date().toISOString(); }
 
@@ -861,99 +820,6 @@ export class StateStore {
       UPDATE telegram_interactions SET state='expired',updated_at=$now
       WHERE interaction_id=$id AND state='pending'
     `).run({ id, now: now() }).changes === 1;
-  }
-
-  /**
-   * Remembers what Telegram told us about a chat or user: display names for
-   * the access map and log labels, admin standing for the admin tool plane.
-   * Undefined fields keep their previously cached value.
-   */
-  upsertChatInfo(input: {
-    botId: string; chatId: string; kind?: string; title?: string; username?: string;
-  }): void {
-    this.db.query(`
-      INSERT INTO chat_directory(bot_id, chat_id, kind, title, username, updated_at)
-      VALUES ($bot, $chat, $kind, $title, $username, $now)
-      ON CONFLICT(bot_id, chat_id) DO UPDATE SET
-        kind=COALESCE(excluded.kind, chat_directory.kind),
-        title=COALESCE(excluded.title, chat_directory.title),
-        username=COALESCE(excluded.username, chat_directory.username),
-        updated_at=excluded.updated_at
-    `).run({
-      bot: input.botId, chat: input.chatId, kind: input.kind ?? null,
-      title: input.title ?? null, username: input.username ?? null, now: now(),
-    });
-  }
-
-  /**
-   * Records the bot's admin standing in a chat. `unlessNewerThan` makes a
-   * point-in-time read (startup or reload refresh) lose to a fresher
-   * my_chat_member write that landed while the read was in flight.
-   */
-  setChatAdminStatus(
-    botId: string, chatId: string, status: string, rights: string[], unlessNewerThan?: string,
-  ): void {
-    this.db.query(`
-      INSERT INTO chat_directory(bot_id, chat_id, admin_status, admin_rights_json, updated_at)
-      VALUES ($bot, $chat, $status, $rights, $now)
-      ON CONFLICT(bot_id, chat_id) DO UPDATE SET
-        admin_status=excluded.admin_status,
-        admin_rights_json=excluded.admin_rights_json,
-        updated_at=excluded.updated_at
-      WHERE $cutoff IS NULL
-        OR chat_directory.admin_status IS NULL
-        OR chat_directory.updated_at<=$cutoff
-    `).run({
-      bot: botId, chat: chatId, status, rights: JSON.stringify(rights),
-      now: now(), cutoff: unlessNewerThan ?? null,
-    });
-  }
-
-  /** Drops directory rows for chats no longer configured or routed. */
-  pruneChatDirectory(botId: string, keepChatIds: string[]): void {
-    const keep = new Set(keepChatIds);
-    const rows = this.db.query<{ chat_id: string }, [string]>(
-      "SELECT chat_id FROM chat_directory WHERE bot_id=?",
-    ).all(botId);
-    for (const row of rows) {
-      if (keep.has(row.chat_id)) continue;
-      this.db.query("DELETE FROM chat_directory WHERE bot_id=? AND chat_id=?").run(botId, row.chat_id);
-    }
-  }
-
-  setLiveAccess(access: LiveAccess): void {
-    this.db.query(`
-      INSERT INTO workspace_kv(key, value_json, updated_at) VALUES ('live_access', $value, $now)
-      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
-    `).run({ value: JSON.stringify(access), now: now() });
-  }
-
-  liveAccess(): LiveAccess | undefined {
-    const row = this.db.query<{ value_json: string }, []>(
-      "SELECT value_json FROM workspace_kv WHERE key='live_access'",
-    ).get();
-    if (!row) return undefined;
-    try {
-      const parsed = JSON.parse(row.value_json) as LiveAccess;
-      if (!Array.isArray(parsed.allowedChats) || !Array.isArray(parsed.protectedUsers)
-        || typeof parsed.approvals?.chatId !== "string") return undefined;
-      return parsed;
-    } catch { return undefined; }
-  }
-
-  chatInfo(botId: string, chatId: string): ChatDirectoryRow | undefined {
-    return this.db.query<ChatDirectoryRow, [string, string]>(
-      "SELECT * FROM chat_directory WHERE bot_id=? AND chat_id=?",
-    ).get(botId, chatId) ?? undefined;
-  }
-
-  chatAdminRights(botId: string, chatId: string): string[] {
-    const row = this.chatInfo(botId, chatId);
-    if (!row || (row.admin_status !== "administrator" && row.admin_status !== "creator")) return [];
-    try {
-      const rights = JSON.parse(row.admin_rights_json);
-      return Array.isArray(rights) ? rights.filter((value) => typeof value === "string") : [];
-    } catch { return []; }
   }
 
   prune(): void {

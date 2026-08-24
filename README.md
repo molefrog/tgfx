@@ -22,8 +22,8 @@ cd /path/to/your/project
 tgfx
 ```
 
-The first run validates the token, then either shows a QR code and private
-Telegram deep link for one-tap owner pairing or accepts one numeric user/chat ID
+The first run validates the token, then either shows a private Telegram deep
+link for one-tap owner pairing or accepts one numeric user/chat ID
 for an advanced setup. It verifies the approvals chat by sending a setup message
 and writes non-secret settings to `.tgfx/config.json`. Allow more people later
 with `tgfx allow`. The token goes to the operating-system credential store under
@@ -38,7 +38,7 @@ numeric allowlist are discarded without retaining their content.
 
 ```text
 tgfx                           run fx in this folder (sets up on first run)
-tgfx access                    who can talk to fx, where it's admin, who approves
+tgfx access                    who can talk to fx, who approves, saved sessions
 tgfx allow <id…>               add users or chats to the allowlist
 tgfx deny <id…>                remove them
 tgfx approvals <chat>[/topic]  route approval cards to a chat
@@ -47,15 +47,15 @@ tgfx doctor                    deep diagnostics: token, chats, rights, fx
 ```
 
 `tgfx allow` infers users from positive IDs and chats from negative ones
-(`--chat` overrides). Configuration edits apply to a running `tgfx` within a
-second — no restart. Run flags: `--model <id>`, `--no-streaming`,
+(`--chat` overrides). Configuration edits are saved immediately and apply the
+next time `tgfx` starts. Run flags: `--model <id>`, `--no-streaming`,
 `--no-collapse-tools`; global: `--json`, `--no-color`, `--debug`.
 
 Group administration needs no tgfx-side configuration: for an allowlisted group
 the admin tools are exactly the bot's live Telegram admin rights. Promote the
 bot in Telegram to enable them, demote it to revoke; destructive actions still
-require a one-tap approval card in the approvals chat, and `tgfx access` shows
-the current standing per group with a per-permission checklist.
+require a one-tap approval card in the approvals chat. `tgfx doctor` reports
+the bot's current rights in every allowlisted group.
 
 Telegram has `/fx`, `/cancel`, `/new`, `/retry`, and `/discard`. Commands
 advertised by the active 𝒇x ACP session are added to that chat's slash menu. When
