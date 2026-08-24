@@ -476,16 +476,9 @@ const startArgs = {
   "no-color": { type: "boolean", description: "Disable terminal color" },
 } as const;
 
-const main = defineCommand({
+const startCommand = defineCommand({
   meta: { name: "tgfx", version: VERSION, description: "Run 𝒇x in this folder through one Telegram bot" },
   args: startArgs,
-  subCommands: {
-    auth: authCommand,
-    access: accessCommand,
-    admin: adminCommand,
-    routes: routesCommand,
-    doctor: doctorCommand,
-  },
   async run({ args }) {
     if (args.noColor) process.env.NO_COLOR = "1";
     const resolved = await runtime(workspacePaths(), { json: Boolean(args.json) });
@@ -523,8 +516,24 @@ const main = defineCommand({
   },
 });
 
+const main = defineCommand({
+  meta: { name: "tgfx", version: VERSION, description: "Run 𝒇x in this folder through one Telegram bot" },
+  args: startArgs,
+  subCommands: {
+    auth: authCommand,
+    access: accessCommand,
+    admin: adminCommand,
+    routes: routesCommand,
+    doctor: doctorCommand,
+  },
+});
+
 // MCP stdio owns stdout. Bypass Citty and Clack completely so no terminal UI
 // byte can corrupt its newline-delimited JSON-RPC channel.
 const requested = process.argv[2];
 if (requested === "mcp") await runTelegramMcpServer();
-else await runMain(main);
+else if (["--help", "-h", "--version", "-v", "auth", "access", "admin", "routes", "doctor"].includes(requested ?? "")) {
+  await runMain(main);
+} else {
+  await runMain(startCommand);
+}
