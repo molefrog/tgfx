@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { FakeTelegram } from "./fixtures/fake-telegram";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -14,10 +15,10 @@ type ListedTool = {
   annotations?: Record<string, boolean>;
 };
 
-async function listTools(admin = false): Promise<ListedTool[]> {
+async function listTools(options: { chatId?: string; allowed?: string[]; apiRoot?: string } = {}): Promise<ListedTool[]> {
   const root = mkdtempSync(join(tmpdir(), "tgfx-mcp-"));
   temporary.push(root);
-  const chatId = "42";
+  const chatId = options.chatId ?? "42";
   const child = Bun.spawn([process.execPath, resolve("src/index.ts"), "mcp"], {
     cwd: root,
     env: {
@@ -28,13 +29,10 @@ async function listTools(admin = false): Promise<ListedTool[]> {
       TGFX_MCP_WORKSPACE: root,
       TGFX_MCP_DATABASE: join(root, ".tgfx", "state.sqlite"),
       TGFX_MCP_FILES: join(root, ".tgfx", "files"),
-      TGFX_MCP_CONTROL_CHAT: chatId,
-      TGFX_MCP_CONTROL_TOPIC: "0",
-      TGFX_MCP_ADMIN_CHATS: JSON.stringify(admin ? [chatId] : []),
-      TGFX_MCP_ADMIN_CAPABILITIES: JSON.stringify(admin
-        ? ["pins", "topics", "delete_messages", "moderation", "join_requests"]
-        : []),
-      TGFX_MCP_SKIP_RIGHTS_CHECK: "1",
+      TGFX_MCP_APPROVALS_CHAT: "42",
+      TGFX_MCP_APPROVALS_TOPIC: "0",
+      TGFX_MCP_ALLOWED_CHATS: JSON.stringify(options.allowed ?? []),
+      ...(options.apiRoot ? { TGFX_INTERNAL_TELEGRAM_API_ROOT: options.apiRoot } : {}),
     },
     stdin: "pipe",
     stdout: "pipe",
@@ -79,8 +77,8 @@ describe("Telegram MCP catalog", () => {
         TGFX_MCP_WORKSPACE: root,
         TGFX_MCP_DATABASE: join(root, ".tgfx", "state.sqlite"),
         TGFX_MCP_FILES: join(root, ".tgfx", "files"),
-        TGFX_MCP_CONTROL_CHAT: "42",
-        TGFX_MCP_ADMIN_CHATS: "{}",
+        TGFX_MCP_APPROVALS_CHAT: "42",
+        TGFX_MCP_ALLOWED_CHATS: "{}",
       },
       stdin: "ignore",
       stdout: "ignore",
@@ -88,7 +86,7 @@ describe("Telegram MCP catalog", () => {
     });
     const stderr = await new Response(child.stderr).text();
     expect(await child.exited).not.toBe(0);
-    expect(stderr).toContain("Invalid internal tgfx MCP environment: TGFX_MCP_ADMIN_CHATS");
+    expect(stderr).toContain("Invalid internal tgfx MCP environment: TGFX_MCP_ALLOWED_CHATS");
   });
 
   test("exposes only the six scoped core tools by default", async () => {
@@ -110,22 +108,76 @@ describe("Telegram MCP catalog", () => {
     expect(schemas.create_poll.properties?.multiple.default).toBeFalse();
   });
 
-  test("adds only explicitly enabled route-admin capabilities", async () => {
-    const tools = await listTools(true);
-    const names = tools.map((tool) => tool.name);
-    expect(names).toContain("set_pinned_message");
-    expect(names).toContain("manage_topic");
-    expect(names).toContain("delete_messages");
-    expect(names).toContain("moderate_member");
-    expect(names).toContain("review_join_request");
-    expect(tools).toHaveLength(13);
-    const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-    expect(byName.delete_messages.annotations?.destructiveHint).toBeTrue();
-    expect(byName.moderate_member.inputSchema.properties?.action.enum).toEqual([
-      "ban", "unban", "restrict", "restore",
-    ]);
-    expect(byName.manage_topic.inputSchema.properties?.action.enum).toEqual([
-      "create", "rename", "close", "reopen",
-    ]);
+  test("derives admin tools from the bot's live Telegram rights", async () => {
+    const telegram = new FakeTelegram();
+    telegram.chatMembers.set("-9", {
+      status: "administrator",
+      user: { id: 100, is_bot: true, first_name: "Bot" },
+      can_pin_messages: true,
+      can_manage_topics: true,
+      can_delete_messages: true,
+      can_restrict_members: true,
+      can_invite_users: true,
+      is_anonymous: false,
+    });
+    try {
+      const tools = await listTools({ chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
+      const names = tools.map((tool) => tool.name);
+      expect(names).toContain("set_pinned_message");
+      expect(names).toContain("manage_topic");
+      expect(names).toContain("delete_messages");
+      expect(names).toContain("moderate_member");
+      expect(names).toContain("review_join_request");
+      expect(tools).toHaveLength(13);
+      const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+      expect(byName.delete_messages!.annotations?.destructiveHint).toBeTrue();
+      expect(byName.moderate_member!.inputSchema.properties?.action.enum).toEqual([
+        "ban", "unban", "restrict", "restore",
+      ]);
+      expect(byName.manage_topic!.inputSchema.properties?.action.enum).toEqual([
+        "create", "rename", "close", "reopen",
+      ]);
+    } finally {
+      await telegram.stop();
+    }
+  });
+
+  test("publishes only the tools matching partial Telegram rights", async () => {
+    const telegram = new FakeTelegram();
+    telegram.chatMembers.set("-9", {
+      status: "administrator",
+      user: { id: 100, is_bot: true, first_name: "Bot" },
+      can_pin_messages: true,
+      can_manage_topics: false,
+      can_delete_messages: false,
+      can_restrict_members: false,
+      can_invite_users: false,
+      is_anonymous: false,
+    });
+    try {
+      const tools = await listTools({ chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
+      const names = tools.map((tool) => tool.name);
+      expect(names).toContain("set_pinned_message");
+      expect(names).toContain("pin_message");
+      expect(names).not.toContain("manage_topic");
+      expect(names).not.toContain("delete_messages");
+      expect(names).not.toContain("moderate_member");
+      expect(names).not.toContain("review_join_request");
+    } finally {
+      await telegram.stop();
+    }
+  });
+
+  test("keeps admin tools off for an allowlisted group where the bot is a plain member", async () => {
+    const telegram = new FakeTelegram();
+    try {
+      const tools = await listTools({ chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
+      expect(tools.map((tool) => tool.name)).toEqual([
+        "reply_current", "set_reaction", "download_attachment",
+        "send_file", "request_choice", "create_poll",
+      ]);
+    } finally {
+      await telegram.stop();
+    }
   });
 });

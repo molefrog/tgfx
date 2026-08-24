@@ -20,22 +20,12 @@ export const configSchema = z.object({
   }).refine((value) => value.userIds.length + value.chatIds.length > 0, {
     message: "at least one allowed user or chat is required",
   }),
-  controlChat: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
+  approvals: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
   renderer: rendererSchema.default({
     mode: "streaming",
     collapseTools: true,
     updateEveryMs: 800,
   }),
-  admin: z.object({
-    chatIds: z.array(decimalId).default([]),
-    capabilities: z.array(z.enum([
-      "pins",
-      "topics",
-      "delete_messages",
-      "moderation",
-      "join_requests",
-    ])).default([]),
-  }).default({ chatIds: [], capabilities: [] }),
 }) satisfies z.ZodType<TgfxConfig>;
 
 export type WorkspacePaths = {

@@ -4,7 +4,7 @@ import type { BotCommand, CallbackQuery, Update } from "grammy/types";
 import { FxRouteSession } from "./fx/acp";
 import { AcpProjector } from "./fx/projector";
 import { StateStore, type InboxRow } from "./state";
-import { TelegramApi, TelegramError } from "./telegram/api";
+import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
 import { isRetryableTelegramError, recoverOutbox, TurnRenderer } from "./telegram/renderer";
 import { redactSecrets } from "./secrets";
 import {
@@ -16,6 +16,7 @@ import {
   toEnvelope,
 } from "./telegram/normalize";
 import type {
+  AdminCapability,
   BotIdentity,
   InboundMessage,
   Route,
@@ -107,6 +108,8 @@ function validDynamicCommands(commands: Array<{ name: string; description: strin
   }).slice(0, 100 - BUILTINS.length);
 }
 
+export type TgfxLogEvent = { event: string; message: string } & Record<string, unknown>;
+
 export class TgfxApp {
   private readonly state: StateStore;
   private readonly sessions = new Map<string, FxRouteSession>();
@@ -116,6 +119,7 @@ export class TgfxApp {
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
   private readonly pollAbort = new AbortController();
+  private readonly config: TgfxConfig;
   private pollTask?: Promise<void>;
   private stopping = false;
   private stopTask?: Promise<void>;
@@ -131,13 +135,21 @@ export class TgfxApp {
     fxBinary: string;
     model?: string;
     renderer?: Partial<TgfxConfig["renderer"]>;
-    log?: (message: string) => void;
+    log?: (event: TgfxLogEvent) => void;
   }) {
+    this.config = options.config;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
   }
 
-  private log(message: string): void { (this.options.log ?? console.log)(message); }
+  private log(input: string | TgfxLogEvent): void {
+    const event = typeof input === "string" ? { event: "log", message: input } : input;
+    (this.options.log ?? ((value: TgfxLogEvent) => console.log(value.message)))(event);
+  }
+
+  private label(chatId: string, topicId = "0"): string {
+    return topicId === "0" ? chatId : `${chatId}/${topicId}`;
+  }
 
   async run(): Promise<void> {
     const webhook = await this.options.telegram.getWebhookInfo();
@@ -149,9 +161,9 @@ export class TgfxApp {
     const recovery = this.state.recoverInbox();
     if (recovery.interrupted) {
       await this.options.telegram.sendText(
-        this.options.config.controlChat.chatId,
+        this.config.approvals.chatId,
         `${recovery.interrupted} accepted 𝒇x turn${recovery.interrupted === 1 ? " was" : "s were"} interrupted by the previous process. Use /retry in its chat to start a new attempt, or /discard to forget it.`,
-        this.options.config.controlChat.topicId,
+        this.config.approvals.topicId,
       ).catch(() => undefined);
     }
     for (const row of recovery.received) {
@@ -162,15 +174,19 @@ export class TgfxApp {
       if (mediaGroupId) this.scheduleAlbum(row.id, row.route_key, mediaGroupId, 0);
       else this.enqueue(row.id, row.route_key);
     }
-    this.log(`@${this.options.bot.username ?? this.options.bot.id} · polling Telegram`);
-    this.log(`workspace · ${this.options.paths.workspace}`);
-    this.log(`renderer · ${this.rendererConfig.mode}${this.rendererConfig.collapseTools ? " · collapsed tools" : " · visible tools"}`);
+    this.log({
+      event: "polling.started",
+      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.rendererConfig.mode}${this.rendererConfig.collapseTools ? " · collapsed tools" : " · visible tools"}`,
+      bot: this.options.bot.id,
+      workspace: this.options.paths.workspace,
+      renderer: this.rendererConfig.mode,
+    });
     this.pollTask = this.poll();
     await Promise.race([this.pollTask, this.stopped]);
   }
 
   private get rendererConfig(): TgfxConfig["renderer"] {
-    return { ...this.options.config.renderer, ...this.options.renderer };
+    return { ...this.config.renderer, ...this.options.renderer };
   }
 
   stop(): Promise<void> {
@@ -192,7 +208,7 @@ export class TgfxApp {
         ?? waiter.options.find((option) => option.kind === "reject_always");
       this.state.expireInteraction(id);
       expiredCards.push(this.options.telegram.editReplyMarkup(
-        this.options.config.controlChat.chatId,
+        this.config.approvals.chatId,
         waiter.messageId,
         { inline_keyboard: [[{ text: "Cancelled · tgfx stopped", callback_data: "resolved" }]] },
       ).catch(() => undefined));
@@ -213,8 +229,8 @@ export class TgfxApp {
     await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
     await queued;
     const menuChats = new Set([
-      ...this.options.config.access.chatIds,
-      ...this.options.config.access.userIds,
+      ...this.config.access.chatIds,
+      ...this.config.access.userIds,
       ...this.state.routes().filter((route) => route.bot_id === this.options.bot.id).map((route) => route.chat_id),
     ]);
     await Promise.allSettled([...menuChats].map((chatId) => this.options.telegram.deleteCommands(chatId)));
@@ -254,9 +270,8 @@ export class TgfxApp {
       const hasOldRoute = this.state.routes().some((route) =>
         route.bot_id === this.options.bot.id && route.chat_id === migration.oldChatId
       );
-      const configuredOld = this.options.config.access.chatIds.includes(migration.oldChatId)
-        || this.options.config.admin.chatIds.includes(migration.oldChatId)
-        || this.options.config.controlChat.chatId === migration.oldChatId;
+      const configuredOld = this.config.access.chatIds.includes(migration.oldChatId)
+        || this.config.approvals.chatId === migration.oldChatId;
       // Telegram may deliver both `migrate_to_chat_id` and
       // `migrate_from_chat_id`. Once the first half moved all state and config,
       // the second is an acknowledgement, not a reason to recreate the old route.
@@ -271,10 +286,10 @@ export class TgfxApp {
         topicId: "0",
         chatKind: "group",
       };
-      const authorized = this.options.config.access.chatIds.includes(migration.oldChatId)
-        || this.options.config.access.chatIds.includes(migration.newChatId)
+      const authorized = this.config.access.chatIds.includes(migration.oldChatId)
+        || this.config.access.chatIds.includes(migration.newChatId)
         || (migration.senderId !== undefined
-          && this.options.config.access.userIds.includes(migration.senderId));
+          && this.config.access.userIds.includes(migration.senderId));
       if (authorized) this.state.ensureRoute(route);
       const id = this.state.ingestUpdate({
         botId: this.options.bot.id,
@@ -295,7 +310,7 @@ export class TgfxApp {
       )?.ref,
     );
     if (message) {
-      const authorized = isAuthorized(this.options.config, message);
+      const authorized = isAuthorized(this.config, message);
       if (authorized) this.state.ensureRoute(message.route);
       const id = this.state.ingestUpdate({
         botId: this.options.bot.id,
@@ -358,8 +373,8 @@ export class TgfxApp {
         topicId,
         chatKind: callback.message.chat.type,
       };
-      const authorized = this.options.config.access.chatIds.includes(chatId)
-        || this.options.config.access.userIds.includes(String(callback.from.id));
+      const authorized = this.config.access.chatIds.includes(chatId)
+        || this.config.access.userIds.includes(String(callback.from.id));
       if (authorized) this.state.ensureRoute(route);
       const id = this.state.ingestUpdate({
         botId: this.options.bot.id,
@@ -386,8 +401,8 @@ export class TgfxApp {
           topicId: routeRow.topic_id, chatKind: routeRow.chat_kind,
         };
         const actorId = pollAnswer.user?.id ?? pollAnswer.voter_chat?.id;
-        const authorized = this.options.config.access.chatIds.includes(route.chatId)
-          || (actorId !== undefined && this.options.config.access.userIds.includes(String(actorId)));
+        const authorized = this.config.access.chatIds.includes(route.chatId)
+          || (actorId !== undefined && this.config.access.userIds.includes(String(actorId)));
         const id = this.state.ingestUpdate({
           botId: this.options.bot.id, updateId: update.update_id, routeKey: route.key,
           payload: { kind: "poll_answer", update, route } satisfies PersistedPayload,
@@ -405,9 +420,8 @@ export class TgfxApp {
         key: routeKey(this.options.bot.id, chatId, "0"), botId: this.options.bot.id,
         chatId, topicId: "0", chatKind: joinRequest.chat.type,
       };
-      const enabled = this.options.config.access.chatIds.includes(chatId)
-        && this.options.config.admin.chatIds.includes(chatId)
-        && this.options.config.admin.capabilities.includes("join_requests");
+      const enabled = this.config.access.chatIds.includes(chatId)
+        && await this.hasAdminCapability(chatId, "join_requests");
       if (enabled) this.state.ensureRoute(route);
       const id = this.state.ingestUpdate({
         botId: this.options.bot.id, updateId: update.update_id, routeKey: route.key,
@@ -504,9 +518,9 @@ export class TgfxApp {
       this.state.markInbox(inboxId, "failed", reason);
       this.log(`Update ${row.update_id} failed · ${reason}`);
       await this.options.telegram.sendText(
-        this.options.config.controlChat.chatId,
+        this.config.approvals.chatId,
         `tgfx could not finish an accepted Telegram update.\n\n${reason.slice(0, 3000)}`,
-        this.options.config.controlChat.topicId,
+        this.config.approvals.topicId,
       ).catch(() => undefined);
     }
   }
@@ -581,7 +595,7 @@ export class TgfxApp {
         await this.options.telegram.sendText(message.route.chatId, "Usage: /fx <request>", message.route.topicId);
         return;
       }
-      await this.runTurn(row, message, makePrompt(message, command.args, this.adminContext(message.route)));
+      await this.runTurn(row, message, makePrompt(message, command.args, await this.adminContext(message.route)));
       return;
     }
 
@@ -601,13 +615,28 @@ export class TgfxApp {
       return;
     }
 
-    await this.runTurn(row, message, makePrompt(message, undefined, this.adminContext(message.route)));
+    await this.runTurn(row, message, makePrompt(message, undefined, await this.adminContext(message.route)));
   }
 
-  private adminContext(route: Route): Record<string, unknown> | undefined {
-    if (!this.options.config.admin.chatIds.includes(route.chatId)) return undefined;
+  private async adminCapabilities(chatId: string): Promise<AdminCapability[]> {
+    if (!this.config.access.chatIds.includes(chatId) || Number(chatId) >= 0) return [];
+    try {
+      const member = await this.options.telegram.api.getChatMember(chatId, Number(this.options.bot.id));
+      return [...adminCapabilitiesForMember(member)];
+    } catch {
+      return [];
+    }
+  }
+
+  private async hasAdminCapability(chatId: string, capability: AdminCapability): Promise<boolean> {
+    return (await this.adminCapabilities(chatId)).includes(capability);
+  }
+
+  private async adminContext(route: Route): Promise<Record<string, unknown> | undefined> {
+    const capabilities = await this.adminCapabilities(route.chatId);
+    if (!capabilities.length) return undefined;
     return {
-      capabilities: this.options.config.admin.capabilities,
+      capabilities,
       pending_join_requests: this.state.pendingJoinRequests(route.key),
     };
   }
@@ -626,22 +655,16 @@ export class TgfxApp {
     const replaceId = (values: string[]): string[] => [...new Set(
       values.map((value) => value === oldChatId ? newChatId : value),
     )];
-    const before = JSON.stringify({
-      access: this.options.config.access.chatIds,
-      admin: this.options.config.admin.chatIds,
-      control: this.options.config.controlChat,
-    });
-    this.options.config.access.chatIds = replaceId(this.options.config.access.chatIds);
-    this.options.config.admin.chatIds = replaceId(this.options.config.admin.chatIds);
-    if (this.options.config.controlChat.chatId === oldChatId) {
-      this.options.config.controlChat.chatId = newChatId;
+    this.config.access.chatIds = replaceId(this.config.access.chatIds);
+    if (this.config.approvals.chatId === oldChatId) this.config.approvals.chatId = newChatId;
+    try {
+      await saveConfig(this.options.paths, this.config);
+    } catch (error) {
+      this.log({
+        event: "config.invalid",
+        message: `could not persist the migrated chat ID · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+      });
     }
-    const after = JSON.stringify({
-      access: this.options.config.access.chatIds,
-      admin: this.options.config.admin.chatIds,
-      control: this.options.config.controlChat,
-    });
-    if (before !== after) await saveConfig(this.options.paths, this.options.config);
 
     if (migrated.length) {
       await this.options.telegram.deleteCommands(oldChatId).catch(() => undefined);
@@ -656,9 +679,14 @@ export class TgfxApp {
       ));
       await this.options.telegram.sendText(
         newChatId,
-        "Group migration detected. 𝒕𝒈(𝒇x) preserved this group's workspace session under the new supergroup ID.",
+        "Group migration detected. tgfx preserved this group's workspace session under the new supergroup ID.",
       );
-      this.log(`Telegram group migrated · ${oldChatId} → ${newChatId}`);
+      this.log({
+        event: "chat.migrated",
+        message: `Telegram group migrated · ${oldChatId} → ${newChatId}`,
+        oldChatId,
+        newChatId,
+      });
     }
   }
 
@@ -722,11 +750,11 @@ export class TgfxApp {
     const callback = update.callback_query;
     if (!callback?.data || !callback.message) return;
     const [kind, id, value] = callback.data.split(":", 3);
-    const inControlRoute = route.chatId === this.options.config.controlChat.chatId
-      && route.topicId === this.options.config.controlChat.topicId;
+    const inApprovalsRoute = route.chatId === this.config.approvals.chatId
+      && route.topicId === this.config.approvals.topicId;
     if (kind === "mcp" && id && (value === "approve" || value === "deny")) {
-      if (!inControlRoute) {
-        await this.options.telegram.answerCallback(callback.id, "This approval belongs to the control chat");
+      if (!inApprovalsRoute) {
+        await this.options.telegram.answerCallback(callback.id, "This approval belongs to the approvals chat");
         return;
       }
       const approval = this.state.interaction(id);
@@ -742,8 +770,8 @@ export class TgfxApp {
       return;
     }
     if (kind === "fxp" && id && value !== undefined) {
-      if (!inControlRoute) {
-        await this.options.telegram.answerCallback(callback.id, "This permission belongs to the control chat");
+      if (!inApprovalsRoute) {
+        await this.options.telegram.answerCallback(callback.id, "This permission belongs to the approvals chat");
         return;
       }
       const waiter = this.permissionWaiters.get(id);
@@ -842,8 +870,13 @@ export class TgfxApp {
     renderer.start();
     this.state.markInbox(row.id, "running");
     const startedAt = performance.now();
-    const routeLabel = `${message.route.chatId}${message.route.topicId === "0" ? "" : `/${message.route.topicId}`}`;
-    this.log(`${routeLabel} · 𝒇x turn started`);
+    const routeLabel = this.label(message.route.chatId, message.route.topicId);
+    this.log({
+      event: "turn.started",
+      message: `${routeLabel} · turn started`,
+      chat: message.route.chatId,
+      topic: message.route.topicId,
+    });
     try {
       await session.prompt(blocks, {
         signal: controller.signal,
@@ -853,7 +886,7 @@ export class TgfxApp {
         if (this.stopping) throw controller.signal.reason ?? new Error("tgfx stopped");
         await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
         this.state.clearLastPrompt(message.route.key);
-        this.log(`${routeLabel} · 𝒇x turn cancelled`);
+        this.log({ event: "turn.cancelled", message: `${routeLabel} · turn cancelled`, chat: message.route.chatId });
         return;
       }
       const messageIds = await renderer.finish({
@@ -863,13 +896,19 @@ export class TgfxApp {
       });
       this.state.clearLastPrompt(message.route.key);
       const seconds = ((performance.now() - startedAt) / 1_000).toFixed(1);
-      this.log(`${routeLabel} · delivered ${messageIds.length} message${messageIds.length === 1 ? "" : "s"} · ${seconds}s`);
+      this.log({
+        event: "turn.delivered",
+        message: `${routeLabel} · delivered ${messageIds.length} message${messageIds.length === 1 ? "" : "s"} · ${seconds}s`,
+        chat: message.route.chatId,
+        messages: messageIds.length,
+        seconds: Number(seconds),
+      });
     } catch (error) {
       if (controller.signal.aborted) {
         if (this.stopping) throw error;
         await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
         this.state.clearLastPrompt(message.route.key);
-        this.log(`${routeLabel} · 𝒇x turn cancelled`);
+        this.log({ event: "turn.cancelled", message: `${routeLabel} · turn cancelled`, chat: message.route.chatId });
         return;
       }
       throw error;
@@ -901,13 +940,18 @@ export class TgfxApp {
           TGFX_MCP_WORKSPACE: this.options.paths.workspace,
           TGFX_MCP_DATABASE: this.options.paths.database,
           TGFX_MCP_FILES: this.options.paths.files,
-          TGFX_MCP_CONTROL_CHAT: this.options.config.controlChat.chatId,
-          TGFX_MCP_CONTROL_TOPIC: this.options.config.controlChat.topicId,
-          TGFX_MCP_ADMIN_CHATS: JSON.stringify(this.options.config.admin.chatIds),
-          TGFX_MCP_ADMIN_CAPABILITIES: JSON.stringify(this.options.config.admin.capabilities),
+          TGFX_MCP_APPROVALS_CHAT: this.config.approvals.chatId,
+          TGFX_MCP_APPROVALS_TOPIC: this.config.approvals.topicId,
+          TGFX_MCP_ALLOWED_CHATS: JSON.stringify(this.config.access.chatIds),
+          ...(process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT
+            ? { TGFX_INTERNAL_TELEGRAM_API_ROOT: process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT }
+            : {}),
+          ...(process.env.TGFX_INTERNAL_TELEGRAM_FILE_ROOT
+            ? { TGFX_INTERNAL_TELEGRAM_FILE_ROOT: process.env.TGFX_INTERNAL_TELEGRAM_FILE_ROOT }
+            : {}),
           TGFX_MCP_PROTECTED_USERS: JSON.stringify([
             this.options.bot.id,
-            ...this.options.config.access.userIds,
+            ...this.config.access.userIds,
           ]),
         },
       },
@@ -932,7 +976,14 @@ export class TgfxApp {
           `Could not report the replaced fx session · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
         ));
       }
-      this.log(`${route.chatId}${route.topicId === "0" ? "" : `/${route.topicId}`} · fx ${info.agentVersion} · ${info.model}`);
+      this.log({
+        event: "session.started",
+        message: `${this.label(route.chatId, route.topicId)} · fx ${info.agentVersion} · ${info.model}`,
+        chat: route.chatId,
+        topic: route.topicId,
+        fxVersion: info.agentVersion,
+        model: info.model,
+      });
       return session;
     } catch (error) {
       this.sessions.delete(route.key);
@@ -971,9 +1022,9 @@ export class TgfxApp {
     let card;
     try {
       card = await this.options.telegram.sendText(
-        this.options.config.controlChat.chatId,
+        this.config.approvals.chatId,
         `𝒇x permission\n\n${request.toolCall.title ?? "Tool action"}`,
-        this.options.config.controlChat.topicId,
+        this.config.approvals.topicId,
         { reply_markup: { inline_keyboard: keyboard } },
       );
     } catch (error) {
@@ -989,7 +1040,8 @@ export class TgfxApp {
         resolve(response);
       };
       this.permissionWaiters.set(id, {
-        options: request.options, messageId: card.message_id, routeKey: route.key, resolve: finish,
+        options: request.options, messageId: card.message_id,
+        routeKey: route.key, resolve: finish,
       });
       void (async () => {
         while (!settled && !signal?.aborted && Date.now() < Date.parse(expiresAt)) {
@@ -1009,7 +1061,7 @@ export class TgfxApp {
           ?? request.options.find((option) => option.kind === "reject_always");
         if (this.state.expireInteraction(id)) {
           await this.options.telegram.editReplyMarkup(
-            this.options.config.controlChat.chatId,
+            this.config.approvals.chatId,
             card.message_id,
             { inline_keyboard: [[{
               text: signal?.aborted ? "Cancelled" : "Expired", callback_data: "resolved",
@@ -1025,9 +1077,9 @@ export class TgfxApp {
 
   private async installInitialMenus(): Promise<void> {
     const chats = new Set([
-      ...this.options.config.access.chatIds,
-      ...this.options.config.access.userIds,
-      this.options.config.controlChat.chatId,
+      ...this.config.access.chatIds,
+      ...this.config.access.userIds,
+      this.config.approvals.chatId,
     ]);
     const persisted = new Map<string, Array<{ name: string; description: string }>>();
     for (const route of this.state.routes()) {

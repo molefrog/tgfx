@@ -2,7 +2,13 @@ import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userStateDirectory, type WorkspacePaths } from "./config";
 
-type LockRecord = { pid: number; botId: string; workspace: string; startedAt: string; lockId: string };
+type LockRecord = {
+  pid: number;
+  botId: string;
+  workspace: string;
+  startedAt: string;
+  lockId: string;
+};
 
 function processExists(pid: number): boolean {
   try {

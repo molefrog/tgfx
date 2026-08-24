@@ -27,6 +27,7 @@ export type RouteRow = {
   generation: number;
   dynamic_commands_json: string;
   last_prompt_json: string | null;
+  updated_at: string;
 };
 
 export type ContextCapability = {

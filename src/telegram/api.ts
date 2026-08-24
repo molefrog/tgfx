@@ -42,6 +42,14 @@ export function adminCapabilitiesForMember(member: ChatMember): Set<AdminCapabil
   return capabilities;
 }
 
+/**
+ * Builds a Bot API client honoring TGFX_INTERNAL_TELEGRAM_API_ROOT, which
+ * points tgfx at a local Bot API simulator in tests and development.
+ */
+export function createTelegramApi(token: string): TelegramApi {
+  return new TelegramApi(token, process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT);
+}
+
 export class TelegramApi {
   readonly api: Api;
   constructor(token: string, apiRoot?: string) {
@@ -60,7 +68,10 @@ export class TelegramApi {
     return this.call(() => this.api.getUpdates({
         offset,
         timeout,
-        allowed_updates: ["message", "edited_message", "callback_query", "poll_answer", "chat_join_request"],
+        allowed_updates: [
+          "message", "edited_message", "callback_query", "poll_answer",
+          "chat_join_request", "my_chat_member",
+        ],
       }, signal));
   }
 

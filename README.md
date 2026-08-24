@@ -22,28 +22,40 @@ cd /path/to/your/project
 tgfx
 ```
 
-The first run validates the token, then either gives you a private Telegram
-deep link for one-click owner pairing or accepts one numeric user/chat ID for an
-advanced setup. It verifies the control chat by sending a setup message and
-writes non-secret settings to `.tgfx/config.json`. Add more principals later with
-`tgfx access`. The token goes to the operating-system credential store under the
-bot's numeric ID. `TELEGRAM_BOT_TOKEN` may be used instead and is never saved by
-`tgfx`.
+The first run validates the token, then either shows a private Telegram deep
+link for one-tap owner pairing or accepts one numeric user/chat ID
+for an advanced setup. It verifies the approvals chat by sending a setup message
+and writes non-secret settings to `.tgfx/config.json`. Allow more people later
+with `tgfx allow`. The token goes to the operating-system credential store under
+the bot's numeric ID. `TELEGRAM_BOT_TOKEN` may be used instead and is never
+saved by `tgfx`.
 
 One process owns one bot and one current folder. A machine-wide lock prevents the
 same bot from polling in two workspaces at once. Messages outside the required
 numeric allowlist are discarded without retaining their content.
 
-## Useful commands
+## Commands
 
 ```text
-tgfx [--model <id>] [--no-streaming] [--no-collapse-tools]
-tgfx auth
-tgfx access [--allow-user <id>] [--allow-chat <id>]
-tgfx admin --chat <group-id> --capabilities pins,topics,...
-tgfx routes
-tgfx doctor
+tgfx                           run fx in this folder (sets up on first run)
+tgfx access                    who can talk to fx, who approves, saved sessions
+tgfx allow <id…>               add users or chats to the allowlist
+tgfx deny <id…>                remove them
+tgfx approvals <chat>[/topic]  route approval cards to a chat
+tgfx auth [--remove]           add, rotate, or remove the bot token
+tgfx doctor                    deep diagnostics: token, chats, rights, fx
 ```
+
+`tgfx allow` infers users from positive IDs and chats from negative ones
+(`--chat` overrides). Configuration edits are saved immediately and apply the
+next time `tgfx` starts. Run flags: `--model <id>`, `--no-streaming`,
+`--no-collapse-tools`; global: `--json`, `--no-color`, `--debug`.
+
+Group administration needs no tgfx-side configuration: for an allowlisted group
+the admin tools are exactly the bot's live Telegram admin rights. Promote the
+bot in Telegram to enable them, demote it to revoke; destructive actions still
+require a one-tap approval card in the approvals chat. `tgfx doctor` reports
+the bot's current rights in every allowlisted group.
 
 Telegram has `/fx`, `/cancel`, `/new`, `/retry`, and `/discard`. Commands
 advertised by the active 𝒇x ACP session are added to that chat's slash menu. When
@@ -57,6 +69,11 @@ The local `.tgfx/state.sqlite` file is an operational journal, not a chat archiv
 accepted inbound and final-delivery bodies are scrubbed after success, drafts are
 not stored, raw ACP transcripts are off, and opaque references prevent the model
 from choosing raw Telegram IDs or Bot API file URLs.
+
+For development and tests, `TGFX_INTERNAL_TELEGRAM_API_ROOT` points every
+Telegram call (the poller and the MCP subprocess alike) at a local Bot API
+simulator; `tests/fixtures/fake-telegram.ts` ships one that speaks the real
+HTTP protocol, injects updates, and records outgoing calls.
 
 Read the full [specification](./doc/SPEC.md). Local whiteboards and experiments
 are intentionally excluded from the repository.

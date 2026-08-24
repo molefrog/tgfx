@@ -24,15 +24,12 @@ export type TgfxConfig = {
     userIds: DecimalId[];
     chatIds: DecimalId[];
   };
-  controlChat: {
+  /** Where approval cards and delivery-failure notices go. */
+  approvals: {
     chatId: DecimalId;
     topicId: DecimalId;
   };
   renderer: RendererConfig;
-  admin: {
-    chatIds: DecimalId[];
-    capabilities: AdminCapability[];
-  };
 };
 
 export type Route = {

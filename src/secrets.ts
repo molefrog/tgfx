@@ -12,6 +12,10 @@ export async function setBotToken(botId: string, token: string): Promise<void> {
   await Bun.secrets.set({ service: SERVICE, name: name(botId), value: token });
 }
 
+export async function deleteBotToken(botId: string): Promise<boolean> {
+  return Bun.secrets.delete({ service: SERVICE, name: name(botId) });
+}
+
 export function tokenFromEnvironment(): string | undefined {
   const value = process.env.TELEGRAM_BOT_TOKEN?.trim();
   return value || undefined;

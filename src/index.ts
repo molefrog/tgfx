@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
-import { confirm, intro, isCancel, note, outro, password, select, spinner, text } from "@clack/prompts";
-import { defineCommand, runMain } from "citty";
+import { confirm, isCancel, note, password, select, spinner, text } from "@clack/prompts";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { TgfxApp } from "./app";
+import { TgfxApp, type TgfxLogEvent } from "./app";
 import {
   findBotIndex,
   loadConfig,
@@ -14,30 +13,69 @@ import {
 } from "./config";
 import { acquireRuntimeLock } from "./lock";
 import { runTelegramMcpServer } from "./mcp/server";
-import { getBotToken, setBotToken, tokenFromEnvironment } from "./secrets";
+import { deleteBotToken, getBotToken, setBotToken, tokenFromEnvironment } from "./secrets";
 import { StateStore } from "./state";
-import { adminCapabilitiesForMember, TelegramApi } from "./telegram/api";
+import { adminCapabilitiesForMember, createTelegramApi, type TelegramApi } from "./telegram/api";
 import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairing";
 import type { BotIdentity, TgfxConfig } from "./types";
 import { inspectFx } from "./fx/preflight";
+import {
+  banner,
+  bold,
+  CliError,
+  dim,
+  green,
+  helpText,
+  ok,
+  parseArgs,
+  printError,
+  red,
+  VERSION,
+  warn,
+  yellow,
+} from "./cli/ui";
 
-const VERSION = "0.1.0";
+const STDERR = { output: process.stderr };
+
+const DECIMAL_ID = /^-?\d+$/;
 
 function cancelled(value: unknown): asserts value is Exclude<typeof value, symbol> {
   if (isCancel(value)) {
-    outro("Setup cancelled.");
+    warn("setup cancelled");
     process.exit(1);
   }
 }
 
-function requireInteractive(): void {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("This workspace is not initialized. Run tgfx once in an interactive terminal.");
+function requireInteractive(purpose: string): void {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw new CliError(
+      `${purpose} needs an interactive terminal`,
+      "run tgfx once in a terminal, or set TELEGRAM_BOT_TOKEN for non-interactive use",
+    );
   }
 }
 
+async function requireConfig(paths: WorkspacePaths): Promise<TgfxConfig> {
+  const config = await loadConfig(paths);
+  if (!config) throw new CliError("this folder isn't set up yet", "run tgfx once to connect a bot");
+  return config;
+}
+
+async function requireToken(config: TgfxConfig): Promise<string> {
+  const token = tokenFromEnvironment() ?? await getBotToken(config.activeBotId);
+  if (!token) throw new CliError("the Telegram bot token is missing", "run tgfx auth to add it");
+  return token;
+}
+
+/** A decimal Telegram ID in canonical form: no leading zeros, no negative zero. */
+function canonicalId(raw: string): string {
+  const id = raw.trim();
+  if (!DECIMAL_ID.test(id)) throw new CliError(`"${raw}" is not a decimal Telegram ID`);
+  return String(BigInt(id));
+}
+
 async function validateToken(token: string): Promise<{ telegram: TelegramApi; bot: BotIdentity }> {
-  const telegram = new TelegramApi(token);
+  const telegram = createTelegramApi(token);
   const me = await telegram.getMe();
   return {
     telegram,
@@ -50,21 +88,28 @@ async function validateToken(token: string): Promise<{ telegram: TelegramApi; bo
 }
 
 async function askForToken(): Promise<string> {
-  requireInteractive();
+  requireInteractive("adding a bot token");
   const value = await password({
     message: "Telegram bot token",
     validate: (input) => (input ?? "").includes(":") ? undefined : "Paste the token from @BotFather",
+    ...STDERR,
   });
   cancelled(value);
   return String(value).trim();
 }
 
 async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promise<PrivatePairing> {
-  if (!bot.username) throw new Error("This bot has no public username, so Telegram deep-link pairing is unavailable.");
+  if (!bot.username) {
+    throw new CliError(
+      "this bot has no public username, so Telegram deep-link pairing is unavailable",
+      "give the bot a username in @BotFather, or enter Telegram IDs manually",
+    );
+  }
   const webhook = await telegram.getWebhookInfo();
   if (webhook.url) {
-    throw new Error(
-      `This bot still has a webhook configured (${webhook.url}). Remove it before tgfx can use long polling.`,
+    throw new CliError(
+      `this bot still has a webhook configured (${webhook.url})`,
+      "remove the webhook so tgfx can use long polling",
     );
   }
 
@@ -72,9 +117,13 @@ async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promis
   const url = `https://t.me/${bot.username}?start=${payload}`;
   const backlog = await telegram.getUpdates(-1, 0);
   let offset = (backlog.at(-1)?.update_id ?? -1) + 1;
-  note(`${url}\n\nOpen this link and press Start. The link expires when setup exits.`, "Connect your Telegram account");
-  const progress = spinner();
-  progress.start("Waiting for your private message…");
+  note(
+    `${url}\n\nOpen this link and press Start. The link expires when setup exits.`,
+    "Connect your Telegram account",
+    STDERR,
+  );
+  const progress = spinner(STDERR);
+  progress.start("Waiting for you to press Start…");
   const deadline = Date.now() + 2 * 60_000;
   try {
     while (Date.now() < deadline) {
@@ -93,27 +142,28 @@ async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promis
     throw error;
   }
   progress.stop("Pairing timed out");
-  throw new Error("No matching /start message arrived within two minutes. Run tgfx again to retry.");
+  throw new CliError("no matching /start message arrived within two minutes", "run tgfx again to retry");
 }
 
 async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: TelegramApi): Promise<TgfxConfig> {
-  requireInteractive();
+  requireInteractive("first-run setup");
   const setup = await select({
     message: "Who may use this workspace bot?",
     options: [
       { value: "pair", label: "Connect my Telegram account", hint: "recommended" },
       { value: "manual", label: "Enter Telegram IDs manually", hint: "groups and advanced setup" },
     ],
+    ...STDERR,
   });
   cancelled(setup);
   let principalKind: "user" | "chat" = "user";
   let identifier: string;
-  let controlChatId: string;
+  let approvalsChatId: string;
   let pairedUpdateId: number | undefined;
   if (setup === "pair") {
     const pairing = await pairPrivateOwner(bot, telegram);
     identifier = pairing.userId;
-    controlChatId = pairing.chatId;
+    approvalsChatId = pairing.chatId;
     pairedUpdateId = pairing.updateId;
   } else {
     const selectedPrincipal = await select({
@@ -122,40 +172,41 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
         { value: "user", label: "One Telegram user" },
         { value: "chat", label: "One group or private chat" },
       ],
+      ...STDERR,
     });
     cancelled(selectedPrincipal);
     principalKind = selectedPrincipal as "user" | "chat";
     if (principalKind === "chat") {
       note(
-        "Every human or anonymous chat-as-sender identity in this chat can invoke 𝒇x. Messages from other bots remain ignored.",
+        "Every human or anonymous chat-as-sender identity in this chat can invoke fx. Messages from other bots remain ignored.",
         "Chat-wide access",
+        STDERR,
       );
     }
     const allowed = await text({
       message: principalKind === "user" ? "Allowed Telegram user ID" : "Allowed Telegram chat ID",
       placeholder: "6143594",
-      validate: (input) => /^-?\d+$/.test((input ?? "").trim()) ? undefined : "Enter a decimal Telegram ID",
+      validate: (input) => DECIMAL_ID.test((input ?? "").trim()) ? undefined : "Enter a decimal Telegram ID",
+      ...STDERR,
     });
     cancelled(allowed);
     identifier = String(allowed).trim();
-    const control = await text({
-      message: "Control chat ID (approvals and failures)",
+    const approvalsAnswer = await text({
+      message: "Approvals chat ID (approval cards and failure notices)",
       initialValue: identifier,
-      validate: (input) => /^-?\d+$/.test((input ?? "").trim()) ? undefined : "Enter a decimal Telegram ID",
+      validate: (input) => DECIMAL_ID.test((input ?? "").trim()) ? undefined : "Enter a decimal Telegram ID",
+      ...STDERR,
     });
-    cancelled(control);
-    controlChatId = String(control).trim();
-    if (principalKind === "chat" && controlChatId === identifier) {
+    cancelled(approvalsAnswer);
+    approvalsChatId = String(approvalsAnswer).trim();
+    if (principalKind === "chat" && approvalsChatId === identifier) {
       note(
-        "Every allowed member of this control chat can press permission and administrator approval buttons.",
+        "Every allowed member of this approvals chat can press permission and administrator approval buttons.",
         "Approval policy",
+        STDERR,
       );
     }
   }
-  const streaming = await confirm({ message: "Stream private-chat responses as rich drafts?", initialValue: true });
-  cancelled(streaming);
-  const collapseTools = await confirm({ message: "Collapse completed tool calls?", initialValue: true });
-  cancelled(collapseTools);
   const config: TgfxConfig = {
     version: 1,
     activeBotId: bot.id,
@@ -163,13 +214,12 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
       userIds: principalKind === "user" ? [identifier] : [],
       chatIds: principalKind === "chat" ? [identifier] : [],
     },
-    controlChat: { chatId: controlChatId, topicId: "0" },
-    renderer: { mode: streaming ? "streaming" : "final", collapseTools: Boolean(collapseTools), updateEveryMs: 800 },
-    admin: { chatIds: [], capabilities: [] },
+    approvals: { chatId: approvalsChatId, topicId: "0" },
+    renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 800 },
   };
   await telegram.sendText(
-    config.controlChat.chatId,
-    `𝒕𝒈(𝒇x) connected to ${paths.workspace}. This chat will receive approvals and delivery failures.`,
+    config.approvals.chatId,
+    `tgfx connected to ${paths.workspace}. This chat receives approval cards and delivery-failure notices.`,
   );
   await saveConfig(paths, config);
   if (pairedUpdateId !== undefined) {
@@ -196,44 +246,50 @@ async function guardWorkspaceHandoff(
     const unfinished = state.unfinished();
     if (!unfinished.total) return;
     const detail = `${unfinished.inbox} inbox · ${unfinished.outbox} outbox · ${unfinished.effects} effects · ${unfinished.approvals} approvals`;
-    if (options.json || !process.stdin.isTTY || !process.stdout.isTTY) {
-      throw new Error(
-        `Bot ${bot.id} has unfinished work in ${previous.workspace} (${detail}). Resume it there or abandon it interactively.`,
+    if (options.json || !process.stdin.isTTY || !process.stderr.isTTY) {
+      throw new CliError(
+        `bot ${bot.id} has unfinished work in ${previous.workspace} (${detail})`,
+        "resume tgfx there, or run tgfx here interactively to abandon it",
       );
     }
-    note(`${previous.workspace}\n${detail}`, "Previous workspace has unfinished work");
+    note(`${previous.workspace}\n${detail}`, "Previous workspace has unfinished work", STDERR);
     const abandon = await confirm({
       message: "Abandon that recovery work and move this bot to the current folder?",
       initialValue: false,
+      ...STDERR,
     });
     cancelled(abandon);
     if (!abandon) {
-      throw new Error(`Resume tgfx in ${previous.workspace} before moving this bot.`);
+      throw new CliError(`resume tgfx in ${previous.workspace} before moving this bot`);
     }
     state.abandonUnfinished(`Explicitly abandoned when bot moved to ${paths.workspace}`);
   } finally { state.close(); }
 }
 
-async function runtime(paths = workspacePaths(), options: { json?: boolean } = {}): Promise<{
+async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}): Promise<{
   paths: WorkspacePaths; config: TgfxConfig; token: string; telegram: TelegramApi; bot: BotIdentity;
   fxBinary: string; release: () => Promise<void>;
 }> {
-  if (!options.json) intro("𝒕𝒈(𝒇x)");
+  if (!options.json) banner();
   const fxBinary = process.env.FX_BINARY ?? "fx";
   const fx = await inspectFx(fxBinary, paths.workspace);
-  if (!options.json) note(`${fx.version} · ${fx.report.model}\n${fx.report.auth}`, "𝒇x ready");
+  if (!options.json) ok(`fx ${fx.version} · ${fx.report.model} · ${fx.report.auth}`);
   let config = await loadConfig(paths);
   let token = tokenFromEnvironment();
   let prompted = false;
   if (!token && config) token = await getBotToken(config.activeBotId);
   if (options.json && (!config || !token)) {
-    throw new Error("Initialize this workspace once without --json before using machine-readable mode.");
+    throw new CliError(
+      "this workspace is not initialized",
+      "run tgfx once without --json to finish interactive setup",
+    );
   }
   if (!token) { token = await askForToken(); prompted = true; }
   const { telegram, bot } = await validateToken(token);
   if (config && config.activeBotId !== bot.id) {
-    throw new Error(
-      `This folder is configured for bot ${config.activeBotId}, but the supplied token belongs to ${bot.id}. Run tgfx auth to change bots.`,
+    throw new CliError(
+      `this folder is configured for bot ${config.activeBotId}, but the supplied token belongs to ${bot.id}`,
+      "run tgfx auth to switch bots",
     );
   }
   const release = await acquireRuntimeLock(paths, bot.id);
@@ -242,7 +298,10 @@ async function runtime(paths = workspacePaths(), options: { json?: boolean } = {
     if (!config) config = await createConfig(paths, bot, telegram);
     const webhook = await telegram.getWebhookInfo();
     if (webhook.url) {
-      throw new Error(`This bot has a webhook configured (${webhook.url}); tgfx needs long polling.`);
+      throw new CliError(
+        `this bot has a webhook configured (${webhook.url})`,
+        "remove the webhook so tgfx can use long polling",
+      );
     }
     if (prompted) await setBotToken(bot.id, token);
     await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
@@ -253,278 +312,425 @@ async function runtime(paths = workspacePaths(), options: { json?: boolean } = {
   }
 }
 
-const authCommand = defineCommand({
-  meta: { name: "auth", description: "Add or replace this workspace's Telegram bot" },
-  async run() {
-    const paths = workspacePaths();
-    intro("𝒕𝒈(𝒇x) · bot authentication");
+function createLogger(json: boolean): (event: TgfxLogEvent) => void {
+  if (json) {
+    return (event) => console.log(JSON.stringify({ ts: new Date().toISOString(), ...event }));
+  }
+  return (event) => console.log(`${dim(new Date().toTimeString().slice(0, 8))} ${event.message}`);
+}
+
+async function runCommand(tokens: string[]): Promise<void> {
+  const { flags } = parseArgs(tokens, {
+    flags: {
+      model: "string",
+      streaming: "boolean",
+      "no-streaming": "boolean",
+      "collapse-tools": "boolean",
+      "no-collapse-tools": "boolean",
+      json: "boolean",
+      "no-color": "boolean",
+      debug: "boolean",
+      help: "boolean",
+      version: "boolean",
+    },
+  });
+  if (flags.help) { process.stderr.write(helpText()); return; }
+  if (flags.version) { console.log(VERSION); return; }
+  if (flags.streaming && flags["no-streaming"]) throw new CliError("choose --streaming or --no-streaming, not both");
+  if (flags["collapse-tools"] && flags["no-collapse-tools"]) {
+    throw new CliError("choose --collapse-tools or --no-collapse-tools, not both");
+  }
+  const streaming = flags.streaming ? true : flags["no-streaming"] ? false : undefined;
+  const collapseTools = flags["collapse-tools"] ? true : flags["no-collapse-tools"] ? false : undefined;
+  const json = Boolean(flags.json);
+  const resolved = await runtime(workspacePaths(), { json });
+  const { release, ...appRuntime } = resolved;
+  const log = createLogger(json);
+  let app: TgfxApp | undefined;
+  const shutdown = () => void app?.stop();
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  try {
+    app = new TgfxApp({
+      ...appRuntime,
+      ...(typeof flags.model === "string" ? { model: flags.model } : {}),
+      renderer: {
+        ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),
+        ...(collapseTools === undefined ? {} : { collapseTools }),
+      },
+      log,
+    });
+    await app.run();
+  } finally {
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
+    await app?.stop();
+    await release();
+    if (json) log({ event: "stopped", message: "stopped" });
+    else ok("stopped");
+  }
+}
+
+type ParsedTarget = { chatId: string; topicId: string };
+
+function parseChatTarget(value: string): ParsedTarget {
+  const match = /^(-?\d+)(?:\/(\d+))?$/.exec(value.trim());
+  if (!match) {
+    throw new CliError(
+      `"${value}" is not a Telegram chat ID`,
+      "use a decimal chat ID, optionally with a topic: -1002255001/55",
+    );
+  }
+  return { chatId: canonicalId(match[1]!), topicId: String(BigInt(match[2] ?? "0")) };
+}
+
+async function allowCommand(tokens: string[]): Promise<void> {
+  const { flags, positionals } = parseArgs(tokens, {
+    flags: { chat: "boolean", json: "boolean" },
+    positionals: true,
+  });
+  if (!positionals.length) {
+    throw new CliError("give at least one Telegram user or chat ID", "example: tgfx allow 6143594");
+  }
+  const ids = positionals.map(canonicalId);
+  const paths = workspacePaths();
+  const config = await requireConfig(paths);
+  for (const id of ids) {
+    const kind = flags.chat || Number(id) < 0 ? "chat" : "user";
+    const list = kind === "chat" ? config.access.chatIds : config.access.userIds;
+    if (list.includes(id)) {
+      warn(`${kind} ${id} is already allowed`);
+      continue;
+    }
+    list.push(id);
+    ok(`allowed ${kind} ${id}${kind === "chat" && Number(id) < 0 ? dim(" · everyone in this chat can invoke fx") : ""}`);
+  }
+  await saveConfig(paths, config);
+  process.stderr.write(`  ${dim("saved · restart tgfx to apply")}\n`);
+  if (flags.json) console.log(JSON.stringify(config.access, null, 2));
+}
+
+async function denyCommand(tokens: string[]): Promise<void> {
+  const { flags, positionals } = parseArgs(tokens, {
+    flags: { json: "boolean" },
+    positionals: true,
+  });
+  if (!positionals.length) {
+    throw new CliError("give at least one Telegram user or chat ID", "example: tgfx deny 6143594");
+  }
+  const ids = positionals.map(canonicalId);
+  const paths = workspacePaths();
+  const config = await requireConfig(paths);
+  const notices: Array<{ warning?: boolean; message: string }> = [];
+  let changed = false;
+  for (const id of ids) {
+    const inUsers = config.access.userIds.includes(id);
+    const inChats = config.access.chatIds.includes(id);
+    if (!inUsers && !inChats) {
+      notices.push({ warning: true, message: `${id} was not on the allowlist` });
+      continue;
+    }
+    config.access.userIds = config.access.userIds.filter((value) => value !== id);
+    config.access.chatIds = config.access.chatIds.filter((value) => value !== id);
+    changed = true;
+    if (inUsers) notices.push({ message: `removed user ${id}` });
+    if (inChats) notices.push({ message: `removed chat ${id}` });
+  }
+  if (config.access.userIds.length + config.access.chatIds.length === 0) {
+    throw new CliError("the allowlist cannot be empty", "allow another user or chat first, then deny this one");
+  }
+  if (changed) await saveConfig(paths, config);
+  for (const notice of notices) (notice.warning ? warn : ok)(notice.message);
+  const remaining = config.access.userIds.length + config.access.chatIds.length;
+  process.stderr.write(
+    `  ${dim(`${remaining} principal${remaining === 1 ? "" : "s"} remain${remaining === 1 ? "s" : ""} · saved · restart tgfx to apply`)}\n`,
+  );
+  if (flags.json) console.log(JSON.stringify(config.access, null, 2));
+}
+
+async function approvalsCommand(tokens: string[]): Promise<void> {
+  const { flags, positionals } = parseArgs(tokens, {
+    flags: { json: "boolean" },
+    positionals: true,
+  });
+  const paths = workspacePaths();
+  const config = await requireConfig(paths);
+  if (!positionals.length) {
+    if (flags.json) { console.log(JSON.stringify(config.approvals, null, 2)); return; }
+    const target = `${config.approvals.chatId}${config.approvals.topicId === "0" ? "" : `/${config.approvals.topicId}`}`;
+    console.log(`approvals → ${target}`);
+    return;
+  }
+  if (positionals.length > 1) throw new CliError("approvals takes one chat", "example: tgfx approvals -1002255001/55");
+  const target = parseChatTarget(positionals[0]!);
+  const token = await requireToken(config);
+  await createTelegramApi(token).api.getChat(target.chatId);
+  config.approvals = { chatId: target.chatId, topicId: target.topicId };
+  await saveConfig(paths, config);
+  ok(`approvals go to ${target.chatId}${target.topicId === "0" ? "" : `/${target.topicId}`} · restart tgfx to apply`);
+  if (flags.json) console.log(JSON.stringify(config.approvals, null, 2));
+}
+
+function since(iso: string): string {
+  const milliseconds = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "just now";
+  const minutes = Math.floor(milliseconds / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+async function accessCommand(tokens: string[]): Promise<void> {
+  const { flags } = parseArgs(tokens, { flags: { json: "boolean" } });
+  const paths = workspacePaths();
+  const config = await requireConfig(paths);
+  const state = existsSync(paths.database) ? new StateStore(paths.database) : undefined;
+  try {
+    const principals = [
+      ...config.access.userIds.map((id) => ({ id, kind: "user" as const })),
+      ...config.access.chatIds.map((id) => ({ id, kind: "chat" as const })),
+    ];
+    const routes = state?.routes().filter((route) => route.bot_id === config.activeBotId) ?? [];
+    if (flags.json) {
+      console.log(JSON.stringify({
+        bot: config.activeBotId,
+        workspace: paths.workspace,
+        access: principals,
+        approvals: config.approvals,
+        renderer: config.renderer,
+        sessions: routes.map((route) => ({
+          chat: route.chat_id,
+          topic: route.topic_id,
+          session: route.session_id,
+          generation: route.generation,
+          lastActive: route.updated_at,
+        })),
+      }, null, 2));
+      return;
+    }
+
+    console.log(`${bold(`bot ${config.activeBotId}`)} ${dim("·")} ${dim(paths.workspace)}`);
+    console.log("");
+    console.log(`  ${dim("can talk to fx")}`);
+    for (const principal of principals) {
+      const marks: string[] = [];
+      if (principal.id === config.approvals.chatId) marks.push(yellow("approvals go here"));
+      if (principal.kind === "chat" && Number(principal.id) < 0) marks.push(dim("everyone"));
+      console.log(`  ${green("●")} ${principal.kind} ${principal.id}${marks.length ? `   ${marks.join(" · ")}` : ""}`);
+    }
+    if (config.access.chatIds.includes(config.approvals.chatId) === false
+      && config.access.userIds.includes(config.approvals.chatId) === false) {
+      const target = `${config.approvals.chatId}${config.approvals.topicId === "0" ? "" : `/${config.approvals.topicId}`}`;
+      console.log("");
+      console.log(`  ${dim("approvals")}`);
+      console.log(`  ${yellow("●")} ${target}`);
+    }
+    if (routes.length) {
+      console.log("");
+      console.log(`  ${dim("sessions")}`);
+      for (const route of routes) {
+        const label = route.topic_id === "0" ? route.chat_id : `${route.chat_id}/${route.topic_id}`;
+        const detail = route.session_id
+          ? `session saved · gen ${route.generation} · ${since(route.updated_at)}`
+          : "no session yet";
+        console.log(`  ${route.session_id ? green("●") : dim("○")} ${label.padEnd(16)} ${dim(detail)}`);
+      }
+    }
+    console.log("");
+  } finally {
+    state?.close();
+  }
+}
+
+async function authCommand(tokens: string[]): Promise<void> {
+  const { flags } = parseArgs(tokens, { flags: { remove: "boolean" } });
+  const paths = workspacePaths();
+  banner();
+  if (flags.remove) {
+    const config = await requireConfig(paths);
+    const deleted = await deleteBotToken(config.activeBotId);
+    if (deleted) ok(`removed the stored token for bot ${config.activeBotId}`);
+    else warn(`no stored token for bot ${config.activeBotId}`);
+    if (tokenFromEnvironment()) warn("TELEGRAM_BOT_TOKEN is still set in this environment");
+    process.stderr.write(`  ${dim("run tgfx auth to add a token again")}\n`);
+    return;
+  }
+  const environmentToken = tokenFromEnvironment();
+  const token = environmentToken ?? await askForToken();
+  const { bot, telegram } = await validateToken(token);
+  const release = await acquireRuntimeLock(paths, bot.id);
+  try {
+    let config = await loadConfig(paths);
+    // The switch is confirmed before anything destructive: abandoning a
+    // previous workspace's recovery work must not happen for an operation the
+    // operator then cancels.
+    const previous = config?.activeBotId;
+    if (config && previous !== bot.id) {
+      requireInteractive("switching bots");
+      const replace = await confirm({
+        message: `Replace configured bot ${previous} with @${bot.username ?? bot.id}?`,
+        initialValue: false,
+        ...STDERR,
+      });
+      cancelled(replace);
+      if (!replace) throw new CliError("bot switch cancelled; the existing workspace configuration was not changed");
+    }
+    await guardWorkspaceHandoff(paths, bot);
+    const webhook = await telegram.getWebhookInfo();
+    if (webhook.url) {
+      throw new CliError(
+        `this bot has a webhook configured (${webhook.url})`,
+        "remove the webhook so tgfx can use long polling",
+      );
+    }
+    if (!config) config = await createConfig(paths, bot, telegram);
+    else {
+      config = { ...config, activeBotId: bot.id };
+      await saveConfig(paths, config);
+      if (previous !== bot.id) {
+        process.stderr.write(`  ${dim(`switched from bot ${previous} · route history stays partitioned by bot ID`)}\n`);
+      }
+    }
+    if (environmentToken) warn("using TELEGRAM_BOT_TOKEN from the environment · not saved to the credential store");
+    else await setBotToken(bot.id, token);
+    await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
+    ok(`connected @${bot.username ?? bot.id}`);
+  } finally {
+    await release();
+  }
+}
+
+async function doctorCommand(tokens: string[]): Promise<void> {
+  const { flags } = parseArgs(tokens, { flags: { json: "boolean" } });
+  const paths = workspacePaths();
+  const checks: Array<{ check: string; ok: boolean; detail: string }> = [];
+  let config: TgfxConfig | undefined;
+  try {
+    config = await loadConfig(paths);
+    checks.push({ check: "config", ok: Boolean(config), detail: config ? paths.config : "not initialized" });
+  } catch (error) {
+    checks.push({ check: "config", ok: false, detail: error instanceof Error ? error.message : String(error) });
+  }
+  if (config) {
     const environmentToken = tokenFromEnvironment();
-    const token = environmentToken ?? await askForToken();
-    const { bot, telegram } = await validateToken(token);
-    const release = await acquireRuntimeLock(paths, bot.id);
+    let token: string | undefined;
+    let tokenError: string | undefined;
     try {
-      await guardWorkspaceHandoff(paths, bot);
-      const webhook = await telegram.getWebhookInfo();
-      if (webhook.url) throw new Error(`This bot has a webhook configured (${webhook.url}); tgfx needs long polling.`);
-      let config = await loadConfig(paths);
-      if (!config) config = await createConfig(paths, bot, telegram);
-      else {
-        const previous = config.activeBotId;
-        if (previous !== bot.id) {
-          requireInteractive();
-          const replace = await confirm({
-            message: `Replace configured bot ${previous} with @${bot.username ?? bot.id}?`,
-            initialValue: false,
-          });
-          cancelled(replace);
-          if (!replace) throw new Error("Bot switch cancelled; the existing workspace configuration was not changed.");
-        }
-        config = { ...config, activeBotId: bot.id };
-        await saveConfig(paths, config);
-        if (previous !== bot.id) note(`Switched from bot ${previous}. Existing route history remains partitioned by bot ID.`);
-      }
-      if (!environmentToken) await setBotToken(bot.id, token);
-      await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
-      outro(`Connected @${bot.username ?? bot.id}.`);
-    } finally {
-      await release();
-    }
-  },
-});
-
-const accessCommand = defineCommand({
-  meta: { name: "access", description: "Show or edit the required Telegram allowlist" },
-  args: {
-    "allow-user": { type: "string", description: "Allow a Telegram user ID" },
-    "allow-chat": { type: "string", description: "Allow a Telegram chat ID" },
-    "remove-user": { type: "string", description: "Remove a Telegram user ID" },
-    "remove-chat": { type: "string", description: "Remove a Telegram chat ID" },
-    "control-chat": { type: "string", description: "Set the approval/failure chat ID" },
-    "control-topic": { type: "string", description: "Set its topic ID (0 outside topics)" },
-  },
-  async run({ args }) {
-    const paths = workspacePaths();
-    const config = await loadConfig(paths);
-    if (!config) throw new Error("This workspace is not initialized.");
-    const validate = (value: unknown): string | undefined => {
-      if (value === undefined) return undefined;
-      if (!/^-?\d+$/.test(String(value))) throw new Error(`Invalid Telegram ID: ${value}`);
-      return String(value);
-    };
-    const allowUser = validate(args.allowUser);
-    const allowChat = validate(args.allowChat);
-    const removeUser = validate(args.removeUser);
-    const removeChat = validate(args.removeChat);
-    const controlChat = validate(args.controlChat);
-    const controlTopic = validate(args.controlTopic);
-    if (allowUser && !config.access.userIds.includes(allowUser)) config.access.userIds.push(allowUser);
-    if (allowChat && !config.access.chatIds.includes(allowChat)) config.access.chatIds.push(allowChat);
-    if (removeUser) config.access.userIds = config.access.userIds.filter((id) => id !== removeUser);
-    if (removeChat) config.access.chatIds = config.access.chatIds.filter((id) => id !== removeChat);
-    if (controlChat) config.controlChat.chatId = controlChat;
-    if (controlTopic) config.controlChat.topicId = controlTopic;
-    if (config.access.userIds.length + config.access.chatIds.length === 0) {
-      throw new Error("The allowlist cannot be empty.");
-    }
-    if (allowUser || allowChat || removeUser || removeChat || controlChat || controlTopic) {
-      const release = await acquireRuntimeLock(paths, config.activeBotId);
-      try {
-        if (controlChat) {
-          const token = tokenFromEnvironment() ?? await getBotToken(config.activeBotId);
-          if (!token) throw new Error("Telegram bot token is missing. Run tgfx auth.");
-          await new TelegramApi(token).api.getChat(controlChat);
-        }
-        await saveConfig(paths, config);
-      } finally { await release(); }
-    }
-    console.log(JSON.stringify(config.access, null, 2));
-  },
-});
-
-const adminCommand = defineCommand({
-  meta: { name: "admin", description: "Show or configure opt-in group administration" },
-  args: {
-    chat: { type: "string", description: "Admin-enabled group chat ID" },
-    capabilities: { type: "string", description: "Comma-separated: pins,topics,delete_messages,moderation,join_requests" },
-    disable: { type: "boolean", description: "Disable all admin actions" },
-  },
-  async run({ args }) {
-    const paths = workspacePaths();
-    const config = await loadConfig(paths);
-    if (!config) throw new Error("This workspace is not initialized.");
-    const changing = Boolean(args.disable || args.chat || args.capabilities);
-    if (changing) {
-      const release = await acquireRuntimeLock(paths, config.activeBotId);
-      try {
-        if (args.disable) config.admin = { chatIds: [], capabilities: [] };
-        else {
-          if (!args.chat || !/^-?\d+$/.test(args.chat)) throw new Error("--chat must be a decimal group ID.");
-          if (!config.access.chatIds.includes(args.chat)) throw new Error("Admin chat must first be allowed with tgfx access --allow-chat.");
-          const allowed = new Set(["pins", "topics", "delete_messages", "moderation", "join_requests"]);
-          const capabilities = (args.capabilities ?? "").split(",").filter(Boolean);
-          if (capabilities.some((value) => !allowed.has(value))) throw new Error("Unknown admin capability.");
-          const token = tokenFromEnvironment() ?? await getBotToken(config.activeBotId);
-          if (!token) throw new Error("Telegram bot token is missing. Run tgfx auth.");
-          const telegram = new TelegramApi(token);
-          const member = await telegram.api.getChatMember(args.chat, Number(config.activeBotId));
-          if (member.status !== "administrator" && member.status !== "creator") {
-            throw new Error("The bot is not an administrator in that chat.");
-          }
-          const granted = adminCapabilitiesForMember(member);
-          const missing = capabilities.filter((capability) => !granted.has(capability as TgfxConfig["admin"]["capabilities"][number]));
-          if (missing.length) throw new Error(`The bot lacks Telegram rights for: ${missing.join(", ")}`);
-          config.admin = { chatIds: [args.chat], capabilities: capabilities as TgfxConfig["admin"]["capabilities"] };
-        }
-        await saveConfig(paths, config);
-      } finally {
-        await release();
-      }
-    }
-    console.log(JSON.stringify(config.admin, null, 2));
-  },
-});
-
-const routesCommand = defineCommand({
-  meta: { name: "routes", description: "List this workspace's Telegram to 𝒇x routes" },
-  async run() {
-    const paths = workspacePaths();
-    if (!existsSync(paths.database)) { console.log("No routes yet."); return; }
-    const state = new StateStore(paths.database);
-    try {
-      const routes = state.routes().map((route) => ({
-        chat: route.chat_id, topic: route.topic_id, generation: route.generation,
-        session: route.session_id ?? "not started",
-      }));
-      console.log(routes.length ? JSON.stringify(routes, null, 2) : "No routes yet.");
-    } finally { state.close(); }
-  },
-});
-
-const doctorCommand = defineCommand({
-  meta: { name: "doctor", description: "Check bot, workspace, SQLite, and 𝒇x prerequisites" },
-  async run() {
-    const paths = workspacePaths();
-    const checks: Array<{ check: string; ok: boolean; detail: string }> = [];
-    let config: TgfxConfig | undefined;
-    try {
-      config = await loadConfig(paths);
-      checks.push({ check: "config", ok: Boolean(config), detail: config ? paths.config : "not initialized" });
+      token = environmentToken ?? await getBotToken(config.activeBotId);
     } catch (error) {
-      checks.push({ check: "config", ok: false, detail: error instanceof Error ? error.message : String(error) });
+      tokenError = error instanceof Error ? error.message : String(error);
     }
-    if (config) {
-      const environmentToken = tokenFromEnvironment();
-      const token = environmentToken ?? await getBotToken(config.activeBotId);
-      if (!token) checks.push({ check: "Telegram", ok: false, detail: "bot token missing" });
-      else {
-        try {
-          const { telegram, bot } = await validateToken(token);
-          const webhook = await telegram.getWebhookInfo();
-          const identityMatches = bot.id === config.activeBotId;
-          checks.push({
-            check: "Telegram",
-            ok: !webhook.url && identityMatches,
-            detail: `@${bot.username ?? bot.id} · ${environmentToken ? "environment token" : "OS credential store"}${webhook.url ? " · webhook configured" : ""}${identityMatches ? "" : " · wrong configured bot"}`,
-          });
-          try {
-            const control = await telegram.api.getChat(config.controlChat.chatId);
-            checks.push({ check: "control chat", ok: true, detail: `${control.type} ${config.controlChat.chatId}${config.controlChat.topicId === "0" ? "" : `/${config.controlChat.topicId}`}` });
-          } catch (error) {
-            checks.push({ check: "control chat", ok: false, detail: error instanceof Error ? error.message : String(error) });
-          }
-          for (const chatId of config.admin.chatIds) {
-            try {
-              const member = await telegram.api.getChatMember(chatId, Number(bot.id));
-              const granted = adminCapabilitiesForMember(member);
-              const missing = config.admin.capabilities.filter((capability) => !granted.has(capability));
-              checks.push({
-                check: `admin ${chatId}`,
-                ok: missing.length === 0,
-                detail: missing.length ? `missing rights: ${missing.join(", ")}` : config.admin.capabilities.join(", ") || "no capabilities enabled",
-              });
-            } catch (error) {
-              checks.push({ check: `admin ${chatId}`, ok: false, detail: error instanceof Error ? error.message : String(error) });
-            }
-          }
-        } catch (error) { checks.push({ check: "Telegram", ok: false, detail: error instanceof Error ? error.message : String(error) }); }
-      }
-    }
-    try {
-      const fx = await inspectFx(process.env.FX_BINARY ?? "fx", paths.workspace);
+    if (!token) {
       checks.push({
-        check: "fx",
-        ok: true,
-        detail: `${fx.version} · ${fx.report.model} · ${fx.report.auth}${fx.report.warn_count ? ` · ${fx.report.warn_count} warning(s)` : ""}`,
+        check: "Telegram",
+        ok: false,
+        detail: tokenError ? `credential store unavailable · ${tokenError}` : "bot token missing · run tgfx auth",
       });
-    } catch (error) {
-      checks.push({ check: "fx", ok: false, detail: error instanceof Error ? error.message : String(error) });
+    } else {
+      try {
+        const { telegram, bot } = await validateToken(token);
+        const webhook = await telegram.getWebhookInfo();
+        const identityMatches = bot.id === config.activeBotId;
+        checks.push({
+          check: "Telegram",
+          ok: !webhook.url && identityMatches,
+          detail: `@${bot.username ?? bot.id} · ${environmentToken ? "environment token" : "OS credential store"}${webhook.url ? " · webhook configured" : ""}${identityMatches ? "" : " · wrong configured bot"}`,
+        });
+        try {
+          const approvals = await telegram.api.getChat(config.approvals.chatId);
+          checks.push({
+            check: "approvals chat",
+            ok: true,
+            detail: `${approvals.type} ${config.approvals.chatId}${config.approvals.topicId === "0" ? "" : `/${config.approvals.topicId}`}`,
+          });
+        } catch (error) {
+          checks.push({ check: "approvals chat", ok: false, detail: error instanceof Error ? error.message : String(error) });
+        }
+        for (const chatId of config.access.chatIds) {
+          if (Number(chatId) >= 0) continue;
+          try {
+            const [chat, member] = await Promise.all([
+              telegram.api.getChat(chatId),
+              telegram.api.getChatMember(chatId, Number(bot.id)),
+            ]);
+            const granted = [...adminCapabilitiesForMember(member)];
+            const admin = member.status === "administrator" || member.status === "creator";
+            checks.push({
+              check: `group ${"title" in chat && chat.title ? chat.title : chatId}`,
+              ok: true,
+              detail: admin
+                ? `admin · ${granted.length ? granted.join(", ") : "no usable rights — grant them in the promote dialog"}`
+                : "not an admin · admin tools stay off",
+            });
+          } catch (error) {
+            checks.push({ check: `group ${chatId}`, ok: false, detail: error instanceof Error ? error.message : String(error) });
+          }
+        }
+      } catch (error) {
+        checks.push({ check: "Telegram", ok: false, detail: error instanceof Error ? error.message : String(error) });
+      }
     }
-    if (config) {
-      try { const state = new StateStore(paths.database); state.close(); checks.push({ check: "SQLite", ok: true, detail: paths.database }); }
-      catch (error) { checks.push({ check: "SQLite", ok: false, detail: error instanceof Error ? error.message : String(error) }); }
-    }
-    for (const check of checks) console.log(`${check.ok ? "✓" : "✗"} ${check.check} · ${check.detail}`);
-    if (checks.some((check) => !check.ok)) process.exitCode = 1;
-  },
-});
-
-const startArgs = {
-  model: { type: "string", description: "Pass the exact model ID to fx acp" },
-  streaming: { type: "boolean", description: "Use private-chat rich drafts", negativeDescription: "Send one final message per turn" },
-  "collapse-tools": { type: "boolean", description: "Collapse completed tools", negativeDescription: "Show every tool in the timeline" },
-  json: { type: "boolean", description: "Print operational logs as JSON" },
-  "no-color": { type: "boolean", description: "Disable terminal color" },
-} as const;
-
-const main = defineCommand({
-  meta: { name: "tgfx", version: VERSION, description: "Run 𝒇x in this folder through one Telegram bot" },
-  args: startArgs,
-  subCommands: {
-    auth: authCommand,
-    access: accessCommand,
-    admin: adminCommand,
-    routes: routesCommand,
-    doctor: doctorCommand,
-  },
-  async run({ args }) {
-    if (args.noColor) process.env.NO_COLOR = "1";
-    const resolved = await runtime(workspacePaths(), { json: Boolean(args.json) });
-    const { release, ...appRuntime } = resolved;
-    const raw = process.argv.slice(2);
-    const streaming = raw.includes("--streaming") ? true : raw.includes("--no-streaming") ? false : undefined;
-    const collapseTools = raw.includes("--collapse-tools") ? true : raw.includes("--no-collapse-tools") ? false : undefined;
-    const log = args.json
-      ? (message: string) => console.log(JSON.stringify({ ts: new Date().toISOString(), message }))
-      : (message: string) => console.log(message);
-    let app: TgfxApp | undefined;
-    const shutdown = () => void app?.stop();
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
+  }
+  try {
+    const fx = await inspectFx(process.env.FX_BINARY ?? "fx", paths.workspace);
+    checks.push({
+      check: "fx",
+      ok: true,
+      detail: `${fx.version} · ${fx.report.model} · ${fx.report.auth}${fx.report.warn_count ? ` · ${fx.report.warn_count} warning(s)` : ""}`,
+    });
+  } catch (error) {
+    checks.push({ check: "fx", ok: false, detail: error instanceof Error ? error.message : String(error) });
+  }
+  if (config) {
     try {
-      app = new TgfxApp({
-        ...appRuntime,
-        ...(args.model ? { model: args.model } : {}),
-        renderer: {
-          ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),
-          ...(collapseTools === undefined ? {} : { collapseTools }),
-        },
-        log,
-      });
-      await app.run();
+      const state = new StateStore(paths.database);
+      state.close();
+      checks.push({ check: "SQLite", ok: true, detail: paths.database });
+    } catch (error) {
+      checks.push({ check: "SQLite", ok: false, detail: error instanceof Error ? error.message : String(error) });
     }
-    finally {
-      process.off("SIGINT", shutdown);
-      process.off("SIGTERM", shutdown);
-      await app?.stop();
-      await release();
-      if (args.json) log("Stopped.");
-      else outro("Stopped.");
-    }
-  },
-});
+  }
+  if (flags.json) console.log(JSON.stringify(checks, null, 2));
+  else for (const check of checks) console.log(`${check.ok ? green("✓") : red("✗")} ${check.check} ${dim("·")} ${check.detail}`);
+  if (checks.some((check) => !check.ok)) process.exitCode = 1;
+}
 
-// MCP stdio owns stdout. Bypass Citty and Clack completely so no terminal UI
-// byte can corrupt its newline-delimited JSON-RPC channel.
-const requested = process.argv[2];
-if (requested === "mcp") await runTelegramMcpServer();
-else await runMain(main);
+const COMMANDS: Record<string, { run: (tokens: string[]) => Promise<void> }> = {
+  access: { run: accessCommand },
+  allow: { run: allowCommand },
+  deny: { run: denyCommand },
+  approvals: { run: approvalsCommand },
+  auth: { run: authCommand },
+  doctor: { run: doctorCommand },
+  help: { run: async (tokens) => { parseArgs(tokens, {}); process.stderr.write(helpText()); } },
+  version: { run: async (tokens) => { parseArgs(tokens, {}); console.log(VERSION); } },
+};
+
+// MCP stdio owns stdout. It exits before any terminal UI code can run so no
+// banner or prompt byte can corrupt its newline-delimited JSON-RPC channel.
+const argv = process.argv.slice(2);
+const first = argv[0];
+if (first === "mcp") {
+  await runTelegramMcpServer();
+} else {
+  if (argv.includes("--no-color")) process.env.NO_COLOR = "1";
+  const debug = argv.includes("--debug") || (process.env.DEBUG ?? "").includes("tgfx");
+  try {
+    if (first === "--help" || first === "-h") process.stderr.write(helpText());
+    else if (first === "--version" || first === "-v") console.log(VERSION);
+    else if (first !== undefined && !first.startsWith("-")) {
+      const command = COMMANDS[first];
+      if (!command) {
+        throw new CliError(`unknown command "${first}"`, "run tgfx --help for the full list");
+      }
+      await command.run(argv.slice(1));
+    } else {
+      await runCommand(argv);
+    }
+  } catch (error) {
+    printError(error, debug);
+    process.exit(1);
+  }
+}

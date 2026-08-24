@@ -59,8 +59,9 @@ to a Unix command than a terminal IDE.
    memory, models, or session storage.
 3. **Make the safe path the obvious path.** A user/chat allowlist is mandatory.
    Secrets never go into project files. Telegram actions use opaque references
-   and remain inside the authorized route. Group-administrator actions require
-   an additional, explicit capability profile.
+   and remain inside the authorized route. Group-administrator actions exist
+   only where the group is allowlisted and Telegram itself grants the bot the
+   matching admin right, with approval cards gating the destructive ones.
 4. **Prefer one good default.** Private chats stream, groups receive one final
    answer, tool activity is collapsed, and long polling is used. Flags change
    only the few useful presentation choices.
@@ -87,8 +88,8 @@ Telegram Bot API:
 3. The recommended setup displays a private `t.me` deep link containing a
    one-time nonce. Pressing **Start** proves the numeric user/chat pair without
    asking the user to look up IDs. Advanced setup can instead accept one numeric
-   user or chat ID and a separate control chat; more principals can be added
-   later with `tgfx access`. No wildcard access exists in v1.
+   user or chat ID and a separate approvals chat; more principals can be added
+   later with `tgfx allow`. No wildcard access exists in v1.
 4. tgfx acquires the bot/workspace locks, writes non-secret settings to
    `.tgfx/config.json`, opens `.tgfx/state.sqlite`, and begins long polling. FX
    ACP processes are created lazily, one per active route. When the user supplied
@@ -113,10 +114,10 @@ Telegram Bot API:
 10. 𝒇x works with its normal tools and may use the small scoped Telegram MCP
     action plane. It can reply explicitly, send a file, present choices or a
     poll, and react to the current or an earlier referenced message. In an
-    admin-enabled group it sees only the configured admin tools for which the
-    bot still has Telegram permission.
+    allowlisted group it sees only the admin tools for which the bot currently
+    holds the matching Telegram administrator right.
 11. An FX permission request or a Telegram administration action that requires
-    host approval appears as a single-use card in the control chat; the
+    host approval appears as a single-use card in the approvals chat; the
     originating chat shows that work is waiting.
 12. With default settings, a private chat sees a live rich draft containing prose
     and current tool progress. A group, or any chat using `--no-streaming`, waits
@@ -172,7 +173,7 @@ directory is the workspace for the lifetime of the process.
 If the selected bot has no token, tgfx asks for it in a hidden prompt:
 
 ```text
-┌  𝒕𝒈(𝒇x)
+tgfx 0.1.0
 ◇  Telegram bot token
 │  •••••••••••••••••••••••••••••••••••••••
 ◆  Who may use this workspace bot?
@@ -182,10 +183,11 @@ If the selected bot has no token, tgfx asks for it in a hidden prompt:
 │  https://t.me/my_fx_bot?start=tgfx_<one-time-nonce>
 │  Open this link and press Start.
 ◆  Connected Mole Frog (@molefrog)
-◇  Stream private-chat responses as rich drafts?  Yes
-◇  Collapse completed tool calls?  Yes
-@my_fx_bot · polling Telegram
+@my_fx_bot · polling · /Users/me/code/my-project · streaming · collapsed tools
 ```
+
+Setup asks nothing that a good default already answers: streaming and tool
+collapsing keep their defaults and stay adjustable with flags or config.
 
 The token is validated with Telegram's `getMe` before it is saved. The terminal
 shows the bot identity and asks before replacing a different configured bot. The
@@ -196,10 +198,10 @@ bot before it begins polling. A lock is global to the user account, not stored i
 the workspace, so another folder can see that the bot is already running.
 
 Private pairing makes that user ID the initial allowlist and the paired private
-chat the control chat. Manual onboarding cannot finish without one allowed user
-ID or chat ID and a reachable control chat. In either mode, the control chat is
+chat the approvals chat. Manual onboarding cannot finish without one allowed user
+ID or chat ID and a reachable approvals chat. In either mode, the approvals chat is
 used for permission approvals and critical recovery notices.
-The control target may be a private chat, group, or topic, and must be reachable
+The approvals target may be a private chat, group, or topic, and must be reachable
 by the bot. Setup sends a harmless test message before saving it.
 
 V1 has no owner, admin, or regular-user roles. Every allowed principal is equally
@@ -224,16 +226,17 @@ In a non-interactive terminal, tgfx never waits for a hidden prompt. It uses
 Running `tgfx` again selects the known bot and workspace configuration:
 
 ```text
-┌  𝒕𝒈(𝒇x)
-◇  𝒇x ready
-│  0.0.5 · selected-model
-│  authenticated provider
-@my_fx_bot · polling Telegram
-workspace · /Users/me/code/my-project
-renderer · streaming · collapsed tools
-6143594 · 𝒇x turn started
-6143594 · delivered 1 message · 8.2s
+tgfx 0.1.0
+✓ fx 0.0.5 · selected-model · authenticated provider
+@my_fx_bot · polling · /Users/me/code/my-project · streaming · collapsed tools
+12:04:11 Mole Frog · turn started
+12:04:19 Mole Frog · delivered 1 message · 8.2s
 ```
+
+Steady-state lines use stable numeric chat/topic route IDs. `tgfx doctor`
+resolves live group names and rights when a human-readable diagnostic is
+needed, without maintaining a second chat directory. The wordmark stays plain
+ASCII in the terminal; the 𝒕𝒈(𝒇x) mark belongs to documentation.
 
 If the same bot is active in another folder, startup stops before polling:
 
@@ -296,12 +299,14 @@ group conversation as agent requests. Groups receive one final response in v1;
 live group previews are left for later because their delivery and visibility
 rules are different.
 
-An allowed group can additionally use **admin mode**. This does not make normal
-conversation autonomous: the same `/fx`, mention, or reply trigger still starts
-a turn. It only gives that route a configured set of administrator actions, such
-as maintaining one bot-owned pinned bulletin, managing forum topics, deleting
-spam, moderating members, or reviewing join requests. Merely promoting the bot
-to administrator in Telegram does not enable these actions in tgfx.
+An allowed group where the bot is a Telegram administrator additionally has
+**admin actions**. This does not make normal conversation autonomous: the same
+`/fx`, mention, or reply trigger still starts a turn. It only gives that route
+the administrator actions matching the bot's live Telegram rights, such as
+maintaining one bot-owned pinned bulletin, managing forum topics, deleting
+spam, moderating members, or reviewing join requests. Telegram's promote dialog
+is the capability editor: promotion is the consent, demotion is the revocation,
+and destructive actions still require a single-use approval card.
 
 If a route already has an active turn, later messages wait in arrival order. The
 user can send `/cancel` to cancel the active FX prompt. V1 runs one prompt at a
@@ -382,26 +387,33 @@ the process-level model.
 
 ## Small command and configuration surface
 
-The intended commands are deliberately limited:
+The intended commands are deliberately limited. Each is one verb, one idea:
 
 | Command | Purpose |
 | --- | --- |
-| `tgfx` | Start in the current directory; onboard if needed. |
-| `tgfx auth` | Add, rotate, or select a Telegram bot token. |
-| `tgfx access` | Show, add, or remove allowed user/chat IDs and select the control chat. |
-| `tgfx admin` | Configure the admin capability profile for one allowed group and verify the bot's current rights. |
-| `tgfx routes` | Show Telegram scopes with active or saved FX sessions. |
-| `tgfx doctor` | Check FX, Telegram, secrets, SQLite, and workspace access. |
+| `tgfx` | Start in the current directory; onboard if needed. Any other unknown first word is an error, never an implicit start. |
+| `tgfx access` | The read-only map: numeric users and chats that can talk to fx, where approvals go, and saved sessions. |
+| `tgfx allow <id…>` | Add users or chats to the allowlist. Positive IDs are users, negative IDs are chats; `--chat` overrides. |
+| `tgfx deny <id…>` | Remove them. The allowlist can never become empty. |
+| `tgfx approvals <chat>[/topic]` | Route approval cards and failure notices to a chat; with no argument, show the current target. |
+| `tgfx auth [--remove]` | Add, rotate, or remove the Telegram bot token. |
+| `tgfx doctor` | Check FX, Telegram, the approvals chat, live admin rights, SQLite, and workspace access. |
 
-The main startup flags are:
+The run flags are `--model <id>`, `--streaming`/`--no-streaming`, and
+`--collapse-tools`/`--no-collapse-tools`; `--json`, `--no-color`, and `--debug`
+are global. Human-readable output is the default and `--json` is the machine
+mode everywhere. Conversational output — banners, prompts, errors, hints — goes
+to stderr; primary command output goes to stdout, so `tgfx access --json | jq`
+stays clean.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--model <id>` | FX default/session model | Pass `<id>` directly as `fx acp --model <id>` for this run. The value is not saved by tgfx. |
 | `--streaming` / `--no-streaming` | streaming | Stream a private draft, or wait for one final response. Groups remain final-only in v1. |
 | `--collapse-tools` / `--no-collapse-tools` | collapse | Replace finished tool activity with `Worked for 1m`, or keep the visible tool timeline. In non-streaming mode tools are omitted from the final message. |
-| `--json` | off | Emit terminal events as JSON Lines. |
-| `--no-color` | off | Disable terminal color. |
+| `--json` | off | Emit terminal events as JSON Lines with a typed `event` field. |
+| `--no-color` | off | Disable terminal color (NO_COLOR is also honored). |
+| `--debug` | off | Show stack traces behind the one-line error output. |
 
 Stable defaults may be written to `.tgfx/config.json`. Command-line flags win
 for the current run. Environment variables are reserved for secrets and
@@ -415,7 +427,7 @@ automation, not for a second large configuration system.
     "userIds": ["6143594"],
     "chatIds": ["-1002255001"]
   },
-  "controlChat": {
+  "approvals": {
     "chatId": "6143594",
     "topicId": "0"
   },
@@ -423,23 +435,20 @@ automation, not for a second large configuration system.
     "mode": "streaming",
     "collapseTools": true,
     "updateEveryMs": 800
-  },
-  "admin": {
-    "chatIds": ["-1002255001"],
-    "capabilities": [
-      "pins",
-      "topics",
-      "delete_messages",
-      "moderation",
-      "join_requests"
-    ]
   }
 }
 ```
 
-The token does not belong in this file. Allowlist and control-target IDs do: they
-are explicit workspace configuration, not model context or transient delivery
-state. SQLite continues to own route sessions and recovery state.
+The token does not belong in this file. Allowlist and approvals-target IDs do:
+they are explicit workspace configuration, not model context or transient
+delivery state. SQLite continues to own route sessions and recovery state.
+### Configuration changes
+
+Configuration commands validate and atomically replace `config.json`. A running
+process keeps the configuration it started with, so `tgfx allow`, `tgfx deny`,
+and `tgfx approvals` explicitly tell the operator to restart tgfx. This keeps
+authorization, MCP capabilities, approval routing, and command menus on one
+consistent startup snapshot.
 
 ## Scope of the first release
 
@@ -448,13 +457,13 @@ V1 includes:
 - Bun and TypeScript, running as a local CLI;
 - long polling of one selected Telegram bot;
 - private chats, groups, supergroups, and their topics;
-- mandatory fail-closed user/chat allowlisting and one control chat;
+- mandatory fail-closed user/chat allowlisting and one approvals chat;
 - one FX session per bot/chat/topic route;
 - text, captions, replies, edits, and attachment references;
 - a scoped Telegram MCP action plane for replies, files, reactions, choices,
   polls, and attachment downloads;
-- opt-in group-admin profiles for managed pins, topics, deletion, moderation,
-  and join requests;
+- group-admin actions derived from live Telegram rights for managed pins,
+  topics, deletion, moderation, and join requests;
 - rich-message drafts in private chats and final rich messages everywhere;
 - SQLite recovery state and temporary attachment files;
 - cancellation, queuing, retry, rate-limit handling, and graceful shutdown.
@@ -513,8 +522,8 @@ set of Telegram operations without giving the model a general Bot API client.
    replace-all ACP command snapshot and reconciles the Telegram command menu for
    this chat.
 7. FX streams assistant text, tool status, and permission requests over ACP. An
-   explicit Telegram MCP action is validated against the context ref, route
-   capability profile, live bot permissions, approval policy, and effect ledger
+   explicit Telegram MCP action is validated against the context ref, the route
+   allowlist, live bot admin rights, approval policy, and effect ledger
    before the host calls Telegram.
 8. The projector reduces those events into a complete current timeline. It can
    add, update, collapse, or remove an earlier tool line.
@@ -561,7 +570,7 @@ Changing credentials is predictable:
 - history is never copied between chats automatically.
 
 Configuring the same bot in a second folder does not copy its allowlist, routes,
-control chat, or FX history.
+approvals chat, or FX history.
 Whichever folder currently holds the bot lock is the only active workspace.
 
 ## The Telegram message contract
@@ -735,9 +744,10 @@ The envelope adds fields only when Telegram supplied them:
 - document `name`, MIME type, and size;
 - photo, sticker, animation, video, video-note, document, audio, or voice
   attachment metadata that can be represented without copying a large payload;
-- `admin_context`: enabled workspace capabilities and bounded pending
-  join-request refs when admin mode is enabled. Live Telegram rights are checked
-  inside the MCP server immediately before an action. The context is
+- `admin_context`: the bot's current admin capabilities and bounded pending
+  join-request refs when the allowlisted group has granted admin rights. Live
+  Telegram rights are re-checked inside the MCP server immediately before an
+  action. The context is
   attached only to an explicitly triggered group turn; an ambient join request
   does not wake FX by itself.
 
@@ -864,17 +874,27 @@ useful follow-ups, but remain later additions: `telegram.edit_sent_message`,
 `telegram.delete_sent_message`, and `telegram.close_poll`. They should accept
 only refs returned by tgfx, never raw IDs.
 
-### Opt-in group administrator profile
+### Group administrator actions from live Telegram rights
 
-Administrator mode is configured per allowed group. It is a capability profile,
-not a user role and not an automatic consequence of making the bot a Telegram
-administrator. An admin tool is published only when all of these are true:
+Administrator actions need no tgfx-side configuration. For an allowlisted group
+chat, the available admin tools are exactly the bot's live Telegram admin
+rights — Telegram's own promote dialog is the per-capability editor, operated
+by exactly the people who own the consequences. Allowlisting the group remains
+the operator's explicit act of trust, and the approval card remains the
+per-action human gate. An admin tool executes only when all of these are true:
 
-1. the group is allowlisted in the current workspace;
-2. that capability is enabled for that exact chat;
-3. Telegram currently reports the required bot administrator right;
-4. the call's context and target refs resolve inside the same group and topic;
-5. any required single-use approval succeeds.
+1. the group is allowlisted in the current workspace (and is a group: admin
+   tools never exist for private chats);
+2. Telegram currently reports the required bot administrator right, re-checked
+   live at execution time;
+3. the call's context and target refs resolve inside the same group and topic;
+4. any required single-use approval succeeds.
+
+The MCP tool catalog is published from live rights at session start. A
+mid-session promotion is picked up by the next session, while a mid-session
+demotion takes effect immediately through the execution-time re-check.
+`tgfx doctor` queries Telegram directly when the operator wants a current rights
+report.
 
 The intended v1 admin methods are:
 
@@ -915,9 +935,10 @@ The MCP server negotiates the latest modern stdio protocol shared by the install
 SDK and FX build. MCP catalog subscriptions are not a Telegram event inbox and do
 not create ACP user turns. The tgfx host remains responsible for polling Telegram
 and deciding when an allowed message, interaction result, poll vote, or bounded
-admin context becomes a turn. The server publishes an admin-filtered catalog at
-session startup and re-checks the required Telegram right at execution; changing
-the saved admin profile requires restarting tgfx so FX receives a new server.
+admin context becomes a turn. The server publishes a rights-filtered catalog at
+session startup and re-checks the required Telegram right at execution; a
+promotion granted mid-session expands the catalog on the next session, while a
+demotion takes effect immediately through the execution-time re-check.
 
 ## Rendering FX in Telegram
 
@@ -1122,7 +1143,7 @@ therefore gives each boundary an explicit delivery semantic:
 | Telegram before local acceptance | Telegram-owned, with no tgfx durability guarantee. Telegram retains unconsumed updates for at most 24 hours. | Poll again while Telegram still retains the update. |
 | Authorized inbound update after SQLite commit | Durable acceptance and deduplication by `(bot_id, update_id)`, assuming the local database remains readable. | The update remains queued until done, failed, interrupted, or explicitly discarded. |
 | Unauthorized update | Intentional discard; its payload is not stored or sent to FX. | Advance the poll cursor and do not replay it. |
-| Dispatching a prompt to FX | At-most-once **automatic** dispatch when acceptance is uncertain. This avoids silently repeating file or tool side effects. | A recovered `dispatching` or `running` row becomes `interrupted`; tgfx notifies the control chat and requires `/retry` or `/discard`. |
+| Dispatching a prompt to FX | At-most-once **automatic** dispatch when acceptance is uncertain. This avoids silently repeating file or tool side effects. | A recovered `dispatching` or `running` row becomes `interrupted`; tgfx notifies the approvals chat and requires `/retry` or `/discard`. |
 | Private rich draft | Best effort and ephemeral. Intermediate frames may be coalesced, skipped, overwritten, or disappear. | Do not persist draft frames. Reconstruct a new draft only from a safely resumed active turn. |
 | Permanent final Telegram reply | At least once after an outbox row exists. | Retry `pending` or `sending` rows. A sent outbox reconciles its inbox to done after a crash; a crash after Telegram accepted but before SQLite committed can still rarely create a duplicate. |
 | Telegram MCP effect | A stable hash of route, active context, tool, and arguments guards one attempt. A completed identical call returns its stored result. | Any thrown or disconnected attempt becomes `unknown` and is not repeated automatically, even when the operation would normally be idempotent. |
@@ -1173,7 +1194,7 @@ therefore gives each boundary an explicit delivery semantic:
 ### Approvals and shutdown
 
 - Approval callbacks use an atomic compare-and-set from `pending` to `resolved`.
-  Only an allowed user in the expected control chat/topic with an unexpired
+  Only an allowed user in the expected approvals chat/topic with an unexpired
   request can win that transition. Approval consumption is single-use.
 - A graceful shutdown stops polling first, commits already accepted updates,
   asks FX to cancel the active prompt, finishes safe database writes, and releases
@@ -1199,7 +1220,7 @@ The implementation should be small enough to navigate without a framework:
 | `routing` | Route keys, per-route queue, cancellation, and FX session generations. |
 | `attachments` | Opaque references, album collection, validated downloads, temporary files, and cleanup. |
 | `fx` | `fx acp` process lifecycle, ACP client, session create/resume/prompt/cancel, available-command snapshots, slash-command forwarding, and permission events. |
-| `telegram-mcp` | Scoped action methods, opaque-ref resolution, interaction callbacks, admin profiles, and capability validation. |
+| `telegram-mcp` | Scoped action methods, opaque-ref resolution, interaction callbacks, live admin-rights derivation, and capability validation. |
 | `projector` | Reduction of ACP text/tool/permission events into a current semantic timeline. |
 | `renderer` | Rich blocks, drafts, final messages, fallback entities, splitting, throttle, and retry. |
 
@@ -1250,30 +1271,31 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   `attachment_ref`, `interaction_ref`, `poll_ref`, and `request_ref` resolve only
   inside the issuing bot, route, topic, and allowed lifetime.
 - Telegram administrator status is necessary but insufficient for admin MCP
-  tools. The exact group must be allowlisted, its workspace admin profile must
-  enable the capability, the live Bot API permission check must pass, and the
-  target must resolve within that group. Rights revoked while tgfx is running
-  take effect on the next call.
+  tools. The exact group must be allowlisted by the operator, the live Bot API
+  permission check must pass at execution time, and the target must resolve
+  within that group. Rights revoked while tgfx is running take effect on the
+  next call.
 - Deletion, member restriction/ban, join-request decline, and non-idempotent topic
-  creation require a single-use control-chat approval. Config may require more
-  approvals, never fewer for this destructive set. Protected principals include
-  the bot itself and explicitly configured control operators; they cannot be
-  moderation targets.
+  creation require a single-use approvals-chat approval — with the capability
+  profile gone, this card is the one deliberate operator gate for the
+  destructive set and can never be configured away. Protected principals
+  include the bot itself and every allowlisted user; they cannot be moderation
+  targets.
 - A normal message cannot approve an FX permission request. In ACP `ask` mode,
-  tgfx sends a card to the configured control chat with the exact tool title and
+  tgfx sends a card to the configured approvals chat with the exact tool title and
   the options FX supplied. With FX 0.0.5 these are **Allow once**, **Allow for
   this session**, and **Reject**. Administrator-action cards use **Approve** and
   **Deny**.
 - Approval callbacks are single-use, short-lived, attached to one bot and route,
-  and accepted only in the exact configured control chat/topic from an
+  and accepted only in the exact configured approvals chat/topic from an
   allowlisted clicker. Expired, canceled, already resolved, wrong-route, or
   unknown callbacks cannot execute the action. Session-wide permission is owned
   by FX and disappears with that FX session; tgfx never writes a permanent allow
   rule.
-- There are no approval roles. Every allowed user can approve from the control
-  chat. If the control chat itself is chat-allowlisted, every member of that chat
+- There are no approval roles. Every allowed user can approve from the approvals
+  chat. If the approvals chat itself is chat-allowlisted, every member of that chat
   can approve; onboarding warns about this explicitly. Use an allowlisted private
-  user as the control chat for the narrowest setup.
+  user as the approvals chat for the narrowest setup.
 - While approval is pending, the originating rich draft keeps the tool in its
   running state. `/cancel` cancels the FX turn. Approval timeout is fail-closed.
 - FX stdout is reserved for ACP JSON-RPC. Diagnostics go to stderr or an explicit
@@ -1396,7 +1418,7 @@ The current official FX behavior matters in several places:
   status, and permission requests.
 - FX exposes `ask` and `code` through ACP's dedicated `modes` state. tgfx selects
   `ask` with `session/set_mode`; treating it as an ordinary config option leaves
-  FX in automatic review and can deny a Telegram MCP action before the control
+  FX in automatic review and can deny a Telegram MCP action before the approvals
   chat sees an approval card.
 - `fx acp` accepts `--model <id>` and `--log-file <path>` after the `acp`
   subcommand. tgfx exposes only the model override in its normal product CLI and
@@ -1429,7 +1451,7 @@ The current official FX behavior matters in several places:
   chat-RPC mental model.
 - Hermes Agent demonstrates a useful separation between fail-closed numeric
   user/chat allowlists and a designated home channel for system delivery. tgfx
-  adopts that small core as a mandatory allowlist plus one control chat, without
+  adopts that small core as a mandatory allowlist plus one approvals chat, without
   adopting pairing codes, role tiers, guest access, or chat-driven permanent
   approval rules.
 
@@ -1456,8 +1478,8 @@ the current private-chat bridge:
 - whether Telegram's new group ephemeral messages are reliable enough for an
   opt-in group streaming preview;
 - album collection timing under delayed and out-of-order updates;
-- the most legible onboarding for per-group admin capabilities, live Telegram
-  permission drift, protected members, and approval policy;
+- live Telegram permission drift edge cases, protected members, and approval
+  policy;
 - managed-pin recovery after each possible failure between create, edit, and pin,
   especially the irreducible unknown-create window;
 - whether retained `message_ref` values survive realistic long FX sessions and
@@ -1487,7 +1509,7 @@ real administrator group before a public release.
 From a clean machine and a real repository, a user can:
 
 1. install FX and tgfx, run `tgfx`, enter a bot token, configure at least one
-   allowed user/chat ID and a control chat without editing a config file, and
+   allowed user/chat ID and an approvals chat without editing a config file, and
    optionally start with `tgfx --model <id>` and observe that exact model in the
    spawned FX ACP process;
 2. send text, a reply, an edit, a photo, a document, or a voice message and see an
@@ -1507,9 +1529,10 @@ From a clean machine and a real repository, a user can:
 8. use scoped attachment, file, choice, poll, reply, and reaction tools; react to
    a referenced message from an earlier turn without supplying a raw Telegram
    target ID or escaping the current route;
-9. opt one allowed group into selected admin capabilities, maintain its tgfx-owned
-   pinned bulletin, manage a topic, and complete an approved moderation action
-   without exposing a generic Bot API proxy or disturbing unrelated pins;
+9. promote the bot with selected rights in one allowed group, verify those rights
+   with `tgfx doctor`, maintain the group's tgfx-owned pinned bulletin, manage a
+   topic, and complete an approved moderation action without exposing a generic
+   Bot API proxy or disturbing unrelated pins;
 10. understand failures from Telegram, FX, permissions, files, and recovery through
    concise terminal and chat messages;
 11. verify that no bot token, Telegram file URL, permanent message archive, or raw
