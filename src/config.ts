@@ -11,7 +11,7 @@ const rendererSchema = z.object({
   updateEveryMs: z.number().int().min(500).max(10_000).default(800),
 });
 
-export const configSchema = z.object({
+const strictSchema = z.object({
   version: z.literal(1),
   activeBotId: decimalId,
   access: z.object({
@@ -20,23 +20,24 @@ export const configSchema = z.object({
   }).refine((value) => value.userIds.length + value.chatIds.length > 0, {
     message: "at least one allowed user or chat is required",
   }),
-  controlChat: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
+  approvals: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
   renderer: rendererSchema.default({
     mode: "streaming",
     collapseTools: true,
     updateEveryMs: 800,
   }),
-  admin: z.object({
-    chatIds: z.array(decimalId).default([]),
-    capabilities: z.array(z.enum([
-      "pins",
-      "topics",
-      "delete_messages",
-      "moderation",
-      "join_requests",
-    ])).default([]),
-  }).default({ chatIds: [], capabilities: [] }),
 }) satisfies z.ZodType<TgfxConfig>;
+
+// Configs written before the approvals rename carry `controlChat` (and possibly
+// a static `admin` profile, which is now derived live from Telegram rights).
+// They migrate in memory here and adopt the current shape on their next save.
+export const configSchema = z.preprocess((raw) => {
+  if (raw && typeof raw === "object" && !("approvals" in raw) && "controlChat" in raw) {
+    const { controlChat, admin: _legacyAdmin, ...rest } = raw as Record<string, unknown>;
+    return { ...rest, approvals: controlChat };
+  }
+  return raw;
+}, strictSchema);
 
 export type WorkspacePaths = {
   workspace: string;

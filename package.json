@@ -30,8 +30,8 @@
     "@agentclientprotocol/sdk": "^1.4.0",
     "@clack/prompts": "1.7.0",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "citty": "0.2.2",
     "grammy": "1.45.1",
+    "uqr": "^0.1.2",
     "zod": "4.4.3"
   }
 }

@@ -50,9 +50,8 @@ describe("tgfx host pipeline", () => {
       version: 1,
       activeBotId: "100",
       access: { userIds: ["42"], chatIds: [] },
-      controlChat: { chatId: "42", topicId: "0" },
+      approvals: { chatId: "42", topicId: "0" },
       renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 10 },
-      admin: { chatIds: [], capabilities: [] },
     };
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
@@ -122,9 +121,8 @@ describe("tgfx host pipeline", () => {
     const fxBinary = await fakeFx(workspace);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
-      controlChat: { chatId: "42", topicId: "0" },
+      approvals: { chatId: "42", topicId: "0" },
       renderer: { mode: "final", collapseTools: true, updateEveryMs: 10 },
-      admin: { chatIds: [], capabilities: [] },
     };
     const texts: string[] = [];
     let phase = 0;
@@ -173,9 +171,8 @@ describe("tgfx host pipeline", () => {
     const fxBinary = await fakeFx(workspace);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
-      controlChat: { chatId: "42", topicId: "0" },
+      approvals: { chatId: "42", topicId: "0" },
       renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 10 },
-      admin: { chatIds: [], capabilities: [] },
     };
     const texts: string[] = [];
     let firstPoll = true;
@@ -227,9 +224,8 @@ describe("tgfx host pipeline", () => {
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
-      controlChat: { chatId: "42", topicId: "0" },
+      approvals: { chatId: "42", topicId: "0" },
       renderer: { mode: "final", collapseTools: true, updateEveryMs: 10 },
-      admin: { chatIds: [], capabilities: [] },
     };
     const texts: string[] = [];
     const menus: Array<Array<{ command: string }>> = [];
@@ -278,9 +274,8 @@ describe("tgfx host pipeline", () => {
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
-      controlChat: { chatId: "42", topicId: "0" },
+      approvals: { chatId: "42", topicId: "0" },
       renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 10 },
-      admin: { chatIds: [], capabilities: [] },
     };
     let phase = 0;
     let approvalData!: string;

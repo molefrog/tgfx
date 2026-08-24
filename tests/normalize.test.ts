@@ -7,9 +7,8 @@ const bot: BotIdentity = { id: "100", username: "tgfx_test_bot", displayName: "t
 const config: TgfxConfig = {
   version: 1, activeBotId: "100",
   access: { userIds: ["42"], chatIds: [] },
-  controlChat: { chatId: "42", topicId: "0" },
+  approvals: { chatId: "42", topicId: "0" },
   renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 800 },
-  admin: { chatIds: [], capabilities: [] },
 };
 
 function update(overrides: Record<string, unknown> = {}): Update {

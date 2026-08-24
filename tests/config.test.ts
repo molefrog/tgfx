@@ -16,9 +16,8 @@ function config(): TgfxConfig {
     version: 1,
     activeBotId: "123456",
     access: { userIds: ["42"], chatIds: [] },
-    controlChat: { chatId: "42", topicId: "0" },
+    approvals: { chatId: "42", topicId: "0" },
     renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 800 },
-    admin: { chatIds: [], capabilities: [] },
   };
 }
 
@@ -30,6 +29,31 @@ describe("workspace config", () => {
     await saveConfig(paths, config());
     expect(await loadConfig(paths)).toEqual(config());
     expect(await Bun.file(paths.config).text()).not.toContain("token");
+  });
+
+  test("migrates legacy controlChat and admin shapes in memory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tgfx-config-legacy-"));
+    temporary.push(root);
+    const paths = workspacePaths(root);
+    mkdirSync(paths.directory, { recursive: true });
+    writeFileSync(paths.config, JSON.stringify({
+      version: 1,
+      activeBotId: "123456",
+      access: { userIds: ["42"], chatIds: ["-9"] },
+      controlChat: { chatId: "42", topicId: "7" },
+      renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 800 },
+      admin: { chatIds: ["-9"], capabilities: ["pins", "topics"] },
+    }));
+    const loaded = await loadConfig(paths);
+    expect(loaded?.approvals).toEqual({ chatId: "42", topicId: "7" });
+    expect(loaded && "controlChat" in loaded).toBeFalse();
+    expect(loaded && "admin" in loaded).toBeFalse();
+    // The migrated config saves back in the current shape.
+    await saveConfig(paths, loaded!);
+    const raw = JSON.parse(await Bun.file(paths.config).text());
+    expect(raw.approvals).toEqual({ chatId: "42", topicId: "7" });
+    expect("controlChat" in raw).toBeFalse();
+    expect("admin" in raw).toBeFalse();
   });
 
   test("requires an allowlist and decimal Telegram IDs", () => {

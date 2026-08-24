@@ -27,6 +27,7 @@ export type RouteRow = {
   generation: number;
   dynamic_commands_json: string;
   last_prompt_json: string | null;
+  updated_at: string;
 };
 
 export type ContextCapability = {
@@ -40,6 +41,17 @@ export type ContextCapability = {
   sender_ref: string;
   attachments_json: string;
   expires_at: string;
+};
+
+export type ChatDirectoryRow = {
+  bot_id: string;
+  chat_id: string;
+  kind: string | null;
+  title: string | null;
+  username: string | null;
+  admin_status: string | null;
+  admin_rights_json: string;
+  updated_at: string;
 };
 
 export type MessageReference = {
@@ -187,6 +199,18 @@ CREATE TABLE IF NOT EXISTS context_capabilities (
 
 CREATE INDEX IF NOT EXISTS context_route_active
   ON context_capabilities(route_key, active, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS chat_directory (
+  bot_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  kind TEXT,
+  title TEXT,
+  username TEXT,
+  admin_status TEXT,
+  admin_rights_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(bot_id, chat_id)
+);
 `;
 
 function now(): string { return new Date().toISOString(); }
@@ -819,6 +843,54 @@ export class StateStore {
       UPDATE telegram_interactions SET state='expired',updated_at=$now
       WHERE interaction_id=$id AND state='pending'
     `).run({ id, now: now() }).changes === 1;
+  }
+
+  /**
+   * Remembers what Telegram told us about a chat or user: display names for
+   * the access map and log labels, admin standing for the admin tool plane.
+   * Undefined fields keep their previously cached value.
+   */
+  upsertChatInfo(input: {
+    botId: string; chatId: string; kind?: string; title?: string; username?: string;
+  }): void {
+    this.db.query(`
+      INSERT INTO chat_directory(bot_id, chat_id, kind, title, username, updated_at)
+      VALUES ($bot, $chat, $kind, $title, $username, $now)
+      ON CONFLICT(bot_id, chat_id) DO UPDATE SET
+        kind=COALESCE(excluded.kind, chat_directory.kind),
+        title=COALESCE(excluded.title, chat_directory.title),
+        username=COALESCE(excluded.username, chat_directory.username),
+        updated_at=excluded.updated_at
+    `).run({
+      bot: input.botId, chat: input.chatId, kind: input.kind ?? null,
+      title: input.title ?? null, username: input.username ?? null, now: now(),
+    });
+  }
+
+  setChatAdminStatus(botId: string, chatId: string, status: string, rights: string[]): void {
+    this.db.query(`
+      INSERT INTO chat_directory(bot_id, chat_id, admin_status, admin_rights_json, updated_at)
+      VALUES ($bot, $chat, $status, $rights, $now)
+      ON CONFLICT(bot_id, chat_id) DO UPDATE SET
+        admin_status=excluded.admin_status,
+        admin_rights_json=excluded.admin_rights_json,
+        updated_at=excluded.updated_at
+    `).run({ bot: botId, chat: chatId, status, rights: JSON.stringify(rights), now: now() });
+  }
+
+  chatInfo(botId: string, chatId: string): ChatDirectoryRow | undefined {
+    return this.db.query<ChatDirectoryRow, [string, string]>(
+      "SELECT * FROM chat_directory WHERE bot_id=? AND chat_id=?",
+    ).get(botId, chatId) ?? undefined;
+  }
+
+  chatAdminRights(botId: string, chatId: string): string[] {
+    const row = this.chatInfo(botId, chatId);
+    if (!row || (row.admin_status !== "administrator" && row.admin_status !== "creator")) return [];
+    try {
+      const rights = JSON.parse(row.admin_rights_json);
+      return Array.isArray(rights) ? rights.filter((value) => typeof value === "string") : [];
+    } catch { return []; }
   }
 
   prune(): void {

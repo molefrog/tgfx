@@ -15,19 +15,15 @@ type McpEnvironment = {
   workspace: string;
   database: string;
   files: string;
-  controlChat: string;
-  controlTopic: string;
-  adminChatIds: string[];
-  adminCapabilities: AdminCapability[];
+  approvalsChat: string;
+  approvalsTopic: string;
+  allowedChats: string[];
   protectedUsers: string[];
   apiRoot?: string;
   fileRoot?: string;
 };
 
 const decimalId = z.string().regex(/^-?\d+$/);
-const adminCapability = z.enum([
-  "pins", "topics", "delete_messages", "moderation", "join_requests",
-]);
 
 function jsonEnvironment<T>(name: string, schema: z.ZodType<T>, fallback: unknown): T {
   const raw = process.env[name];
@@ -57,10 +53,9 @@ function environment(): McpEnvironment {
     workspace: resolve(required("TGFX_MCP_WORKSPACE")),
     database: resolve(required("TGFX_MCP_DATABASE")),
     files: resolve(required("TGFX_MCP_FILES")),
-    controlChat: decimalId.parse(required("TGFX_MCP_CONTROL_CHAT")),
-    controlTopic: decimalId.parse(process.env.TGFX_MCP_CONTROL_TOPIC ?? "0"),
-    adminChatIds: jsonEnvironment("TGFX_MCP_ADMIN_CHATS", z.array(decimalId), []),
-    adminCapabilities: jsonEnvironment("TGFX_MCP_ADMIN_CAPABILITIES", z.array(adminCapability), []),
+    approvalsChat: decimalId.parse(required("TGFX_MCP_APPROVALS_CHAT")),
+    approvalsTopic: decimalId.parse(process.env.TGFX_MCP_APPROVALS_TOPIC ?? "0"),
+    allowedChats: jsonEnvironment("TGFX_MCP_ALLOWED_CHATS", z.array(decimalId), []),
     protectedUsers: jsonEnvironment("TGFX_MCP_PROTECTED_USERS", z.array(decimalId), []),
     ...(process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT
       ? { apiRoot: process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT }
@@ -90,27 +85,26 @@ export async function runTelegramMcpServer(): Promise<void> {
   const state = new StateStore(env.database);
   const telegram = new TelegramApi(env.token, env.apiRoot);
   const routeChatId = env.routeKey.split(":")[1] ?? "";
+  // Admin needs no tgfx-side configuration: for an allowlisted group chat the
+  // available admin tools are exactly the bot's live Telegram admin rights.
+  // Promotion in Telegram is the consent; demotion is the revocation.
   const liveAdminCapabilities = async (): Promise<Set<AdminCapability>> => {
-    const capabilities = new Set<AdminCapability>();
-    if (!env.adminChatIds.includes(routeChatId)) return capabilities;
-    if (process.env.TGFX_MCP_SKIP_RIGHTS_CHECK === "1") {
-      for (const capability of env.adminCapabilities) capabilities.add(capability);
-      return capabilities;
+    if (!env.allowedChats.includes(routeChatId) || Number(routeChatId) >= 0) {
+      return new Set<AdminCapability>();
     }
     return adminCapabilitiesForMember(
       await telegram.api.getChatMember(routeChatId, Number(env.botId)),
     );
   };
   const grantedAdminCapabilities = new Set<AdminCapability>();
-  if (env.adminChatIds.includes(routeChatId)) {
+  if (env.allowedChats.includes(routeChatId) && Number(routeChatId) < 0) {
     try {
       for (const capability of await liveAdminCapabilities()) grantedAdminCapabilities.add(capability);
     } catch (error) {
       console.error(`tgfx MCP could not verify Telegram admin rights: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  const adminEnabled = (capability: AdminCapability) =>
-    env.adminCapabilities.includes(capability) && grantedAdminCapabilities.has(capability);
+  const adminEnabled = (capability: AdminCapability) => grantedAdminCapabilities.has(capability);
   const server = new McpServer(
     { name: "tgfx-telegram", version: "0.1.0" },
     { instructions: [
@@ -152,10 +146,9 @@ export async function runTelegramMcpServer(): Promise<void> {
 
   const requireAdmin = async (capability: AdminCapability, prompt: string): Promise<void> => {
     const current = context();
-    if (!env.adminChatIds.includes(current.chat_id)) throw new Error("Admin tools are disabled for this chat.");
-    if (!env.adminCapabilities.includes(capability)) throw new Error(`Admin capability '${capability}' is not configured.`);
+    if (!env.allowedChats.includes(current.chat_id)) throw new Error("Admin tools are disabled for this chat.");
     if (!(await liveAdminCapabilities()).has(capability)) {
-      throw new Error(`The bot no longer has Telegram rights for '${capability}'.`);
+      throw new Error(`The bot does not have Telegram admin rights for '${capability}'.`);
     }
     const id = crypto.randomUUID().replaceAll("-", "");
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
@@ -165,7 +158,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     });
     let card;
     try {
-      card = await telegram.sendText(env.controlChat, `Approval required\n\n${prompt}`, env.controlTopic, {
+      card = await telegram.sendText(env.approvalsChat, `Approval required\n\n${prompt}`, env.approvalsTopic, {
         reply_markup: { inline_keyboard: [[
           { text: "Approve", callback_data: `mcp:${id}:approve` },
           { text: "Deny", callback_data: `mcp:${id}:deny` },
@@ -184,7 +177,7 @@ export async function runTelegramMcpServer(): Promise<void> {
       await Bun.sleep(400);
     }
     if (state.expireInteraction(id)) {
-      await telegram.editReplyMarkup(env.controlChat, card.message_id, {
+      await telegram.editReplyMarkup(env.approvalsChat, card.message_id, {
         inline_keyboard: [[{ text: "Expired", callback_data: "resolved" }]],
       }).catch(() => undefined);
     }
@@ -428,8 +421,7 @@ export async function runTelegramMcpServer(): Promise<void> {
   }, async (args) => result(await perform("telegram_manage_topic", args, async () => {
     const current = context();
     if (args.action === "create") await requireAdmin("topics", `Create forum topic “${args.name ?? ""}”?`);
-    else if (!env.adminChatIds.includes(current.chat_id)
-      || !env.adminCapabilities.includes("topics")
+    else if (!env.allowedChats.includes(current.chat_id)
       || !(await liveAdminCapabilities()).has("topics")) {
       throw new Error("Topic administration is disabled for this chat.");
     }
@@ -517,8 +509,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     const principal = state.principal(payload.memberRef, env.routeKey);
     if (!principal || principal.principal_kind !== "user") throw new Error("Unknown or expired member_ref.");
     if (args.decision === "decline") await requireAdmin("join_requests", "Decline this Telegram join request?");
-    else if (!env.adminCapabilities.includes("join_requests")
-      || !(await liveAdminCapabilities()).has("join_requests")) {
+    else if (!(await liveAdminCapabilities()).has("join_requests")) {
       throw new Error("Join-request administration is disabled.");
     }
     const userId = Number(principal.telegram_id);
