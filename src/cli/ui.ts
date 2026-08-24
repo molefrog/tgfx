@@ -88,6 +88,9 @@ export function suggestion(input: string, candidates: readonly string[]): string
   return best?.name;
 }
 
+/** Flags every command accepts; the dispatcher acts on them before parsing. */
+const GLOBAL_FLAGS: Record<string, "boolean"> = { "no-color": "boolean", debug: "boolean" };
+
 /**
  * A strict flag parser: every token must be a declared flag or, where allowed,
  * a positional argument. Unknown flags are errors, not surprises. Booleans are
@@ -102,7 +105,7 @@ export function parseArgs(
 ): { flags: Record<string, string | boolean>; positionals: string[] } {
   const flags: Record<string, string | boolean> = {};
   const positionals: string[] = [];
-  const declared = spec.flags ?? {};
+  const declared = { ...GLOBAL_FLAGS, ...spec.flags };
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (token.startsWith("--")) {
@@ -115,7 +118,7 @@ export function parseArgs(
         flags[name] = true;
       } else {
         const value = equals === -1 ? tokens[++index] : token.slice(equals + 1);
-        if (value === undefined || (equals === -1 && value.startsWith("--"))) {
+        if (!value || (equals === -1 && value.startsWith("--"))) {
           throw new CliError(`--${name} needs a value`);
         }
         flags[name] = value;
@@ -131,7 +134,7 @@ export function parseArgs(
 
 export function helpText(): string {
   const line = (usage: string, description: string) =>
-    `  ${cyan(usage.padEnd(28))} ${dim(description)}`;
+    `  ${cyan(usage.padEnd(30))} ${dim(description)}`;
   return [
     `${bold("tgfx")} ${dim(`${VERSION} — run a local fx agent through one Telegram bot`)}`,
     "",

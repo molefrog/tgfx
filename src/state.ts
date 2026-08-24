@@ -211,7 +211,25 @@ CREATE TABLE IF NOT EXISTS chat_directory (
   updated_at TEXT NOT NULL,
   PRIMARY KEY(bot_id, chat_id)
 );
+
+CREATE TABLE IF NOT EXISTS workspace_kv (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
+
+/**
+ * The live access snapshot the host publishes for its MCP subprocesses. Env
+ * variables bootstrap a session, but authorization-relevant values are read
+ * from here on every call so `tgfx allow`/`deny`/`approvals` edits reach
+ * sessions that are already running.
+ */
+export type LiveAccess = {
+  allowedChats: string[];
+  protectedUsers: string[];
+  approvals: { chatId: string; topicId: string };
+};
 
 function now(): string { return new Date().toISOString(); }
 
@@ -867,7 +885,14 @@ export class StateStore {
     });
   }
 
-  setChatAdminStatus(botId: string, chatId: string, status: string, rights: string[]): void {
+  /**
+   * Records the bot's admin standing in a chat. `unlessNewerThan` makes a
+   * point-in-time read (startup or reload refresh) lose to a fresher
+   * my_chat_member write that landed while the read was in flight.
+   */
+  setChatAdminStatus(
+    botId: string, chatId: string, status: string, rights: string[], unlessNewerThan?: string,
+  ): void {
     this.db.query(`
       INSERT INTO chat_directory(bot_id, chat_id, admin_status, admin_rights_json, updated_at)
       VALUES ($bot, $chat, $status, $rights, $now)
@@ -875,7 +900,45 @@ export class StateStore {
         admin_status=excluded.admin_status,
         admin_rights_json=excluded.admin_rights_json,
         updated_at=excluded.updated_at
-    `).run({ bot: botId, chat: chatId, status, rights: JSON.stringify(rights), now: now() });
+      WHERE $cutoff IS NULL
+        OR chat_directory.admin_status IS NULL
+        OR chat_directory.updated_at<=$cutoff
+    `).run({
+      bot: botId, chat: chatId, status, rights: JSON.stringify(rights),
+      now: now(), cutoff: unlessNewerThan ?? null,
+    });
+  }
+
+  /** Drops directory rows for chats no longer configured or routed. */
+  pruneChatDirectory(botId: string, keepChatIds: string[]): void {
+    const keep = new Set(keepChatIds);
+    const rows = this.db.query<{ chat_id: string }, [string]>(
+      "SELECT chat_id FROM chat_directory WHERE bot_id=?",
+    ).all(botId);
+    for (const row of rows) {
+      if (keep.has(row.chat_id)) continue;
+      this.db.query("DELETE FROM chat_directory WHERE bot_id=? AND chat_id=?").run(botId, row.chat_id);
+    }
+  }
+
+  setLiveAccess(access: LiveAccess): void {
+    this.db.query(`
+      INSERT INTO workspace_kv(key, value_json, updated_at) VALUES ('live_access', $value, $now)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
+    `).run({ value: JSON.stringify(access), now: now() });
+  }
+
+  liveAccess(): LiveAccess | undefined {
+    const row = this.db.query<{ value_json: string }, []>(
+      "SELECT value_json FROM workspace_kv WHERE key='live_access'",
+    ).get();
+    if (!row) return undefined;
+    try {
+      const parsed = JSON.parse(row.value_json) as LiveAccess;
+      if (!Array.isArray(parsed.allowedChats) || !Array.isArray(parsed.protectedUsers)
+        || typeof parsed.approvals?.chatId !== "string") return undefined;
+      return parsed;
+    } catch { return undefined; }
   }
 
   chatInfo(botId: string, chatId: string): ChatDirectoryRow | undefined {

@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -91,6 +91,45 @@ export async function saveConfig(paths: WorkspacePaths, config: TgfxConfig): Pro
   const temporary = `${paths.config}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, paths.config);
+}
+
+/**
+ * Serializes read-modify-write config edits across processes with a small
+ * advisory lock, so a CLI edit and the running process's own rare write
+ * (supergroup migration) cannot clobber each other. A lock older than five
+ * seconds is treated as leftover from a crash and taken over.
+ */
+export async function updateConfig(
+  paths: WorkspacePaths,
+  mutate: (config: TgfxConfig | undefined) => TgfxConfig | undefined | Promise<TgfxConfig | undefined>,
+): Promise<TgfxConfig | undefined> {
+  await mkdir(paths.directory, { recursive: true, mode: 0o700 });
+  const lockPath = join(paths.directory, "config.write.lock");
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      await handle.close();
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const info = await lstat(lockPath).catch(() => undefined);
+      if (info && Date.now() - info.mtimeMs > 5_000) {
+        await rm(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error("another tgfx process is editing the configuration; try again");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    // Returning undefined from `mutate` aborts without writing.
+    const next = await mutate(await loadConfig(paths));
+    if (next) await saveConfig(paths, next);
+    return next;
+  } finally {
+    await rm(lockPath, { force: true });
+  }
 }
 
 export async function pruneWorkspaceFiles(paths: WorkspacePaths, maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<void> {

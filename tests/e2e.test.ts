@@ -113,6 +113,8 @@ describe("tgfx over the local Telegram simulator", () => {
         ).all().map((row) => row.update_id);
         expect(updates).not.toContain(rejectedUpdate);
         expect(state.nextOffset("100")).toBeGreaterThan(rejectedUpdate);
+        // The reload republished the live access snapshot MCP sessions consult.
+        expect(state.liveAccess()?.protectedUsers).toEqual(["100", "42", "99"]);
       } finally { state.close(); }
     } finally {
       await app.stop();

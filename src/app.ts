@@ -25,7 +25,7 @@ import type {
   TgfxConfig,
 } from "./types";
 import { routeKey } from "./types";
-import { loadConfig, pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
+import { loadConfig, pruneWorkspaceFiles, updateConfig, type WorkspacePaths } from "./config";
 
 const BUILTINS: BotCommand[] = [
   { command: "fx", description: "Ask 𝒇x in this workspace" },
@@ -46,6 +46,9 @@ type PersistedPayload =
 type PermissionWaiter = {
   options: acp.PermissionOption[];
   messageId: number;
+  /** Where the card was actually posted; approvals may move while it waits. */
+  chatId: string;
+  topicId: string;
   routeKey: string;
   resolve(value: acp.RequestPermissionResponse): void;
 };
@@ -147,9 +150,10 @@ export class TgfxApp {
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
   private readonly pollAbort = new AbortController();
   private config: TgfxConfig;
-  private configMtimeMs = 0;
+  private configStat?: { mtimeMs: number; ino: number; size: number };
   private configReloading = false;
   private reloadTimer?: ReturnType<typeof setInterval>;
+  private readonly menusInstalled = new Set<string>();
   private pollTask?: Promise<void>;
   private stopping = false;
   private stopTask?: Promise<void>;
@@ -214,18 +218,50 @@ export class TgfxApp {
       workspace: this.options.paths.workspace,
       renderer: this.rendererConfig.mode,
     });
-    this.configMtimeMs = await stat(this.options.paths.config).then((info) => info.mtimeMs).catch(() => 0);
+    this.publishLiveAccess();
+    // A zeroed baseline forces one reload on the first timer tick, so an edit
+    // that landed between runtime()'s config read and this point still applies
+    // within a second of startup.
+    this.configStat = undefined;
     this.reloadTimer = setInterval(() => void this.maybeReloadConfig(), 1_000);
     // The refresh finishes before polling so a my_chat_member update arriving
     // in the first poll can never be overwritten by this point-in-time read.
     await this.refreshDirectory();
+    this.state.pruneChatDirectory(this.options.bot.id, this.directoryChats());
     this.pollTask = this.poll();
     await Promise.race([this.pollTask, this.stopped]);
   }
 
+  /** Every chat the directory cache should keep entries for. */
+  private directoryChats(): string[] {
+    return [
+      this.options.bot.id,
+      ...this.config.access.chatIds,
+      ...this.config.access.userIds,
+      this.config.approvals.chatId,
+      ...this.state.routes()
+        .filter((route) => route.bot_id === this.options.bot.id)
+        .map((route) => route.chat_id),
+    ];
+  }
+
+  /**
+   * Republishes the values MCP subprocesses must see live — the allowlist,
+   * protected users, and approvals target — into the shared journal. Sessions
+   * bootstrap from their launch env but consult this on every call, so a
+   * config edit reaches turns that are already in flight.
+   */
+  private publishLiveAccess(): void {
+    this.state.setLiveAccess({
+      allowedChats: this.config.access.chatIds,
+      protectedUsers: [this.options.bot.id, ...this.config.access.userIds],
+      approvals: { ...this.config.approvals },
+    });
+  }
+
   /**
    * Applies .tgfx/config.json edits to the running process. Configuration
-   * commands write the file atomically; this notices the new mtime within a
+   * commands write the file atomically; this notices the change within a
    * second, re-validates, and swaps the config in memory. A bad or foreign
    * file never replaces the running configuration.
    */
@@ -234,8 +270,14 @@ export class TgfxApp {
     this.configReloading = true;
     try {
       const info = await stat(this.options.paths.config).catch(() => undefined);
-      if (!info || info.mtimeMs === this.configMtimeMs) return;
-      this.configMtimeMs = info.mtimeMs;
+      if (!info) return;
+      // Atomic writes always produce a fresh inode, so the (mtime, ino, size)
+      // triple catches even a rewrite landing in the same millisecond.
+      if (this.configStat
+        && info.mtimeMs === this.configStat.mtimeMs
+        && info.ino === this.configStat.ino
+        && info.size === this.configStat.size) return;
+      this.configStat = { mtimeMs: info.mtimeMs, ino: info.ino, size: info.size };
       let next: TgfxConfig | undefined;
       try { next = await loadConfig(this.options.paths); }
       catch (error) {
@@ -253,23 +295,46 @@ export class TgfxApp {
         });
         return;
       }
-      const changes = describeConfigChanges(this.config, next);
+      const previous = this.config;
+      const changes = describeConfigChanges(previous, next);
       this.config = next;
       if (changes.length) {
+        this.publishLiveAccess();
         this.log({ event: "config.reloaded", message: `config reloaded · ${changes.join(" · ")}`, changes });
-        void this.refreshDirectory();
+        await this.refreshDirectory();
+        await this.reconcileMenus(previous, next);
       }
     } finally {
       this.configReloading = false;
     }
   }
 
+  /** Installs menus for newly allowed chats and removes them from denied ones. */
+  private async reconcileMenus(previous: TgfxConfig, next: TgfxConfig): Promise<void> {
+    const before = new Set([...previous.access.chatIds, ...previous.access.userIds]);
+    const after = new Set([...next.access.chatIds, ...next.access.userIds]);
+    const work: Promise<unknown>[] = [];
+    for (const chatId of after) {
+      if (!before.has(chatId)) work.push(this.installMenu(chatId, []).catch(() => undefined));
+    }
+    for (const chatId of before) {
+      if (!after.has(chatId)) {
+        this.menusInstalled.delete(chatId);
+        work.push(this.options.telegram.deleteCommands(chatId).catch(() => undefined));
+      }
+    }
+    await Promise.allSettled(work);
+  }
+
   /**
    * Fills the chat directory cache behind the access map and log labels:
    * titles for every allowlisted chat, live admin standing for allowlisted
-   * groups. Best effort — the cache also fills as traffic is observed.
+   * groups. Best effort — the cache also fills as traffic is observed. The
+   * cutoff keeps this point-in-time read from overwriting a fresher
+   * my_chat_member write that lands while the read is in flight.
    */
   private async refreshDirectory(): Promise<void> {
+    const cutoff = new Date().toISOString();
     const chatIds = new Set([
       ...this.config.access.chatIds,
       ...this.config.access.userIds,
@@ -287,7 +352,7 @@ export class TgfxApp {
       if (Number(chatId) < 0) {
         const member = await this.options.telegram.api.getChatMember(chatId, Number(this.options.bot.id));
         this.state.setChatAdminStatus(
-          this.options.bot.id, chatId, member.status, [...adminCapabilitiesForMember(member)],
+          this.options.bot.id, chatId, member.status, [...adminCapabilitiesForMember(member)], cutoff,
         );
       }
     }));
@@ -317,7 +382,7 @@ export class TgfxApp {
         ?? waiter.options.find((option) => option.kind === "reject_always");
       this.state.expireInteraction(id);
       expiredCards.push(this.options.telegram.editReplyMarkup(
-        this.config.approvals.chatId,
+        waiter.chatId,
         waiter.messageId,
         { inline_keyboard: [[{ text: "Cancelled · tgfx stopped", callback_data: "resolved" }]] },
       ).catch(() => undefined));
@@ -337,7 +402,10 @@ export class TgfxApp {
     await Promise.race([queued, Bun.sleep(3_000)]);
     await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
     await queued;
+    // Cleanup covers every chat a menu was actually installed in this run —
+    // including chats denied after startup — not just the current config.
     const menuChats = new Set([
+      ...this.menusInstalled,
       ...this.config.access.chatIds,
       ...this.config.access.userIds,
       ...this.state.routes().filter((route) => route.bot_id === this.options.bot.id).map((route) => route.chat_id),
@@ -533,7 +601,8 @@ export class TgfxApp {
         chatId, topicId: "0", chatKind: joinRequest.chat.type,
       };
       const enabled = this.config.access.chatIds.includes(chatId)
-        && this.adminRights(chatId).includes("join_requests");
+        && (this.adminRights(chatId).includes("join_requests")
+          || await this.probeJoinRights(chatId));
       if (enabled) this.state.ensureRoute(route);
       const id = this.state.ingestUpdate({
         botId: this.options.bot.id, updateId: update.update_id, routeKey: route.key,
@@ -798,6 +867,23 @@ export class TgfxApp {
     return this.state.chatAdminRights(this.options.bot.id, chatId) as AdminCapability[];
   }
 
+  /**
+   * Join requests are rare and irreversible to drop, so a cold or stale
+   * directory cache falls back to one live rights check before the request
+   * is discarded as unauthorized.
+   */
+  private async probeJoinRights(chatId: string): Promise<boolean> {
+    if (Number(chatId) >= 0) return false;
+    try {
+      const member = await this.options.telegram.api.getChatMember(chatId, Number(this.options.bot.id));
+      const rights = [...adminCapabilitiesForMember(member)];
+      this.state.setChatAdminStatus(this.options.bot.id, chatId, member.status, rights);
+      return rights.includes("join_requests");
+    } catch {
+      return false;
+    }
+  }
+
   private adminContext(route: Route): Record<string, unknown> | undefined {
     const capabilities = this.adminRights(route.chatId);
     if (!capabilities.length) return undefined;
@@ -822,21 +908,42 @@ export class TgfxApp {
       values.map((value) => value === oldChatId ? newChatId : value),
     )];
     // Config edits can land while the process runs, so the migration rewrite
-    // starts from the file on disk instead of clobbering it with this
-    // process's in-memory copy.
-    const current = await loadConfig(this.options.paths).catch(() => undefined) ?? this.config;
-    const before = JSON.stringify({ access: current.access.chatIds, approvals: current.approvals });
-    current.access.chatIds = replaceId(current.access.chatIds);
-    if (current.approvals.chatId === oldChatId) {
-      current.approvals.chatId = newChatId;
+    // happens under the shared config write lock, starting from the file on
+    // disk. A disk config that names a different bot (an in-progress
+    // `tgfx auth` switch) is left alone: the rewrite then applies in memory
+    // only and the next start reconciles.
+    let adopted: TgfxConfig | undefined;
+    try {
+      adopted = await updateConfig(this.options.paths, (disk) => {
+        if (disk && disk.activeBotId !== this.options.bot.id) return undefined;
+        const current = disk ?? structuredClone(this.config);
+        current.access.chatIds = replaceId(current.access.chatIds);
+        if (current.approvals.chatId === oldChatId) {
+          current.approvals.chatId = newChatId;
+        }
+        return current;
+      });
+      if (!adopted) {
+        this.log({
+          event: "config.invalid",
+          message: "config.json names a different bot; the migrated chat ID was applied in memory only",
+        });
+      }
+    } catch (error) {
+      this.log({
+        event: "config.invalid",
+        message: `could not persist the migrated chat ID · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+      });
     }
-    const after = JSON.stringify({ access: current.access.chatIds, approvals: current.approvals });
-    this.config = current;
-    if (before !== after) {
-      await saveConfig(this.options.paths, this.config);
-      this.configMtimeMs = await stat(this.options.paths.config)
-        .then((info) => info.mtimeMs).catch(() => this.configMtimeMs);
-    }
+    this.config = adopted ?? (() => {
+      const fallback = structuredClone(this.config);
+      fallback.access.chatIds = replaceId(fallback.access.chatIds);
+      if (fallback.approvals.chatId === oldChatId) fallback.approvals.chatId = newChatId;
+      return fallback;
+    })();
+    this.publishLiveAccess();
+    // Force the next reload tick to re-read and adopt whatever is now on disk.
+    this.configStat = undefined;
 
     if (migrated.length) {
       await this.options.telegram.deleteCommands(oldChatId).catch(() => undefined);
@@ -922,11 +1029,27 @@ export class TgfxApp {
     const callback = update.callback_query;
     if (!callback?.data || !callback.message) return;
     const [kind, id, value] = callback.data.split(":", 3);
-    const inControlRoute = route.chatId === this.config.approvals.chatId
-      && route.topicId === this.config.approvals.topicId;
+    // A card is answerable only in the exact chat/topic it was posted to. The
+    // interaction records that location, so a live `tgfx approvals` change
+    // neither strands pending cards nor accepts their clicks elsewhere.
+    const inApprovalsRoute = (interactionId: string): boolean => {
+      const interaction = this.state.interaction(interactionId);
+      let cardChatId = this.config.approvals.chatId;
+      let cardTopicId = this.config.approvals.topicId;
+      if (interaction) {
+        try {
+          const payload = JSON.parse(interaction.payload_json) as { cardChatId?: string; cardTopicId?: string };
+          if (typeof payload.cardChatId === "string") {
+            cardChatId = payload.cardChatId;
+            cardTopicId = typeof payload.cardTopicId === "string" ? payload.cardTopicId : "0";
+          }
+        } catch { /* fall back to the current approvals target */ }
+      }
+      return route.chatId === cardChatId && route.topicId === cardTopicId;
+    };
     if (kind === "mcp" && id && (value === "approve" || value === "deny")) {
-      if (!inControlRoute) {
-        await this.options.telegram.answerCallback(callback.id, "This approval belongs to the control chat");
+      if (!inApprovalsRoute(id)) {
+        await this.options.telegram.answerCallback(callback.id, "This approval belongs to the approvals chat");
         return;
       }
       const approval = this.state.interaction(id);
@@ -942,8 +1065,8 @@ export class TgfxApp {
       return;
     }
     if (kind === "fxp" && id && value !== undefined) {
-      if (!inControlRoute) {
-        await this.options.telegram.answerCallback(callback.id, "This permission belongs to the control chat");
+      if (!inApprovalsRoute(id)) {
+        await this.options.telegram.answerCallback(callback.id, "This permission belongs to the approvals chat");
         return;
       }
       const waiter = this.permissionWaiters.get(id);
@@ -1179,11 +1302,18 @@ export class TgfxApp {
   ): Promise<acp.RequestPermissionResponse> {
     const id = crypto.randomUUID().replaceAll("-", "");
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    // The card is bound to the approvals chat it was posted in, so a live
+    // `tgfx approvals` change neither strands the pending card nor lets its
+    // late edits land on messages in the new chat.
+    const cardChatId = this.config.approvals.chatId;
+    const cardTopicId = this.config.approvals.topicId;
     this.state.createInteraction({
       id, botId: this.options.bot.id, routeKey: route.key, kind: "fx_permission",
       payload: {
         prompt: request.toolCall.title ?? "𝒇x tool permission",
         options: request.options,
+        cardChatId,
+        cardTopicId,
       },
       expiresAt,
     });
@@ -1194,9 +1324,9 @@ export class TgfxApp {
     let card;
     try {
       card = await this.options.telegram.sendText(
-        this.config.approvals.chatId,
+        cardChatId,
         `𝒇x permission\n\n${request.toolCall.title ?? "Tool action"}`,
-        this.config.approvals.topicId,
+        cardTopicId,
         { reply_markup: { inline_keyboard: keyboard } },
       );
     } catch (error) {
@@ -1212,7 +1342,9 @@ export class TgfxApp {
         resolve(response);
       };
       this.permissionWaiters.set(id, {
-        options: request.options, messageId: card.message_id, routeKey: route.key, resolve: finish,
+        options: request.options, messageId: card.message_id,
+        chatId: cardChatId, topicId: cardTopicId,
+        routeKey: route.key, resolve: finish,
       });
       void (async () => {
         while (!settled && !signal?.aborted && Date.now() < Date.parse(expiresAt)) {
@@ -1232,7 +1364,7 @@ export class TgfxApp {
           ?? request.options.find((option) => option.kind === "reject_always");
         if (this.state.expireInteraction(id)) {
           await this.options.telegram.editReplyMarkup(
-            this.config.approvals.chatId,
+            cardChatId,
             card.message_id,
             { inline_keyboard: [[{
               text: signal?.aborted ? "Cancelled" : "Expired", callback_data: "resolved",
@@ -1270,6 +1402,7 @@ export class TgfxApp {
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         await this.options.telegram.setCommands(chatId, commands);
+        this.menusInstalled.add(chatId);
         return;
       } catch (error) {
         lastError = error;

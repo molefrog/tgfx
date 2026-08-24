@@ -451,19 +451,30 @@ save.
 ### Live configuration
 
 Every field in `config.json` applies to a running process without a restart.
-Configuration commands write the file atomically (temp file plus rename); the
-runtime notices the new mtime within a second, re-validates through the same
-schema, and swaps the config in memory. The allowlist is consulted per incoming
-update, the approvals target per card, and renderer defaults per turn, so
-nothing needs a restart-required carve-out. A file that fails validation, or
-that names a different bot, never replaces the running configuration — tgfx
-logs one warning and keeps going. Because edits are cheap and atomic, the
-configuration commands no longer take the runtime lock; the one remaining
-writer inside the process (supergroup migration) re-reads the file before
-rewriting IDs so a concurrent edit is not lost. `tgfx allow` and friends report
-which of the two worlds the edit landed in: `applied to the running bot` when
-this workspace's process holds the machine lock, `will apply on next start`
-otherwise.
+Configuration commands write the file atomically (temp file plus rename) under
+a small advisory write lock that also serializes the process's own rare write
+(supergroup migration), so read-modify-write edits never clobber each other.
+The runtime notices a change within a second — atomic writes always produce a
+fresh inode, so the (mtime, inode, size) triple catches even same-millisecond
+rewrites — re-validates through the same schema, and swaps the config in
+memory. The allowlist is consulted per incoming update, the approvals target
+per card, and renderer defaults per turn, so nothing needs a restart-required
+carve-out. A file that fails validation, or that names a different bot, never
+replaces the running configuration — tgfx logs one warning and keeps going.
+
+Live edits also reach work that is already in flight. The host republishes a
+live-access snapshot (allowlist, protected users, approvals target) into the
+workspace journal on every reload, and MCP sessions consult it on every call
+instead of trusting their launch environment — so `tgfx deny` revokes a
+running group's admin tool plane and `tgfx allow` protects a new user from
+moderation immediately. Approval cards are bound to the chat they were posted
+in: a live `tgfx approvals` change routes new cards to the new chat while
+pending cards stay answerable exactly where they already are. Command menus
+reconcile on reload as well — newly allowed chats gain the menu, denied chats
+lose it, and shutdown cleans up every chat a menu was actually installed in
+this run. `tgfx allow` and friends report which of the two worlds the edit
+landed in: `applied to the running bot` when this workspace's polling process
+holds the machine lock, `will apply on next start` otherwise.
 
 ## Scope of the first release
 

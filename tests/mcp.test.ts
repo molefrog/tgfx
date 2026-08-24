@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { StateStore } from "../src/state";
 import { FakeTelegram } from "./fixtures/fake-telegram";
 
 const temporary: string[] = [];
@@ -18,6 +19,10 @@ type ListedTool = {
 async function listTools(options: { chatId?: string; allowed?: string[]; apiRoot?: string } = {}): Promise<ListedTool[]> {
   const root = mkdtempSync(join(tmpdir(), "tgfx-mcp-"));
   temporary.push(root);
+  return listToolsIn(root, options);
+}
+
+async function listToolsIn(root: string, options: { chatId?: string; allowed?: string[]; apiRoot?: string } = {}): Promise<ListedTool[]> {
   const chatId = options.chatId ?? "42";
   const child = Bun.spawn([process.execPath, resolve("src/index.ts"), "mcp"], {
     cwd: root,
@@ -163,6 +168,40 @@ describe("Telegram MCP catalog", () => {
       expect(names).not.toContain("delete_messages");
       expect(names).not.toContain("moderate_member");
       expect(names).not.toContain("review_join_request");
+    } finally {
+      await telegram.stop();
+    }
+  });
+
+  test("the journal's live allowlist overrides the session's launch env", async () => {
+    // Simulates `tgfx deny -9` reaching a session that was launched while the
+    // group was still allowlisted: the host republished live_access with the
+    // group removed, and the MCP server must trust the journal over its env.
+    const telegram = new FakeTelegram();
+    telegram.chatMembers.set("-9", {
+      status: "creator",
+      user: { id: 100, is_bot: true, first_name: "Bot" },
+      is_anonymous: false,
+    });
+    const root = mkdtempSync(join(tmpdir(), "tgfx-mcp-live-"));
+    temporary.push(root);
+    const database = join(root, ".tgfx", "state.sqlite");
+    const state = new StateStore(database);
+    state.setLiveAccess({
+      allowedChats: [],
+      protectedUsers: ["100"],
+      approvals: { chatId: "42", topicId: "0" },
+    });
+    state.close();
+    try {
+      const tools = await listToolsIn(root, { chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
+      expect(tools.map((tool) => tool.name)).toEqual([
+        "reply_current", "set_reaction", "download_attachment",
+        "send_file", "request_choice", "create_poll",
+      ]);
+      // The env said the chat was allowed, so without the journal override the
+      // catalog would have contained the admin tools.
+      expect(telegram.calls("getChatMember")).toHaveLength(0);
     } finally {
       await telegram.stop();
     }

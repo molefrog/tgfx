@@ -111,6 +111,41 @@ describe("tgfx CLI", () => {
     expect(config?.access.userIds).toEqual(["42"]);
   });
 
+  test("global flags are accepted on every command", async () => {
+    const paths = await workspace();
+    const result = await tgfx(["access", "--no-color", "--debug"], { cwd: paths.workspace });
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("allow canonicalizes IDs before storing them", async () => {
+    const paths = await workspace();
+    const result = await tgfx(["allow", "007"], { cwd: paths.workspace });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("allowed user 7");
+    const config = await loadConfig(paths);
+    expect(config?.access.userIds).toEqual(["42", "7"]);
+  });
+
+  test("an empty flag value is rejected", async () => {
+    const paths = await workspace();
+    const result = await tgfx(["--model="], { cwd: paths.workspace });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--model needs a value");
+  });
+
+  test("deny reports both grants when an id was allowed as user and chat", async () => {
+    const paths = await workspace();
+    await tgfx(["allow", "77"], { cwd: paths.workspace });
+    await tgfx(["allow", "77", "--chat"], { cwd: paths.workspace });
+    const result = await tgfx(["deny", "77"], { cwd: paths.workspace });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("removed user 77");
+    expect(result.stderr).toContain("removed chat 77");
+    const config = await loadConfig(paths);
+    expect(config?.access.userIds).toEqual(["42"]);
+    expect(config?.access.chatIds).toEqual([]);
+  });
+
   test("deny removes principals but refuses to empty the allowlist", async () => {
     const paths = await workspace();
     await tgfx(["allow", "7"], { cwd: paths.workspace });
