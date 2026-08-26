@@ -24,6 +24,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/qrcode-terminal": "^0.12.2",
     "typescript": "latest"
   },
   "dependencies": {
@@ -31,6 +32,8 @@
     "@clack/prompts": "1.7.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "grammy": "1.45.1",
+    "marked": "18.0.11",
+    "qrcode-terminal": "^0.12.0",
     "zod": "4.4.3"
   }
 }
