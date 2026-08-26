@@ -19,6 +19,7 @@ import { adminCapabilitiesForMember, createTelegramApi, type TelegramApi } from 
 import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairing";
 import type { BotIdentity, TgfxConfig } from "./types";
 import { inspectFx } from "./fx/preflight";
+import { terminalQrCode } from "./cli/qr";
 import {
   banner,
   bold,
@@ -115,10 +116,11 @@ async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promis
 
   const payload = `tgfx_${randomBytes(8).toString("hex")}`;
   const url = `https://t.me/${bot.username}?start=${payload}`;
+  const qrCode = terminalQrCode(url);
   const backlog = await telegram.getUpdates(-1, 0);
   let offset = (backlog.at(-1)?.update_id ?? -1) + 1;
   note(
-    `${url}\n\nOpen this link and press Start. The link expires when setup exits.`,
+    `${qrCode}\n\n${url}\n\nScan the QR code or open the link, then press Start. The link expires when setup exits.`,
     "Connect your Telegram account",
     STDERR,
   );
