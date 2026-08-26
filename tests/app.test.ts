@@ -95,7 +95,7 @@ describe("tgfx host pipeline", () => {
     await running;
 
     expect(drafts.length).toBeGreaterThan(0);
-    expect(finals).toEqual([{ markdown: "fake streamed text" }]);
+    expect(finals).toEqual([{ blocks: [{ type: "paragraph", text: "fake streamed text" }] }]);
     expect(commands).toContain("set:42");
     expect(commands).toContain("delete:42");
     const state = new StateStore(paths.database);
