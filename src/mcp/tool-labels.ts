@@ -1,5 +1,4 @@
 export const TELEGRAM_MCP_TOOL_ROW_TITLES = {
-  reply_current: "Replying to current Telegram message",
   set_reaction: "Reacting to Telegram message",
   download_attachment: "Downloading Telegram attachment",
   send_file: "Sending workspace file",

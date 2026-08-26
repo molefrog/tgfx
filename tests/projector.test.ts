@@ -54,6 +54,39 @@ describe("ordered ACP projector", () => {
     ]);
   });
 
+  test("separates paragraphs across a hidden tool without changing a lone paragraph", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Before the hidden tool." },
+    }));
+    projector.apply(update({
+      sessionUpdate: "tool_call",
+      toolCallId: "pending-search",
+      title: "Searching web",
+      status: "pending",
+      content: [],
+    }));
+    projector.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "After the hidden tool." },
+    }));
+
+    expect(draft(projector)).toEqual([
+      { type: "paragraph", text: ["Before the hidden tool.", "\n\n"] },
+      { type: "paragraph", text: "After the hidden tool." },
+    ]);
+
+    const lone = new AcpProjector();
+    lone.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Only paragraph." },
+    }));
+    expect(draft(lone)).toEqual([
+      { type: "paragraph", text: "Only paragraph." },
+    ]);
+  });
+
   test("interleaves rich assistant blocks and consecutive tool groups", () => {
     const projector = new AcpProjector();
     projector.apply(update({
@@ -389,7 +422,6 @@ describe("ordered ACP projector", () => {
 
   test("renders every Telegram MCP tool with a human title and one summary category", () => {
     const telegramTools = [
-      ["reply_current", "Replying to current Telegram message"],
       ["set_reaction", "Reacting to Telegram message"],
       ["download_attachment", "Downloading Telegram attachment"],
       ["send_file", "Sending workspace file"],
@@ -555,7 +587,7 @@ describe("ordered ACP projector", () => {
     expect(rendered(group)).not.toContain("secret-guess");
   });
 
-  test("keeps tool argument previews on one line and within 120 characters", () => {
+  test("keeps tool argument previews on one line and within 60 characters", () => {
     const projector = new AcpProjector();
     const command = `printf 'first line\nsecond line ${"x".repeat(160)}'`;
     projector.apply(update({
@@ -577,7 +609,7 @@ describe("ordered ACP projector", () => {
     }
     expect(preview.text).not.toContain("\n");
     expect(preview.text).toContain("first line second line");
-    expect([...preview.text].length).toBe(120);
+    expect([...preview.text].length).toBe(60);
     expect(preview.text.endsWith("…")).toBeTrue();
 
     const expanded = details(draft(projector, false)[0]);

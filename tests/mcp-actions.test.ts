@@ -134,10 +134,10 @@ describe("Telegram MCP actions", () => {
       client.notify("notifications/initialized");
       const call = (name: string, args: Json) => client.request("tools/call", { name, arguments: args });
 
-      const reply = await call("reply_current", { text: "extra", quote: true });
-      const duplicate = await call("reply_current", { text: "extra", quote: true });
-      expect(duplicate.structuredContent).toEqual(reply.structuredContent);
-      expect((await call("set_reaction", { emoji: "👍" })).structuredContent).toMatchObject({ reacted: true });
+      const reaction = await call("set_reaction", { emoji: "👍" });
+      const duplicateReaction = await call("set_reaction", { emoji: "👍" });
+      expect(reaction.structuredContent).toMatchObject({ reacted: true });
+      expect(duplicateReaction.structuredContent).toEqual(reaction.structuredContent);
       expect((await call("request_choice", {
         question: "Choose", options: ["A", "B"],
       })).structuredContent.interaction_ref).toMatch(/^interaction_/);
@@ -151,12 +151,10 @@ describe("Telegram MCP actions", () => {
       expect(download.structuredContent).toMatchObject({ downloaded: true, bytes: 5, mime_type: "text/plain" });
       expect(await readFile(download.structuredContent.path, "utf8")).toBe("hello");
 
-      expect(requests.filter((request) =>
-        request.method === "sendMessage" && request.body.includes('"text":"extra"')
-      )).toHaveLength(1);
       expect(requests.map((request) => request.method)).toEqual(expect.arrayContaining([
         "sendMessage", "setMessageReaction", "sendPoll", "sendDocument", "getFile",
       ]));
+      expect(requests.filter((request) => request.method === "setMessageReaction")).toHaveLength(1);
     } finally {
       child.kill();
       await child.exited;

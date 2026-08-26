@@ -90,15 +90,12 @@ describe("Telegram MCP catalog", () => {
     expect(stderr).toContain("Invalid internal tgfx MCP environment: TGFX_MCP_ALLOWED_CHATS");
   });
 
-  test("exposes only the six scoped core tools by default", async () => {
+  test("exposes only the five scoped core tools by default", async () => {
     const tools = await listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
-      "reply_current", "set_reaction", "download_attachment",
-      "send_file", "request_choice", "create_poll",
+      "set_reaction", "download_attachment", "send_file", "request_choice", "create_poll",
     ]);
     const schemas = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
-    expect(schemas.reply_current.required).toEqual(["text"]);
-    expect(schemas.reply_current.properties?.quote.default).toBeTrue();
     expect(schemas.set_reaction.required).toEqual(["emoji"]);
     expect(schemas.download_attachment.required).toEqual(["attachment_ref"]);
     expect(schemas.send_file.required).toEqual(["path"]);
@@ -130,7 +127,7 @@ describe("Telegram MCP catalog", () => {
       expect(names).toContain("delete_messages");
       expect(names).toContain("moderate_member");
       expect(names).toContain("review_join_request");
-      expect(tools).toHaveLength(13);
+      expect(tools).toHaveLength(12);
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
       expect(byName.delete_messages!.annotations?.destructiveHint).toBeTrue();
       expect(byName.moderate_member!.inputSchema.properties?.action.enum).toEqual([
@@ -175,8 +172,7 @@ describe("Telegram MCP catalog", () => {
     try {
       const tools = await listTools({ chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
       expect(tools.map((tool) => tool.name)).toEqual([
-        "reply_current", "set_reaction", "download_attachment",
-        "send_file", "request_choice", "create_poll",
+        "set_reaction", "download_attachment", "send_file", "request_choice", "create_poll",
       ]);
     } finally {
       await telegram.stop();

@@ -266,7 +266,7 @@ export function toEnvelope(message: InboundMessage) {
       })),
       ...(message.reply ? { reply: message.reply } : {}),
       ...(message.provenance ? { provenance: message.provenance } : {}),
-      response_target: { kind: "reply_current" as const },
+      response_target: { kind: "automatic_reply" as const },
     },
   };
 }

@@ -623,7 +623,7 @@ Block 1:
     },
     "attachments": [],
     "response_target": {
-      "kind": "reply_current"
+      "kind": "automatic_reply"
     }
   }
 }
@@ -680,7 +680,7 @@ is not exposed as an authority the model can reuse elsewhere.
       }
     ],
     "response_target": {
-      "kind": "reply_current"
+      "kind": "automatic_reply"
     }
   }
 }
@@ -728,7 +728,7 @@ has seen the pixels merely because Telegram supplied a photo.
       }
     ],
     "response_target": {
-      "kind": "reply_current"
+      "kind": "automatic_reply"
     }
   }
 }
@@ -804,7 +804,7 @@ interaction:
       "choice_id": "approve_plan"
     },
     "response_target": {
-      "kind": "reply_current"
+      "kind": "automatic_reply"
     }
   }
 }
@@ -849,7 +849,6 @@ The first server exposes this small core:
 
 | Tool | Important input | Result and restrictions |
 | --- | --- | --- |
-| `reply_current` | `text`, optional `quote` | Sends one extra plain reply in the current route. Ordinary agent output is already delivered automatically and does not call this. |
 | `set_reaction` | `emoji`, optional `message_ref` | Sets one bot reaction on the current message or a previously referenced message in the same route. Telegram validates whether that reaction is available. |
 | `download_attachment` | `attachment_ref`, optional safe `filename` | Enforces Telegram's 20 MB cloud-download limit, saves into `.tgfx/files/<context_ref>/`, and returns the local path, exact byte count, and known MIME. |
 | `send_file` | workspace-local `path`, optional `caption` and `filename` | Sends one regular file of at most 50 MB after canonical-path checks. It cannot target another chat. |
@@ -978,14 +977,18 @@ they can cause a Telegram request.
 
 The scheduler starts optimistically at a 250ms minimum gap, with only 40ms of
 burst coalescing. The initial placeholder and first real output commit
-immediately; paragraph boundaries and completed tools skip coalescing. One
-request may be in flight, and only the newest pending frame survives behind it.
-Per chat, tgfx stays below Telegram's two draft limits with headroom: at most 18
-attempts in 5 seconds and 36 in 30 seconds. A `retry_after` response blocks that
-chat for the requested duration and increases its spacing; successful requests
-gradually remove the penalty. An unchanged frame is refreshed after 20 seconds,
-before the 30-second draft expires. ACP continues to be consumed while Telegram
-is throttled, so a slow network does not block FX.
+immediately; paragraph boundaries and completed tools skip coalescing. After ten
+opening attempts, each chat amortizes that burst across its remaining 30-second
+budget, then settles near the sustainable 834ms cadence. This avoids exhausting
+the limit early and freezing the draft until the rolling window resets.
+
+One request may be in flight, and only the newest pending frame survives behind
+it. Per chat, tgfx keeps Telegram's two draft limits as final safety rails with
+headroom: at most 18 attempts in 5 seconds and 36 in 30 seconds. A `retry_after`
+response blocks that chat for the requested duration and increases its spacing;
+successful requests gradually remove the penalty. An unchanged frame is
+refreshed after 20 seconds, before the 30-second draft expires. ACP continues to
+be consumed while Telegram is throttled, so a slow network does not block FX.
 
 If rich messages are unavailable or a block cannot be represented, the renderer
 falls back to ordinary messages with explicit Telegram entities. It does not send

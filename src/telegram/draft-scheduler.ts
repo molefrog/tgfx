@@ -6,6 +6,8 @@ export type PeerDraftLimiterOptions = {
   shortLimit?: number;
   longWindowMs?: number;
   longLimit?: number;
+  optimisticBurstLimit?: number;
+  steadyGapMs?: number;
 };
 
 /**
@@ -19,6 +21,8 @@ export class PeerDraftLimiter {
   private readonly shortLimit: number;
   private readonly longWindowMs: number;
   private readonly longLimit: number;
+  private readonly optimisticBurstLimit: number;
+  private readonly steadyGapMs: number;
   private attempts: number[] = [];
   private blockedUntil = 0;
   private penaltyMs = 0;
@@ -29,6 +33,9 @@ export class PeerDraftLimiter {
     this.shortLimit = options.shortLimit ?? 18;
     this.longWindowMs = options.longWindowMs ?? 30_000;
     this.longLimit = options.longLimit ?? 36;
+    this.optimisticBurstLimit = options.optimisticBurstLimit ?? 10;
+    this.steadyGapMs = options.steadyGapMs
+      ?? Math.ceil(this.longWindowMs / this.longLimit);
   }
 
   nextAllowedAt(requestedAt: number, bypassSpacing = false): number {
@@ -56,6 +63,26 @@ export class PeerDraftLimiter {
         allowedAt,
         longAttempts[longAttempts.length - this.longLimit]! + this.longWindowMs,
       );
+    }
+
+    // Spend a small opening burst on short answers, then amortize that burst
+    // over the rest of the rolling window. This approaches the sustainable
+    // cadence smoothly instead of exhausting the budget and hitting a long
+    // hard-limit pause.
+    const pacedAttempts = this.attempts.filter(
+      (attempt) => attempt > allowedAt - this.longWindowMs,
+    );
+    if (lastAttempt !== undefined && pacedAttempts.length >= this.optimisticBurstLimit) {
+      const remainingCalls = Math.max(1, this.longLimit - pacedAttempts.length);
+      const remainingWindowMs = Math.max(
+        0,
+        pacedAttempts[0]! + this.longWindowMs - allowedAt,
+      );
+      const adaptiveGapMs = Math.max(
+        this.steadyGapMs,
+        Math.ceil(remainingWindowMs / remainingCalls),
+      );
+      allowedAt = Math.max(allowedAt, lastAttempt + adaptiveGapMs + this.penaltyMs);
     }
     return allowedAt;
   }

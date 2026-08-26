@@ -55,15 +55,40 @@ describe("Telegram renderer boundaries", () => {
     expect(isRetryableTelegramError(new TelegramError("unauthorized", undefined, 401))).toBeFalse();
   });
 
-  test("stays below both Telegram draft windows and adapts after a flood response", () => {
-    const short = new PeerDraftLimiter();
+  test("keeps hard Telegram draft windows as safety rails", () => {
+    const short = new PeerDraftLimiter({ optimisticBurstLimit: 100 });
     for (let index = 0; index < 18; index++) short.recordAttempt(index * 250);
     expect(short.nextAllowedAt(4_250)).toBe(5_000);
 
-    const long = new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100 });
+    const long = new PeerDraftLimiter({
+      minGapMs: 0,
+      shortLimit: 100,
+      optimisticBurstLimit: 100,
+    });
     for (let index = 0; index < 36; index++) long.recordAttempt(index * 800);
     expect(long.nextAllowedAt(28_000)).toBe(30_000);
+  });
 
+  test("smoothly amortizes an optimistic burst instead of hitting a limit cliff", () => {
+    const limiter = new PeerDraftLimiter();
+    const attempts: number[] = [];
+    let now = 0;
+    for (let index = 0; index < 50; index++) {
+      now = limiter.nextAllowedAt(now);
+      limiter.recordAttempt(now);
+      attempts.push(now);
+    }
+
+    expect(attempts.slice(0, 10)).toEqual([
+      0, 250, 500, 750, 1_000, 1_250, 1_500, 1_750, 2_000, 2_250,
+    ]);
+    const gaps = attempts.slice(1).map((attempt, index) => attempt - attempts[index]!);
+    expect(Math.max(...gaps)).toBeLessThan(1_500);
+    expect(attempts.filter((attempt) => attempt < 30_000)).toHaveLength(36);
+    expect(attempts[36]! - attempts[35]!).toBe(834);
+  });
+
+  test("adapts after a flood response", () => {
     const flooded = new PeerDraftLimiter();
     flooded.recordAttempt(0);
     flooded.recordFlood(100, 1_500);

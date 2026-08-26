@@ -39,7 +39,7 @@ type ProjectedItem =
 
 export type ProjectorChange = "none" | "text" | "boundary" | "tool";
 
-const TOOL_ARGUMENT_PREVIEW_MAX_CHARS = 120;
+const TOOL_ARGUMENT_PREVIEW_MAX_CHARS = 60;
 const TOOL_SUMMARY_CATEGORY_LIMIT = 4;
 const THINKING_CUSTOM_EMOJI = {
   type: "custom_emoji" as const,
@@ -581,12 +581,18 @@ export class AcpProjector {
     const items: ProjectedItem[] = [];
     let group: ToolState[] = [];
 
-    const flushTools = () => {
+    const flushTools = (): boolean => {
+      let rendered = false;
       if (includeTools) {
         const visible = group.filter((tool) => terminal(tool.status));
-        if (visible.length) items.push({ type: "tools", tools: visible });
+        if (visible.length) {
+          items.push({ type: "tools", tools: visible });
+          rendered = true;
+        }
       }
+      const hidden = group.length > 0 && !rendered;
       group = [];
+      return hidden;
     };
 
     for (const entry of this.timeline) {
@@ -599,7 +605,14 @@ export class AcpProjector {
       const markdown = redactSecrets(entry.markdown);
       const blocks = markdownToRichBlocks(markdown);
       if (!blocks.length) continue;
-      flushTools();
+      const hiddenToolBoundary = flushTools();
+      const previous = items.at(-1);
+      const previousBlock = previous?.type === "assistant" ? previous.blocks.at(-1) : undefined;
+      if (hiddenToolBoundary && previousBlock?.type === "paragraph" && blocks[0]?.type === "paragraph") {
+        previousBlock.text = Array.isArray(previousBlock.text)
+          ? [...previousBlock.text, "\n\n"]
+          : [previousBlock.text, "\n\n"];
+      }
       items.push({ type: "assistant", markdown, blocks });
     }
     flushTools();

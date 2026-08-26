@@ -141,7 +141,7 @@ type TelegramEnvelope = {
       attachment_kinds?: AttachmentKind[];
     };
     provenance?: Record<string, unknown>;
-    response_target: { kind: "reply_current" };
+    response_target: { kind: "automatic_reply" };
   };
 };
 

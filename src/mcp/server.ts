@@ -110,7 +110,6 @@ export async function runTelegramMcpServer(): Promise<void> {
     { instructions: [
       "The user's Telegram message is supplied separately in a telegram_message JSON envelope.",
       "Your normal assistant response is automatically sent as the reply to that message.",
-      "Do not call telegram_reply_current for the normal answer; use Telegram tools only for explicit extra actions.",
       "References are scoped capabilities. Never invent Telegram IDs, file URLs, or local paths.",
       "Download an attachment before claiming to inspect or modify it.",
       "Use admin tools only when the user's current message explicitly asks for that action.",
@@ -183,27 +182,6 @@ export async function runTelegramMcpServer(): Promise<void> {
     }
     throw new Error("The Telegram administrator did not answer before the approval expired.");
   };
-
-  server.registerTool("reply_current", {
-    title: "Reply to current Telegram message",
-    description: "Send an additional explicit Telegram reply to the message that started this turn. Normal assistant output is already delivered automatically; call this only when a separate Telegram action is useful.",
-    inputSchema: {
-      text: z.string().min(1).max(4000).describe("Reply text"),
-      quote: z.boolean().default(true).describe("Reply to the triggering message"),
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async (args) => result(await perform("telegram_reply_current", args, async () => {
-    const current = context();
-    const sent = await telegram.sendText(current.chat_id, args.text, current.topic_id, args.quote ? {
-      reply_parameters: { message_id: Number(current.message_id), allow_sending_without_reply: true },
-    } : {});
-    const reference = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
-    state.registerBotMessage({
-      ref: reference, botId: env.botId, routeKey: env.routeKey, chatId: current.chat_id,
-      topicId: current.topic_id, messageId: String(sent.message_id),
-    });
-    return { sent: true, message_ref: reference };
-  })));
 
   server.registerTool("set_reaction", {
     title: "React to a Telegram message",

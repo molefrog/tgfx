@@ -35,7 +35,7 @@ describe("Telegram input normalization", () => {
     expect(envelope.telegram_message.event_id).toBe("tg:11");
     expect(envelope.telegram_message.sender).toMatchObject({ user_id: "42", display_name: "Ada" });
     expect(envelope.telegram_message.message).toMatchObject({ message_id: "20" });
-    expect(envelope.telegram_message.response_target).toEqual({ kind: "reply_current" });
+    expect(envelope.telegram_message.response_target).toEqual({ kind: "automatic_reply" });
     expect(envelope.telegram_message.scope).toEqual({ chat_id: "42", kind: "private", topic_id: "0" });
     expect(isAuthorized(config, message)).toBeTrue();
   });
