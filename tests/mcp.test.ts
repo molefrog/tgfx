@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { TELEGRAM_MCP_TOOL_ROW_TITLES } from "../src/mcp/tool-labels";
 import { FakeTelegram } from "./fixtures/fake-telegram";
 
 const temporary: string[] = [];
@@ -123,6 +124,7 @@ describe("Telegram MCP catalog", () => {
     try {
       const tools = await listTools({ chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
       const names = tools.map((tool) => tool.name);
+      expect(names).toEqual(Object.keys(TELEGRAM_MCP_TOOL_ROW_TITLES));
       expect(names).toContain("set_pinned_message");
       expect(names).toContain("manage_topic");
       expect(names).toContain("delete_messages");
