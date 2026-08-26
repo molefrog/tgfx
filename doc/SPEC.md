@@ -437,7 +437,7 @@ automation, not for a second large configuration system.
   "renderer": {
     "mode": "streaming",
     "collapseTools": true,
-    "updateEveryMs": 800
+    "updateEveryMs": 250
   }
 }
 ```
@@ -970,10 +970,22 @@ The draft API receives the complete current frame, not an append-only token. Thi
 is why tgfx can reparse an unfinished Markdown block, remove the initial thinking
 placeholder, collapse an earlier tool group, and then add the next rich block.
 
-Telegram is not updated for every model token. The scheduler keeps the newest
-frame, coalesces bursts into responsive updates, refreshes before the 30-second
-draft expires, and honors `retry_after` on HTTP 429. ACP continues to be consumed
-while Telegram is throttled, so a slow network does not block FX.
+Telegram is not updated for every model token. The projector acts like a reducer
+and the scheduler like a React commit loop: it offers a new complete render only
+when user-visible text, a paragraph boundary, or a terminal tool changes. Thought
+chunks, pending tools, command catalogs, and equal rendered trees bail out before
+they can cause a Telegram request.
+
+The scheduler starts optimistically at a 250ms minimum gap, with only 40ms of
+burst coalescing. The initial placeholder and first real output commit
+immediately; paragraph boundaries and completed tools skip coalescing. One
+request may be in flight, and only the newest pending frame survives behind it.
+Per chat, tgfx stays below Telegram's two draft limits with headroom: at most 18
+attempts in 5 seconds and 36 in 30 seconds. A `retry_after` response blocks that
+chat for the requested duration and increases its spacing; successful requests
+gradually remove the penalty. An unchanged frame is refreshed after 20 seconds,
+before the 30-second draft expires. ACP continues to be consumed while Telegram
+is throttled, so a slow network does not block FX.
 
 If rich messages are unavailable or a block cannot be represented, the renderer
 falls back to ordinary messages with explicit Telegram entities. It does not send

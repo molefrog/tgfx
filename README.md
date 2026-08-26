@@ -69,7 +69,9 @@ advertised by the active 𝒇x ACP session are added to that chat's slash menu. 
 Private chats stream complete Rich Message snapshots through Telegram's draft
 API. Groups and `--no-streaming` receive one final message. `--no-collapse-tools`
 shows full details for completed tools; otherwise each consecutive tool group is
-compact. Pending tools stay hidden, and every group keeps its ACP execution order.
+compact. Pending tools and private thought events stay hidden and do not trigger
+draft requests. Visible frames stream optimistically, then adapt to Telegram's
+per-chat limits and any `retry_after` response.
 
 The local `.tgfx/state.sqlite` file is an operational journal, not a chat archive:
 accepted inbound and final-delivery bodies are scrubbed after success, drafts are

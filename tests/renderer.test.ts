@@ -3,8 +3,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../src/state";
-import { createDraftId, isRetryableTelegramError, recoverOutbox, splitTelegramText, streamsRoute } from "../src/telegram/renderer";
+import { AcpProjector } from "../src/fx/projector";
+import { AdaptiveDraftScheduler, PeerDraftLimiter } from "../src/telegram/draft-scheduler";
+import { createDraftId, isRetryableTelegramError, recoverOutbox, splitTelegramText, streamsRoute, TurnRenderer } from "../src/telegram/renderer";
 import { TelegramApi, TelegramError } from "../src/telegram/api";
+
+async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
+    await Bun.sleep(1);
+  }
+}
 
 describe("Telegram renderer boundaries", () => {
   test("uses non-zero signed draft IDs", () => {
@@ -43,6 +53,100 @@ describe("Telegram renderer boundaries", () => {
     expect(isRetryableTelegramError(new TelegramError("server", undefined, 500))).toBeTrue();
     expect(isRetryableTelegramError(new TelegramError("bad request", undefined, 400))).toBeFalse();
     expect(isRetryableTelegramError(new TelegramError("unauthorized", undefined, 401))).toBeFalse();
+  });
+
+  test("stays below both Telegram draft windows and adapts after a flood response", () => {
+    const short = new PeerDraftLimiter();
+    for (let index = 0; index < 18; index++) short.recordAttempt(index * 250);
+    expect(short.nextAllowedAt(4_250)).toBe(5_000);
+
+    const long = new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100 });
+    for (let index = 0; index < 36; index++) long.recordAttempt(index * 800);
+    expect(long.nextAllowedAt(28_000)).toBe(30_000);
+
+    const flooded = new PeerDraftLimiter();
+    flooded.recordAttempt(0);
+    flooded.recordFlood(100, 1_500);
+    expect(flooded.nextAllowedAt(100)).toBe(1_600);
+  });
+
+  test("commits only the newest snapshot without losing in-flight changes", async () => {
+    const sends: string[] = [];
+    let releaseSecond!: () => void;
+    const second = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const scheduler = new AdaptiveDraftScheduler<string>({
+      limiter: new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
+      keepaliveMs: 60_000,
+      coalesceMs: 0,
+      retryDelay: () => false,
+      send: async (value) => {
+        sends.push(value);
+        if (value === "second") await second;
+      },
+    });
+
+    scheduler.start("first");
+    await waitFor(() => sends.length === 1);
+    scheduler.offer("second", "immediate");
+    await waitFor(() => sends.length === 2);
+    scheduler.offer("stale", "immediate");
+    scheduler.offer("first", "immediate");
+    releaseSecond();
+    await waitFor(() => sends.length === 3);
+    expect(sends).toEqual(["first", "second", "first"]);
+
+    scheduler.offer("first", "immediate");
+    await Bun.sleep(10);
+    expect(sends).toHaveLength(3);
+    await scheduler.stop();
+  });
+
+  test("does not render hidden thought or pending-tool updates", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tgfx-hidden-drafts-"));
+    const state = new StateStore(join(directory, "state.sqlite"));
+    const drafts: unknown[] = [];
+    const api = {
+      sendRichDraft: async (_chatId: string, _draftId: number, rich: unknown) => {
+        drafts.push(rich);
+      },
+    } as unknown as TelegramApi;
+    const projector = new AcpProjector();
+    const renderer = new TurnRenderer(
+      api,
+      state,
+      { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
+      { mode: "streaming", collapseTools: true, updateEveryMs: 0 },
+      projector,
+      undefined,
+      new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
+    );
+    try {
+      renderer.start();
+      await waitFor(() => drafts.length === 1);
+      renderer.changed(projector.apply({
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "private reasoning" },
+      }));
+      renderer.changed(projector.apply({
+        sessionUpdate: "tool_call",
+        toolCallId: "pending",
+        title: "Pending tool",
+        status: "in_progress",
+        content: [],
+      }));
+      await Bun.sleep(10);
+      expect(drafts).toHaveLength(1);
+
+      renderer.changed(projector.apply({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Visible answer." },
+      }));
+      await waitFor(() => drafts.length === 2);
+    } finally {
+      await renderer.abort();
+      state.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("recovers a permanent rich-message rejection through the persisted plain fallback", async () => {

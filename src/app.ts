@@ -5,6 +5,7 @@ import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
 import { AcpProjector } from "./fx/projector";
 import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
+import { PeerDraftLimiter } from "./telegram/draft-scheduler";
 import { isRetryableTelegramError, recoverOutbox, TurnRenderer } from "./telegram/renderer";
 import { redactSecrets } from "./secrets";
 import {
@@ -115,6 +116,7 @@ export class TgfxApp {
   private readonly sessions = new Map<string, FxRouteSession>();
   private readonly queueTails = new Map<string, Promise<void>>();
   private readonly activeTurns = new Map<string, AbortController>();
+  private readonly draftLimiters = new Map<string, PeerDraftLimiter>();
   private readonly pendingCancels = new Set<string>();
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
@@ -188,6 +190,15 @@ export class TgfxApp {
 
   private get rendererConfig(): TgfxConfig["renderer"] {
     return { ...this.config.renderer, ...this.options.renderer };
+  }
+
+  private draftLimiter(chatId: string): PeerDraftLimiter {
+    let limiter = this.draftLimiters.get(chatId);
+    if (!limiter) {
+      limiter = new PeerDraftLimiter({ minGapMs: this.rendererConfig.updateEveryMs });
+      this.draftLimiters.set(chatId, limiter);
+    }
+    return limiter;
   }
 
   stop(): Promise<void> {
@@ -861,12 +872,17 @@ export class TgfxApp {
     const projector = new AcpProjector();
     const controller = new AbortController();
     const renderer = new TurnRenderer(
-      this.options.telegram, this.state, message.route, this.rendererConfig, projector, controller.signal,
+      this.options.telegram,
+      this.state,
+      message.route,
+      this.rendererConfig,
+      projector,
+      controller.signal,
+      this.draftLimiter(message.route.chatId),
     );
     this.activeTurns.set(message.route.key, controller);
     const remove = session.onUpdate((update) => {
-      projector.apply(update);
-      renderer.changed();
+      renderer.changed(projector.apply(update));
     });
     renderer.start();
     this.state.markInbox(row.id, "running");

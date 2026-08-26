@@ -1,11 +1,11 @@
 import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { setTimeout as delay } from "node:timers/promises";
 import type { RendererConfig, Route } from "../types";
-import { AcpProjector } from "../fx/projector";
+import { AcpProjector, type ProjectorChange } from "../fx/projector";
 import { StateStore } from "../state";
 import { TelegramApi, TelegramError } from "./api";
+import { AdaptiveDraftScheduler, PeerDraftLimiter, type DraftPriority } from "./draft-scheduler";
 
-const KEEPALIVE_MS = 20_000;
 const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000];
 
 export function isRetryableTelegramError(error: unknown): boolean {
@@ -62,15 +62,11 @@ async function retryTelegram<T>(
 }
 
 export class TurnRenderer {
-  private revision = 0;
-  private sentRevision = -1;
   private stopped = false;
-  private lastDraftAt = 0;
-  private pump?: Promise<void>;
-  private draftFailed = false;
-  private nextDraftAttemptAt = 0;
+  private visibleOutput = false;
   private readonly draftId = createDraftId();
   private readonly draftAbort = new AbortController();
+  private readonly drafts: AdaptiveDraftScheduler<InputRichMessageWithoutUpload>;
 
   constructor(
     private readonly api: TelegramApi,
@@ -79,59 +75,59 @@ export class TurnRenderer {
     private readonly config: RendererConfig,
     private readonly projector: AcpProjector,
     private readonly signal?: AbortSignal,
-  ) {}
-
-  start(): void {
-    if (!this.streaming || this.pump) return;
-    this.pump = this.runPump();
+    limiter = new PeerDraftLimiter({ minGapMs: config.updateEveryMs }),
+  ) {
+    this.drafts = new AdaptiveDraftScheduler({
+      limiter,
+      send: (rich) => this.api.sendRichDraft(
+        this.route.chatId,
+        this.draftId,
+        rich,
+        this.draftAbort.signal,
+      ),
+      retryDelay: (error) => {
+        if (!isRetryableTelegramError(error)) return false;
+        return error instanceof TelegramError && error.retryAfter !== undefined
+          ? error.retryAfter * 1_000
+          : 1_000;
+      },
+    });
   }
 
-  changed(): void { this.revision++; }
+  start(): void {
+    if (!this.streaming || this.stopped) return;
+    this.drafts.start(this.projector.rich({
+      final: false,
+      collapseTools: this.config.collapseTools,
+    }));
+  }
+
+  changed(change: ProjectorChange): void {
+    if (!this.streaming || change === "none" || this.stopped) return;
+    const priority: DraftPriority = !this.visibleOutput
+      ? "immediate"
+      : change === "boundary" || change === "tool" ? "high" : "normal";
+    this.visibleOutput = true;
+    this.drafts.offer(this.projector.rich({
+      final: false,
+      collapseTools: this.config.collapseTools,
+    }), priority);
+  }
 
   async abort(): Promise<void> {
     this.stopped = true;
     this.draftAbort.abort(new Error("draft stopped"));
-    await this.pump;
+    await this.drafts.stop();
   }
 
   private get streaming(): boolean {
     return streamsRoute(this.config, this.route);
   }
 
-  private async runPump(): Promise<void> {
-    while (!this.stopped) {
-      const shouldSend = this.revision !== this.sentRevision
-        || Date.now() - this.lastDraftAt >= KEEPALIVE_MS;
-      if (shouldSend && !this.draftFailed && Date.now() >= this.nextDraftAttemptAt) {
-        try {
-          await this.api.sendRichDraft(
-            this.route.chatId,
-            this.draftId,
-            this.projector.rich({ final: false, collapseTools: this.config.collapseTools }),
-            this.draftAbort.signal,
-          );
-          this.sentRevision = this.revision;
-          this.lastDraftAt = Date.now();
-        } catch (error) {
-          if (this.stopped) break;
-          // Drafts keep only the newest frame. A transient failure schedules a
-          // later snapshot instead of blocking ACP behind a retry sleep.
-          if (isRetryableTelegramError(error)) {
-            const retryAfter = error instanceof TelegramError ? error.retryAfter : undefined;
-            this.nextDraftAttemptAt = Date.now() + (retryAfter ? retryAfter * 1_000 : 1_000);
-          } else {
-            this.draftFailed = true;
-          }
-        }
-      }
-      await delay(this.config.updateEveryMs, undefined, { signal: this.draftAbort.signal }).catch(() => undefined);
-    }
-  }
-
   async finish(input: { botId: string; inboxId: number; effectKey: string }): Promise<string[]> {
     this.stopped = true;
     this.draftAbort.abort(new Error("draft finalized"));
-    await this.pump;
+    await this.drafts.stop();
     // Groups are final-only in v0.1, even when the workspace default streams
     // private chats. Tool timelines belong only to an actually streamed turn.
     const includeTools = this.streaming;

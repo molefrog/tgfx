@@ -5,10 +5,13 @@ import { z } from "zod";
 import type { TgfxConfig } from "./types";
 
 const decimalId = z.string().regex(/^-?\d+$/, "must be a decimal Telegram ID");
+const draftInterval = z.number().int().min(200).max(10_000).default(250)
+  // 800ms was the fixed-loop default before draft commits became adaptive.
+  .transform((value) => value === 800 ? 250 : value);
 const rendererSchema = z.object({
   mode: z.enum(["streaming", "final"]).default("streaming"),
   collapseTools: z.boolean().default(true),
-  updateEveryMs: z.number().int().min(500).max(10_000).default(800),
+  updateEveryMs: draftInterval,
 });
 
 export const configSchema = z.object({
@@ -24,7 +27,7 @@ export const configSchema = z.object({
   renderer: rendererSchema.default({
     mode: "streaming",
     collapseTools: true,
-    updateEveryMs: 800,
+    updateEveryMs: 250,
   }),
 }) satisfies z.ZodType<TgfxConfig>;
 

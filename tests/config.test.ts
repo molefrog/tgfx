@@ -17,7 +17,7 @@ function config(): TgfxConfig {
     activeBotId: "123456",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 800 },
+    renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 250 },
   };
 }
 
@@ -34,6 +34,17 @@ describe("workspace config", () => {
   test("requires an allowlist and decimal Telegram IDs", () => {
     expect(() => configSchema.parse({ ...config(), access: { userIds: [], chatIds: [] } })).toThrow();
     expect(() => configSchema.parse({ ...config(), activeBotId: "@bot" })).toThrow();
+  });
+
+  test("migrates the old fixed-loop interval to the optimistic adaptive default", () => {
+    expect(configSchema.parse({
+      ...config(),
+      renderer: { ...config().renderer, updateEveryMs: 800 },
+    }).renderer.updateEveryMs).toBe(250);
+    expect(configSchema.parse({
+      ...config(),
+      renderer: { ...config().renderer, updateEveryMs: 1_000 },
+    }).renderer.updateEveryMs).toBe(1_000);
   });
 
   test("redacts tokens both standalone and inside Bot API file URLs", () => {
