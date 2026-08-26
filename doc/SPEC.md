@@ -119,10 +119,11 @@ Telegram Bot API:
 11. An FX permission request or a Telegram administration action that requires
     host approval appears as a single-use card in the approvals chat; the
     originating chat shows that work is waiting.
-12. With default settings, a private chat sees a live rich draft containing prose
-    and current tool progress. A group, or any chat using `--no-streaming`, waits
-    for one permanent rich response. `--collapse-tools` replaces completed tool
-    activity with a compact duration summary.
+12. With default settings, a private chat sees a live rich draft containing
+    structured prose and ordered groups of completed tools. A group, or any chat
+    using `--no-streaming`, waits for one permanent rich response.
+    `--collapse-tools` keeps each tool row compact instead of showing its full
+    terminal details.
 13. The next message in the same chat and topic continues the same FX route and
     session generation. Other chats and topics remain isolated.
 14. On a clean Ctrl-C, tgfx stops polling, records accepted work, asks FX to
@@ -227,7 +228,7 @@ Running `tgfx` again selects the known bot and workspace configuration:
 
 ```text
 tgfx 0.1.0
-✓ fx 0.0.5 · selected-model · authenticated provider
+✓ fx 0.0.6 · selected-model · authenticated provider
 @my_fx_bot · polling · /Users/me/code/my-project · streaming · collapsed tools
 12:04:11 Mole Frog · turn started
 12:04:19 Mole Frog · delivered 1 message · 8.2s
@@ -288,10 +289,11 @@ be resumed or explicitly abandoned; it must not silently strand pending work.
 ### In Telegram
 
 In a private chat, an ordinary allowed message starts a turn. With the default
-streaming mode, the user first sees a rich draft that grows as FX responds. A
-running tool appears as a temporary thinking/tool line. When the turn finishes,
-the draft becomes a permanent rich message. With `--no-streaming`, the user sees
-only that final message.
+streaming mode, the user first sees one temporary thinking placeholder. It
+disappears as soon as structured prose or a completed tool is available, and the
+rich draft then grows as FX responds. When the turn finishes, the draft becomes a
+permanent rich message. With `--no-streaming`, the user sees only that final
+message.
 
 In a group, tgfx reacts only to an explicit `/fx` command, an advertised FX
 command, a reply to the bot, or a configured mention. It does not read normal
@@ -399,7 +401,7 @@ The intended commands are deliberately limited. Each is one verb, one idea:
 | `tgfx auth [--remove]` | Add, rotate, or remove the Telegram bot token. |
 | `tgfx doctor` | Check FX, Telegram, the approvals chat, live admin rights, SQLite, and workspace access. |
 
-The run flags are `--model <id>`, `--streaming`/`--no-streaming`, and
+The run flags are `--model <id>`, `--yolo`, `--streaming`/`--no-streaming`, and
 `--collapse-tools`/`--no-collapse-tools`; `--json`, `--no-color`, and `--debug`
 are global. Human-readable output is the default and `--json` is the machine
 mode everywhere. Conversational output — banners, prompts, errors, hints — goes
@@ -409,8 +411,9 @@ stays clean.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--model <id>` | FX default/session model | Pass `<id>` directly as `fx acp --model <id>` for this run. The value is not saved by tgfx. |
+| `--yolo` | off (FX auto mode) | Disable FX permission checks for this process through `FX_PERMISSION_MODE=yolo`. tgfx's Telegram-admin approval layer remains active. |
 | `--streaming` / `--no-streaming` | streaming | Stream a private draft, or wait for one final response. Groups remain final-only in v1. |
-| `--collapse-tools` / `--no-collapse-tools` | collapse | Replace finished tool activity with `Worked for 1m`, or keep the visible tool timeline. In non-streaming mode tools are omitted from the final message. |
+| `--collapse-tools` / `--no-collapse-tools` | collapse | Use compact rows or full terminal details inside ordered, completed-tool groups. In non-streaming mode tools are omitted from the final message. |
 | `--json` | off | Emit terminal events as JSON Lines with a typed `event` field. |
 | `--no-color` | off | Disable terminal color (NO_COLOR is also honored). |
 | `--debug` | off | Show stack traces behind the one-line error output. |
@@ -556,8 +559,10 @@ after a restart. Changing the workspace or agent profile starts a new generation
 instead of silently putting old context into a different environment.
 
 Models, modes, permissions, built-in tools, skills, and project instructions stay
-FX-owned. tgfx may display the selected model, but it does not keep its own
-copy of FX's changing model or tool catalogs.
+FX-owned. tgfx chooses the initial FX permission policy (`auto`, or `yolo` for an
+explicit run) but does not implement that policy itself. It may display the
+selected model, but it does not keep its own copy of FX's changing model or tool
+catalogs.
 
 Changing credentials is predictable:
 
@@ -917,7 +922,9 @@ by people and other bots.
 Managed pins, explicit pin/unpin, deletion, moderation, declining a join request,
 and topic creation require a single-use approval. Topic rename/close/reopen and
 join approval still re-check the live Telegram right but do not add another tgfx
-approval. Every MCP action also remains subject to 𝒇x's own permission mode.
+approval. Every MCP action also remains subject to 𝒇x's selected permission mode;
+under `tgfx --yolo`, that FX layer is deliberately disabled while tgfx's
+administrator-action approvals remain active.
 
 Temporary invite links, chat title/description/photo changes, default member
 permissions, reaction cleanup, sender-chat bans, and ownership-like operations
@@ -946,10 +953,12 @@ demotion takes effect immediately through the execution-time re-check.
 
 The primary renderer maps the ACP timeline to Telegram Rich Messages:
 
-- assistant prose becomes headings, paragraphs, lists, quotes, code, tables, and
-  other structured blocks;
-- a currently running tool can become a draft-only `tg-thinking` block;
-- completed tool activity can become a collapsible details block;
+- accumulated Markdown is reparsed on every frame into headings, rich
+  paragraphs, lists, block quotations, preformatted code, math, and tables;
+- one draft-only `tg-thinking` block is shown only before any real output exists;
+- only terminal tool calls are rendered, in their first-observed ACP order;
+- consecutive tools form a details block. The trailing group is open while it is
+  the last item in a streaming draft, then collapses when content follows;
 - the final call uses `sendRichMessage`;
 - private streaming uses `sendRichMessageDraft` with one stable `draft_id`.
 
@@ -958,8 +967,8 @@ the final step, or as a separate validated `send_file` action. Streaming
 continues with text and tool blocks while that media is being prepared.
 
 The draft API receives the complete current frame, not an append-only token. This
-is why tgfx can show two paragraphs, replace a line such as `λ Searching…`
-several times, remove it, and then add the final marked-up paragraph.
+is why tgfx can reparse an unfinished Markdown block, remove the initial thinking
+placeholder, collapse an earlier tool group, and then add the next rich block.
 
 Telegram is not updated for every model token. The scheduler keeps the newest
 frame, coalesces bursts into responsive updates, refreshes before the 30-second
@@ -975,15 +984,16 @@ semantic block boundaries; it is never silently truncated.
 
 | Streaming | Collapse tools | Private chat | Group/topic |
 | --- | --- | --- | --- |
-| on | on | Live prose and current tool; completed tools become `Worked for 1m`; the final keeps that compact summary. | Wait, then one final answer without tool activity. |
-| on | off | Live prose plus the visible tool timeline; the final retains the timeline. | Wait, then one final answer without tool activity. |
+| on | on | Live structured prose plus compact, ordered groups of completed tools; the trailing draft group opens until later content arrives. | Wait, then one final answer without tool activity. |
+| on | off | The same ordering and terminal-only visibility, with full details inside each tool row. | Wait, then one final answer without tool activity. |
 | off | either | Wait, then one final answer without tool activity. | Same. |
 
-Tool arguments are shown only when ACP actually supplies them. Our probes found
-that many built-in FX read/search tool updates provide an ID, title, kind, state,
-and sometimes a result preview, but not exact raw arguments. Permission requests
-may contain structured input. The renderer must not reconstruct or hallucinate
-missing arguments.
+Tool arguments are shown only when ACP supplies raw input or exact structured
+metadata that can be recovered from a terminal update. FX 0.0.6 also places the
+exact terminal command in a legacy `command_result`; tgfx preserves that field as
+ACP raw output before schema validation. Ordinary result prose is never treated
+as an argument, so the renderer does not reconstruct or hallucinate missing
+input.
 
 For the same reason, tgfx does not hard-code a list of FX built-in tools. The
 projector consumes the generic ACP tool lifecycle, so a newer FX can add or remove
@@ -1281,11 +1291,14 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   destructive set and can never be configured away. Protected principals
   include the bot itself and every allowlisted user; they cannot be moderation
   targets.
-- A normal message cannot approve an FX permission request. In ACP `ask` mode,
-  tgfx sends a card to the configured approvals chat with the exact tool title and
-  the options FX supplied. With FX 0.0.5 these are **Allow once**, **Allow for
-  this session**, and **Reject**. Administrator-action cards use **Approve** and
-  **Deny**.
+- FX automatic review is the normal tgfx mode. tgfx explicitly selects ACP
+  `code` after every new or loaded session so the displayed mode and effective
+  permission policy cannot diverge. If FX is later switched to ACP `ask`, a
+  normal message still cannot approve its permission request: tgfx sends a card
+  to the configured approvals chat with the exact tool title and options FX
+  supplied. `tgfx --yolo` instead starts FX with its process-scoped permission
+  checks disabled. Administrator-action cards remain **Approve** and **Deny** in
+  every FX mode.
 - Approval callbacks are single-use, short-lived, attached to one bot and route,
   and accepted only in the exact configured approvals chat/topic from an
   allowlisted clicker. Expired, canceled, already resolved, wrong-route, or
@@ -1410,16 +1423,18 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
 
 The current official FX behavior matters in several places:
 
-- The current installed and stable release checked for this RFC is `fx 0.0.5`.
+- The current installed and stable release checked for this RFC is `fx 0.0.6`.
   tgfx still probes ACP and MCP capabilities at startup instead of treating a
   version string as proof that every required feature is usable.
 - `fx acp` is launched in the primary workspace and exposes ACP protocol version
   1, saved sessions, prompt cancellation, model/mode configuration, streamed tool
   status, and permission requests.
-- FX exposes `ask` and `code` through ACP's dedicated `modes` state. tgfx selects
-  `ask` with `session/set_mode`; treating it as an ordinary config option leaves
-  FX in automatic review and can deny a Telegram MCP action before the approvals
-  chat sees an approval card.
+- FX exposes `ask` and `code` through ACP's dedicated `modes` state. tgfx always
+  selects `code` with `session/set_mode` after creating or loading a session,
+  making FX automatic review the deterministic default even when FX reports a
+  stale display mode. ACP has no `yolo` mode, so `tgfx --yolo` uses FX's
+  documented process override, `FX_PERMISSION_MODE=yolo`, and deliberately does
+  not replace it with an ACP mode selection.
 - `fx acp` accepts `--model <id>` and `--log-file <path>` after the `acp`
   subcommand. tgfx exposes only the model override in its normal product CLI and
   passes it as `fx acp --model <id>`; ACP diagnostics remain an implementation

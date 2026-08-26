@@ -11,7 +11,7 @@ processes.
 
 ## Run from source
 
-Requirements: macOS or Linux, [Bun](https://bun.sh), an authenticated `fx 0.0.5`
+Requirements: macOS or Linux, [Bun](https://bun.sh), an authenticated `fx 0.0.6`
 or newer, and a Telegram bot token from BotFather.
 
 ```bash
@@ -22,10 +22,10 @@ cd /path/to/your/project
 tgfx
 ```
 
-The first run validates the token, then either shows a private Telegram deep
-link for one-tap owner pairing or accepts one numeric user/chat ID
-for an advanced setup. It verifies the approvals chat by sending a setup message
-and writes non-secret settings to `.tgfx/config.json`. Allow more people later
+The first run validates the token, then either shows a scannable QR code and
+private Telegram deep link for one-tap owner pairing or accepts one numeric
+user/chat ID for an advanced setup. It verifies the approvals chat by sending a
+setup message and writes non-secret settings to `.tgfx/config.json`. Allow more people later
 with `tgfx allow`. The token goes to the operating-system credential store under
 the bot's numeric ID. `TELEGRAM_BOT_TOKEN` may be used instead and is never
 saved by `tgfx`.
@@ -48,8 +48,13 @@ tgfx doctor                    deep diagnostics: token, chats, rights, fx
 
 `tgfx allow` infers users from positive IDs and chats from negative ones
 (`--chat` overrides). Configuration edits are saved immediately and apply the
-next time `tgfx` starts. Run flags: `--model <id>`, `--no-streaming`,
-`--no-collapse-tools`; global: `--json`, `--no-color`, `--debug`.
+next time `tgfx` starts. Run flags: `--model <id>`, `--yolo`,
+`--no-streaming`, `--no-collapse-tools`; global: `--json`, `--no-color`,
+`--debug`.
+
+FX starts in its automatic-review permission mode. `tgfx --yolo` disables FX's
+permission checks for that process. It does not bypass tgfx's separate approval
+cards for destructive Telegram administration.
 
 Group administration needs no tgfx-side configuration: for an allowlisted group
 the admin tools are exactly the bot's live Telegram admin rights. Promote the
@@ -63,7 +68,8 @@ advertised by the active 𝒇x ACP session are added to that chat's slash menu. 
 
 Private chats stream complete Rich Message snapshots through Telegram's draft
 API. Groups and `--no-streaming` receive one final message. `--no-collapse-tools`
-keeps the 𝒇x tool timeline visible; otherwise completed tools are compacted.
+shows full details for completed tools; otherwise each consecutive tool group is
+compact. Pending tools stay hidden, and every group keeps its ACP execution order.
 
 The local `.tgfx/state.sqlite` file is an operational journal, not a chat archive:
 accepted inbound and final-delivery bodies are scrubbed after success, drafts are
