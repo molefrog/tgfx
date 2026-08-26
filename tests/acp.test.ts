@@ -3,7 +3,8 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
-import { FxRouteSession, sanitizeFxEnvironment } from "../src/fx/acp";
+import { FxRouteSession, preserveFxCommandResult, sanitizeFxEnvironment } from "../src/fx/acp";
+import { AcpProjector } from "../src/fx/projector";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -32,6 +33,42 @@ async function events(path: string): Promise<Array<{ event: string; value: any }
 }
 
 describe("FX ACP transport", () => {
+  test("preserves FX terminal command metadata without replacing standard ACP output", () => {
+    const extension = preserveFxCommandResult({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "terminal",
+          status: "completed",
+          command_result: { command: "bun test", exit_code: 0 },
+        },
+      },
+    } as acp.AnyMessage) as unknown as {
+      params: { update: { rawOutput?: unknown } };
+    };
+    expect(extension.params.update.rawOutput).toEqual({ command: "bun test", exit_code: 0 });
+
+    const standard = preserveFxCommandResult({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "terminal",
+          rawOutput: { official: true },
+          command_result: { command: "ignored" },
+        },
+      },
+    } as acp.AnyMessage) as unknown as {
+      params: { update: { rawOutput?: unknown } };
+    };
+    expect(standard.params.update.rawOutput).toEqual({ official: true });
+  });
+
   test("does not expose Telegram host credentials to FX or its shell tools", () => {
     expect(sanitizeFxEnvironment({
       PATH: "/bin",
@@ -43,7 +80,80 @@ describe("FX ACP transport", () => {
     })).toEqual({ PATH: "/bin", OPENAI_API_KEY: "provider-owned-by-fx" });
   });
 
-  test("loads or replaces a session, selects ask mode, streams, asks permission, and cancels", async () => {
+  test("delivers FX terminal command metadata through the validated ACP session", async () => {
+    const fake = await fakeBinary();
+    const updates: acp.SessionUpdate[] = [];
+    const session = new FxRouteSession({
+      workspace: fake.directory,
+      binary: fake.binary,
+      onUpdate: (value) => { updates.push(value); },
+    });
+    try {
+      await session.start();
+      await session.prompt([{ type: "text", text: "COMMAND_RESULT" }]);
+    } finally {
+      await session.dispose({ closeSession: true });
+    }
+
+    const terminal = updates.find((value) =>
+      value.sessionUpdate === "tool_call_update" && value.toolCallId === "terminal-extension"
+    );
+    expect(terminal).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "terminal-extension",
+      status: "completed",
+      rawOutput: {
+        command: "bun test --filter \"rich blocks\"",
+        cwd: "/workspace",
+        exit_code: 0,
+      },
+    });
+  });
+
+  test("preserves raw Markdown chunks through ACP and projects their rich structure", async () => {
+    const fake = await fakeBinary();
+    const updates: acp.SessionUpdate[] = [];
+    const projector = new AcpProjector();
+    const session = new FxRouteSession({
+      workspace: fake.directory,
+      binary: fake.binary,
+      onUpdate: (update) => {
+        updates.push(update);
+        projector.apply(update);
+      },
+    });
+    try {
+      await session.start();
+      await session.prompt([{ type: "text", text: "RAW_MARKDOWN" }]);
+    } finally {
+      await session.dispose({ closeSession: true });
+    }
+
+    const chunks = updates.flatMap((update) =>
+      update.sessionUpdate === "agent_message_chunk" && update.content.type === "text"
+        ? [update.content.text]
+        : []
+    );
+    expect(chunks).toEqual([
+      "# Section heading\n\nParagraph with **bold",
+      "** and *italic*.",
+    ]);
+    expect(projector.rich({ final: true, collapseTools: true }).blocks).toEqual([
+      { type: "heading", size: 1, text: "Section heading" },
+      {
+        type: "paragraph",
+        text: [
+          "Paragraph with ",
+          { type: "bold", text: "bold" },
+          " and ",
+          { type: "italic", text: "italic" },
+          ".",
+        ],
+      },
+    ]);
+  });
+
+  test("loads or replaces a session, selects auto mode, streams, asks permission, and cancels", async () => {
     const fake = await fakeBinary({ failLoad: true });
     const updates: acp.SessionUpdate[] = [];
     const session = new FxRouteSession({
@@ -96,10 +206,29 @@ describe("FX ACP transport", () => {
     expect(log.find((entry) => entry.event === "new")?.value.mcpServers).toEqual([{
       name: "telegram", command: "tgfx", args: ["mcp"], env: [{ name: "ROUTE", value: "route-1" }],
     }]);
-    expect(log.find((entry) => entry.event === "set_mode")?.value.modeId).toBe("ask");
+    expect(log.find((entry) => entry.event === "permission_mode")?.value).toBe("auto");
+    expect(log.find((entry) => entry.event === "set_mode")?.value.modeId).toBe("code");
     expect(log.find((entry) => entry.event === "permission_result")?.value.outcome.optionId).toBe("allow");
     expect(log.some((entry) => entry.event === "cancel")).toBeTrue();
     expect(log.some((entry) => entry.event === "close")).toBeTrue();
     expect(log.filter((entry) => entry.event === "prompt")).toHaveLength(2);
+  });
+
+  test("starts FX in yolo mode without replacing it through ACP", async () => {
+    const fake = await fakeBinary();
+    const session = new FxRouteSession({
+      workspace: fake.directory,
+      binary: fake.binary,
+      permissionMode: "yolo",
+    });
+    try {
+      await session.start();
+    } finally {
+      await session.dispose({ closeSession: true });
+    }
+
+    const log = await events(fake.log);
+    expect(log.find((entry) => entry.event === "permission_mode")?.value).toBe("yolo");
+    expect(log.some((entry) => entry.event === "set_mode")).toBeFalse();
   });
 });

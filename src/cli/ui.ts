@@ -108,6 +108,7 @@ export function helpText(): string {
     `${bold("tgfx")} ${dim(`${VERSION} — run a local fx agent through one Telegram bot`)}`,
     "",
     line("tgfx", "run fx in this folder (sets up on first run)"),
+    line("tgfx --yolo", "run with FX permission checks disabled"),
     line("tgfx access", "who can talk to fx, who approves, saved sessions"),
     line("tgfx allow <id…>", "add users or chats to the allowlist"),
     line("tgfx deny <id…>", "remove them"),
@@ -115,7 +116,7 @@ export function helpText(): string {
     line("tgfx auth [--remove]", "add, rotate, or remove the bot token"),
     line("tgfx doctor", "deep diagnostics: token, chats, rights, fx"),
     "",
-    `  ${dim("run flags:")}  --model <id> · --streaming/--no-streaming · --collapse-tools/--no-collapse-tools`,
+    `  ${dim("run flags:")}  --model <id> · --yolo · --streaming/--no-streaming · --collapse-tools/--no-collapse-tools`,
     `  ${dim("global:")}     --json · --no-color · --debug · --help · --version`,
     "",
   ].join("\n");

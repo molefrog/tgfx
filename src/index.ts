@@ -325,6 +325,7 @@ async function runCommand(tokens: string[]): Promise<void> {
   const { flags } = parseArgs(tokens, {
     flags: {
       model: "string",
+      yolo: "boolean",
       streaming: "boolean",
       "no-streaming": "boolean",
       "collapse-tools": "boolean",
@@ -348,6 +349,11 @@ async function runCommand(tokens: string[]): Promise<void> {
   const resolved = await runtime(workspacePaths(), { json });
   const { release, ...appRuntime } = resolved;
   const log = createLogger(json);
+  if (flags.yolo) {
+    const message = "fx permission checks are disabled for this run (--yolo)";
+    if (json) log({ event: "permission.mode", message, mode: "yolo" });
+    else warn(message);
+  }
   let app: TgfxApp | undefined;
   const shutdown = () => void app?.stop();
   process.once("SIGINT", shutdown);
@@ -356,6 +362,7 @@ async function runCommand(tokens: string[]): Promise<void> {
     app = new TgfxApp({
       ...appRuntime,
       ...(typeof flags.model === "string" ? { model: flags.model } : {}),
+      permissionMode: flags.yolo ? "yolo" : "auto",
       renderer: {
         ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),
         ...(collapseTools === undefined ? {} : { collapseTools }),

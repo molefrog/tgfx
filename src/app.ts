@@ -1,7 +1,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, Update } from "grammy/types";
-import { FxRouteSession } from "./fx/acp";
+import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
 import { AcpProjector } from "./fx/projector";
 import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
@@ -134,6 +134,7 @@ export class TgfxApp {
     telegram: TelegramApi;
     fxBinary: string;
     model?: string;
+    permissionMode?: FxPermissionMode;
     renderer?: Partial<TgfxConfig["renderer"]>;
     log?: (event: TgfxLogEvent) => void;
   }) {
@@ -929,6 +930,7 @@ export class TgfxApp {
       workspace: this.options.paths.workspace,
       binary: this.options.fxBinary,
       model: this.options.model,
+      permissionMode: this.options.permissionMode,
       previousSessionId: row.session_id ?? undefined,
       mcp: {
         command: process.execPath,

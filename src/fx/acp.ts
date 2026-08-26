@@ -13,9 +13,45 @@ export type FxPermissionHandler = (
   request: acp.RequestPermissionRequest,
 ) => Promise<acp.RequestPermissionResponse>;
 
+export type FxPermissionMode = "auto" | "yolo";
+
 type McpOptions = { command: string; args: string[]; env: Record<string, string> };
 const START_TIMEOUT_MS = 30_000;
 const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * FX 0.0.6 includes exact terminal metadata in `command_result`, an extension
+ * field that ACP's stable schema otherwise removes. Move it to standard
+ * `rawOutput` before validation while leaving any native raw output untouched.
+ */
+export function preserveFxCommandResult(message: acp.AnyMessage): acp.AnyMessage {
+  if (!("method" in message) || "id" in message
+    || message.method !== acp.methods.client.session.update
+    || !isRecord(message.params)) return message;
+  const update = message.params.update;
+  if (!isRecord(update) || update.sessionUpdate !== "tool_call_update" || update.rawOutput !== undefined) {
+    return message;
+  }
+  const result = update.command_result;
+  if (!isRecord(result) || typeof result.command !== "string") return message;
+  return {
+    ...message,
+    params: { ...message.params, update: { ...update, rawOutput: result } },
+  } as acp.AnyMessage;
+}
+
+function preserveFxExtensions(stream: acp.Stream): acp.Stream {
+  return {
+    writable: stream.writable,
+    readable: stream.readable.pipeThrough(new TransformStream<acp.AnyMessage, acp.AnyMessage>({
+      transform(message, controller) { controller.enqueue(preserveFxCommandResult(message)); },
+    })),
+  };
+}
 
 export function sanitizeFxEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const clean = { ...environment };
@@ -84,6 +120,7 @@ export class FxRouteSession {
     workspace: string;
     binary: string;
     model?: string;
+    permissionMode?: FxPermissionMode;
     previousSessionId?: string;
     mcp?: McpOptions;
     onUpdate?: (update: acp.SessionUpdate) => void | Promise<void>;
@@ -102,6 +139,7 @@ export class FxRouteSession {
   }
 
   private async connect(): Promise<void> {
+    const permissionMode = this.options.permissionMode ?? "auto";
     const args = ["acp", ...(this.options.model ? ["--model", this.options.model] : [])];
     const child = spawn(this.options.binary, args, {
       cwd: this.options.workspace,
@@ -110,7 +148,12 @@ export class FxRouteSession {
       // Bun loads `.env` into the host process. FX and its ordinary shell tools
       // must never inherit the Telegram token; only the scoped MCP subprocess
       // receives credentials through its ACP launch descriptor.
-      env: sanitizeFxEnvironment(process.env),
+      env: {
+        ...sanitizeFxEnvironment(process.env),
+        // ACP exposes ask/auto as session modes, but not yolo. The environment
+        // override is FX's process-scoped entry point for all three policies.
+        FX_PERMISSION_MODE: permissionMode,
+      },
     });
     this.child = child;
     child.stderr.setEncoding("utf8");
@@ -120,7 +163,7 @@ export class FxRouteSession {
 
     const input = Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>;
     const output = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
-    const stream = acp.ndJsonStream(input, output);
+    const stream = preserveFxExtensions(acp.ndJsonStream(input, output));
     const app = acp.client({ name: "tgfx" })
       .onNotification(acp.methods.client.session.update, async ({ params }) => {
         for (const listener of this.updateListeners) await listener(params.update);
@@ -174,27 +217,31 @@ export class FxRouteSession {
 
       const configOptions = "configOptions" in response ? response.configOptions : undefined;
       const modes = "modes" in response ? response.modes : undefined;
-      const mode = modes?.currentModeId ?? selectValue(configOptions, "mode") ?? "ask";
       const model = selectValue(configOptions, "model") ?? this.options.model ?? "default";
-      if (mode !== "ask") {
-        const canSetMode = modes?.availableModes.some((candidate) => candidate.id === "ask");
+      if (permissionMode === "auto") {
+        // Always select code explicitly. FX 0.0.6 can report its display mode
+        // as ask while retaining the configured permission policy internally.
+        const canSetMode = modes?.availableModes.some((candidate) => candidate.id === "code");
         if (canSetMode) {
           await ctx.request(acp.methods.agent.session.setMode, {
             sessionId: this.sessionId,
-            modeId: "ask",
+            modeId: "code",
           });
         } else {
           // Compatibility with agents that model permission mode as a config
           // option instead of ACP's dedicated session mode state.
           const option = configOptions?.find((candidate) => candidate.id === "mode" && candidate.type === "select");
-          const canAsk = option?.type === "select" && option.options.some((entry) =>
-            "value" in entry ? entry.value === "ask" : entry.options.some((nested) => nested.value === "ask")
-          );
-          if (!canAsk) throw new Error(`fx ACP does not expose the required ask mode (current: ${mode})`);
+          const values = option?.type === "select"
+            ? option.options.flatMap((entry) => "value" in entry
+              ? [entry.value]
+              : entry.options.map((nested) => nested.value))
+            : [];
+          const value = values.includes("auto") ? "auto" : values.includes("code") ? "code" : undefined;
+          if (!value) throw new Error("fx ACP does not expose the required auto/code mode");
           await ctx.request(acp.methods.agent.session.setConfigOption, {
             sessionId: this.sessionId,
             configId: "mode",
-            value: "ask",
+            value,
           });
         }
       }

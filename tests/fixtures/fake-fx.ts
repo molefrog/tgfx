@@ -64,15 +64,47 @@ const app = acp.agent({ name: "fake-fx" })
   })
   .onRequest(acp.methods.agent.session.prompt, async (context) => {
     record("prompt", context.params);
-    await context.client.notify(acp.methods.client.session.update, {
-      sessionId: context.params.sessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "fake streamed text" },
-      },
-    });
     const text = context.params.prompt
       .flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+    const rawMarkdown = text.includes("RAW_MARKDOWN");
+    const messageChunks = rawMarkdown
+      ? ["# Section heading\n\nParagraph with **bold", "** and *italic*."]
+      : ["fake streamed text"];
+    for (const chunk of messageChunks) {
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId: context.params.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          ...(rawMarkdown ? { messageId: "fake-assistant-message" } : {}),
+          content: { type: "text", text: chunk },
+        },
+      });
+    }
+    if (text.includes("COMMAND_RESULT")) {
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId: context.params.sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "terminal-extension",
+          title: "Using terminal",
+          kind: "execute",
+          status: "pending",
+        },
+      });
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId: context.params.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "terminal-extension",
+          status: "completed",
+          command_result: {
+            command: "bun test --filter \"rich blocks\"",
+            cwd: "/workspace",
+            exit_code: 0,
+          },
+        },
+      } as unknown as acp.SessionNotification);
+    }
     if (text.includes("PERMISSION")) {
       const decision = await context.client.request(acp.methods.client.session.requestPermission, {
         sessionId: context.params.sessionId,
@@ -101,6 +133,7 @@ const app = acp.agent({ name: "fake-fx" })
   });
 
 record("argv", process.argv.slice(2));
+record("permission_mode", process.env.FX_PERMISSION_MODE);
 const outgoing = Writable.toWeb(process.stdout) as unknown as WritableStream<Uint8Array>;
 const incoming = Readable.toWeb(process.stdin) as unknown as ReadableStream<Uint8Array>;
 await app.connect(acp.ndJsonStream(outgoing, incoming));

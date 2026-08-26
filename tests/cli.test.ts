@@ -69,6 +69,7 @@ describe("tgfx CLI", () => {
     for (const command of ["tgfx access", "tgfx allow", "tgfx deny", "tgfx approvals", "tgfx auth", "tgfx doctor"]) {
       expect(result.stderr).toContain(command);
     }
+    expect(result.stderr).toContain("--yolo");
   });
 
   test("an uninitialized workspace produces a one-line hint, never a stack trace", async () => {
