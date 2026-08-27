@@ -27,14 +27,15 @@ import type {
 import { routeKey } from "./types";
 import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
 
-const BUILTINS: BotCommand[] = [
-  { command: "fx", description: "Ask 𝒇x in this workspace" },
-  { command: "cancel", description: "Cancel the active turn" },
-  { command: "new", description: "Start a fresh 𝒇x session" },
-  { command: "retry", description: "Retry unfinished work or delivery" },
-  { command: "discard", description: "Discard queued messages" },
-];
-const BUILTIN_NAMES = new Set(BUILTINS.map((command) => command.command));
+const REMOVED_COMMAND_NAMES = new Set(["fx", "cancel", "new", "retry", "discard"]);
+
+type StopCapableUpdate = Update & {
+  stopped_message_generation?: {
+    chat: { id: number };
+    message_thread_id?: number;
+    draft_id: number;
+  };
+};
 
 type PersistedPayload =
   | { kind: "message"; message: InboundMessage }
@@ -87,26 +88,15 @@ function makePrompt(
   return blocks;
 }
 
-function contextRefFromPrompt(blocks: acp.ContentBlock[]): string | undefined {
-  const first = blocks[0];
-  if (first?.type !== "text") return undefined;
-  try {
-    const parsed = JSON.parse(first.text) as { telegram_message?: { context_ref?: unknown } };
-    return typeof parsed.telegram_message?.context_ref === "string"
-      ? parsed.telegram_message.context_ref
-      : undefined;
-  } catch { return undefined; }
-}
-
 function validDynamicCommands(commands: Array<{ name: string; description: string }>, modelPinned: boolean): BotCommand[] {
-  const seen = new Set(BUILTIN_NAMES);
+  const seen = new Set(REMOVED_COMMAND_NAMES);
   return commands.flatMap((command) => {
     const name = command.name.toLowerCase();
     if (modelPinned && name === "model") return [];
     if (!/^[a-z0-9_]{1,32}$/.test(name) || seen.has(name)) return [];
     seen.add(name);
     return [{ command: name, description: command.description.slice(0, 256) || `𝒇x /${name}` }];
-  }).slice(0, 100 - BUILTINS.length);
+  }).slice(0, 100);
 }
 
 export type TgfxLogEvent = { event: string; message: string } & Record<string, unknown>;
@@ -116,8 +106,8 @@ export class TgfxApp {
   private readonly sessions = new Map<string, FxRouteSession>();
   private readonly queueTails = new Map<string, Promise<void>>();
   private readonly activeTurns = new Map<string, AbortController>();
+  private readonly activeDraftIds = new Map<string, number>();
   private readonly draftLimiters = new Map<string, PeerDraftLimiter>();
-  private readonly pendingCancels = new Set<string>();
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
   private readonly pollAbort = new AbortController();
@@ -165,7 +155,7 @@ export class TgfxApp {
     if (recovery.interrupted) {
       await this.options.telegram.sendText(
         this.config.approvals.chatId,
-        `${recovery.interrupted} accepted 𝒇x turn${recovery.interrupted === 1 ? " was" : "s were"} interrupted by the previous process. Use /retry in its chat to start a new attempt, or /discard to forget it.`,
+        `${recovery.interrupted} accepted 𝒇x turn${recovery.interrupted === 1 ? " was" : "s were"} interrupted by the previous process and was not replayed automatically. Send the request again if you want to retry it; earlier side effects may already exist.`,
         this.config.approvals.topicId,
       ).catch(() => undefined);
     }
@@ -212,8 +202,8 @@ export class TgfxApp {
     this.pollAbort.abort(new Error("tgfx is stopping"));
     for (const album of this.albums.values()) clearTimeout(album.timer);
     this.albums.clear();
-    this.pendingCancels.clear();
     for (const controller of this.activeTurns.values()) controller.abort(new Error("tgfx is stopping"));
+    this.activeDraftIds.clear();
     const expiredCards: Promise<unknown>[] = [];
     for (const [id, waiter] of this.permissionWaiters) {
       const reject = waiter.options.find((option) => option.kind === "reject_once")
@@ -277,6 +267,27 @@ export class TgfxApp {
   }
 
   private async accept(update: Update): Promise<void> {
+    const stopped = (update as StopCapableUpdate).stopped_message_generation;
+    if (stopped) {
+      const chatId = String(stopped.chat.id);
+      const topicId = String(stopped.message_thread_id ?? 0);
+      const key = routeKey(this.options.bot.id, chatId, topicId);
+      const authorized = this.config.access.userIds.includes(chatId)
+        || this.config.access.chatIds.includes(chatId);
+      const active = this.activeTurns.get(key);
+      const matchesActiveDraft = this.activeDraftIds.get(key) === stopped.draft_id;
+      this.state.ingestUpdate({
+        botId: this.options.bot.id,
+        updateId: update.update_id,
+        authorized: false,
+      });
+      if (authorized && active && matchesActiveDraft) {
+        active.abort(new Error("Stopped from Telegram draft"));
+        await this.sessions.get(key)?.cancel();
+      }
+      return;
+    }
+
     const migration = groupMigrationFromUpdate(update);
     if (migration) {
       const hasOldRoute = this.state.routes().some((route) =>
@@ -335,41 +346,9 @@ export class TgfxApp {
           : {}),
       });
       if (id !== undefined) {
-        const command = commandFromText(message.text, this.options.bot.username);
-        const active = this.activeTurns.get(message.route.key);
-        if (command?.addressed && command.name === "cancel") {
-          // Cancellation must bypass the route FIFO or it would wait behind the
-          // very turn it is meant to stop. If session startup is still pending,
-          // leave a one-shot marker that `runTurn` consumes before prompting FX.
-          if (active) {
-            active.abort(new Error("Cancelled from Telegram"));
-            await this.sessions.get(message.route.key)?.cancel();
-          } else if (this.queueTails.has(message.route.key)) {
-            this.pendingCancels.add(message.route.key);
-          }
-          await this.options.telegram.sendText(
-            message.route.chatId,
-            active || this.pendingCancels.has(message.route.key)
-              ? "Cancelling the active 𝒇x turn…"
-              : "There is no active turn.",
-            message.route.topicId,
-          );
-          this.state.markInbox(id, "done");
-        } else if (command?.addressed && command.name === "discard") {
-          const count = this.state.discardQueued(message.route.key, id)
-            + this.state.abandonOutbox(message.route.key, "Discarded from Telegram");
-          this.state.clearLastPrompt(message.route.key);
-          await this.options.telegram.sendText(
-            message.route.chatId,
-            `Discarded ${count} queued or interrupted message${count === 1 ? "" : "s"}.`,
-            message.route.topicId,
-          );
-          this.state.markInbox(id, "done");
-        } else {
-          const mediaGroupId = String(message.provenance?.media_group_id ?? "");
-          if (mediaGroupId) this.scheduleAlbum(id, message.route.key, mediaGroupId);
-          else this.enqueue(id, message.route.key);
-        }
+        const mediaGroupId = String(message.provenance?.media_group_id ?? "");
+        if (mediaGroupId) this.scheduleAlbum(id, message.route.key, mediaGroupId);
+        else this.enqueue(id, message.route.key);
       }
       return;
     }
@@ -543,78 +522,11 @@ export class TgfxApp {
     const command = commandFromText(message.text, this.options.bot.username);
     if (command && !command.addressed) return;
 
-    if (command?.name === "cancel") {
-      const active = this.activeTurns.get(message.route.key);
-      if (active) {
-        active.abort(new Error("Cancelled from Telegram"));
-        await this.sessions.get(message.route.key)?.cancel();
-        await this.options.telegram.sendText(message.route.chatId, "Cancelling the active 𝒇x turn…", message.route.topicId);
-      } else {
-        await this.options.telegram.sendText(message.route.chatId, "There is no active turn.", message.route.topicId);
-      }
-      return;
-    }
-    if (command?.name === "new") {
-      await this.resetRoute(message.route);
-      await this.options.telegram.sendText(message.route.chatId, "Started a fresh 𝒇x session.", message.route.topicId);
-      return;
-    }
-    if (command?.name === "discard") {
-      const count = this.state.discardQueued(message.route.key, row.id)
-        + this.state.abandonOutbox(message.route.key, "Discarded from Telegram");
-      this.state.clearLastPrompt(message.route.key);
-      await this.options.telegram.sendText(message.route.chatId, `Discarded ${count} queued or interrupted message${count === 1 ? "" : "s"}.`, message.route.topicId);
-      return;
-    }
-    if (command?.name === "retry") {
-      const delivery = await recoverOutbox(this.options.telegram, this.state, {
-        routeKey: message.route.key,
-        includeFailed: true,
-      });
-      if (delivery.sent || delivery.failed) {
-        if (delivery.sent && !delivery.failed) this.state.clearLastPrompt(message.route.key);
-        await this.options.telegram.sendText(
-          message.route.chatId,
-          delivery.failed
-            ? `Retried permanent delivery: ${delivery.sent} sent, ${delivery.failed} still failed.`
-            : `Retried permanent delivery: ${delivery.sent} sent.`,
-          message.route.topicId,
-        );
-        return;
-      }
-      const saved = this.state.route(message.route.key)?.last_prompt_json;
-      if (!saved) {
-        await this.options.telegram.sendText(message.route.chatId, "There is no previous prompt to retry.", message.route.topicId);
-        return;
-      }
-      const savedBlocks = JSON.parse(saved) as acp.ContentBlock[];
-      const previousContext = contextRefFromPrompt(savedBlocks);
-      if (previousContext && !this.state.activateContext(message.route.key, previousContext)) {
-        await this.options.telegram.sendText(
-          message.route.chatId,
-          "The original Telegram context expired. Send the request again as a new message.",
-          message.route.topicId,
-        );
-        return;
-      }
-      this.state.discardInterrupted(message.route.key);
-      await this.runTurn(row, message, savedBlocks);
-      return;
-    }
-
-    if (command?.name === "fx") {
-      if (!command.args && message.attachments.length === 0) {
-        await this.options.telegram.sendText(message.route.chatId, "Usage: /fx <request>", message.route.topicId);
-        return;
-      }
-      await this.runTurn(row, message, makePrompt(message, command.args, await this.adminContext(message.route)));
-      return;
-    }
-
     if (command) {
       await this.session(message.route); // session/new supplies the current catalog
       const commands = JSON.parse(this.state.route(message.route.key)?.dynamic_commands_json ?? "[]") as Array<{ name: string }>;
-      if (!commands.some((candidate) => candidate.name.toLowerCase() === command.name)) {
+      if (REMOVED_COMMAND_NAMES.has(command.name)
+        || !commands.some((candidate) => candidate.name.toLowerCase() === command.name)) {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
@@ -858,17 +770,7 @@ export class TgfxApp {
   private async runTurn(row: InboxRow, message: InboundMessage, blocks: acp.ContentBlock[]): Promise<void> {
     const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
-    const consumePendingCancel = async (): Promise<boolean> => {
-      if (!this.pendingCancels.delete(message.route.key)) return false;
-      this.state.clearLastPrompt(message.route.key);
-      await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
-      if (activeContextRef) this.state.deactivateContext(message.route.key, activeContextRef);
-      return true;
-    };
-    if (await consumePendingCancel()) return;
     const session = await this.session(message.route);
-    // `/cancel` can arrive while the ACP process is still initializing.
-    if (await consumePendingCancel()) return;
     const projector = new AcpProjector();
     const controller = new AbortController();
     const renderer = new TurnRenderer(
@@ -881,6 +783,7 @@ export class TgfxApp {
       this.draftLimiter(message.route.chatId),
     );
     this.activeTurns.set(message.route.key, controller);
+    this.activeDraftIds.set(message.route.key, renderer.draftId);
     const remove = session.onUpdate((update) => {
       renderer.changed(projector.apply(update));
     });
@@ -933,6 +836,7 @@ export class TgfxApp {
       await renderer.abort();
       remove();
       this.activeTurns.delete(message.route.key);
+      this.activeDraftIds.delete(message.route.key);
       if (activeContextRef) this.state.deactivateContext(message.route.key, activeContextRef);
     }
   }
@@ -1008,14 +912,6 @@ export class TgfxApp {
       await session.dispose();
       throw error;
     }
-  }
-
-  private async resetRoute(route: Route): Promise<void> {
-    const session = this.sessions.get(route.key);
-    if (session) await session.dispose({ closeSession: true });
-    this.sessions.delete(route.key);
-    this.state.resetRoute(route.key);
-    await this.installMenu(route.chatId, []);
   }
 
   private async requestPermission(
@@ -1112,7 +1008,7 @@ export class TgfxApp {
   }
 
   private async installMenu(chatId: string, dynamic: Array<{ name: string; description: string }>): Promise<void> {
-    const commands = [...BUILTINS, ...validDynamicCommands(dynamic, Boolean(this.options.model))].slice(0, 100);
+    const commands = validDynamicCommands(dynamic, Boolean(this.options.model));
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {

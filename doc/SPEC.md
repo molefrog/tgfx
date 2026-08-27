@@ -98,8 +98,8 @@ Telegram Bot API:
 5. The terminal becomes a small append-only status view and waits. The same bot
    cannot be active in another local workspace until this process stops.
 6. An allowed person sends the bot a message. An ordinary private message starts
-   a turn; a group message must use `/fx`, an advertised FX command, mention the
-   bot, or reply to it. Everything outside the allowlist is silently discarded.
+   a turn; a group message must use an advertised FX command, mention the bot, or
+   reply to it. Everything outside the allowlist is silently discarded.
 7. Before acknowledging the update locally, tgfx stores it and advances the
    Telegram polling cursor in one SQLite transaction. It then queues the message
    FIFO for its `{bot_id, chat_id, topic_id}` route.
@@ -123,14 +123,15 @@ Telegram Bot API:
     structured prose and ordered groups of completed tools. A group, or any chat
     using `--no-streaming`, waits for one permanent rich response.
     `--collapse-tools` keeps each tool row compact instead of showing its full
-    terminal details.
+    terminal details. Telegram's Stop button cancels the active FX turn only when
+    its draft ID matches the route's current draft.
 13. The next message in the same chat and topic continues the same FX route and
     session generation. Other chats and topics remain isolated.
 14. On a clean Ctrl-C, tgfx stops polling, records accepted work, asks FX to
     cancel active work, finishes safe writes, and releases the bot lock. After a
     crash, accepted updates survive; uncertain FX work becomes `interrupted`
-    instead of being silently replayed, and the user chooses `/retry` or
-    `/discard`.
+    instead of being silently replayed. The user may send the request again after
+    reviewing the warning that earlier side effects may already exist.
 
 SQLite is invisible during normal use. It is a short-lived recovery journal, not
 a copy of the Telegram conversation or an ACP transcript.
@@ -295,34 +296,29 @@ rich draft then grows as FX responds. When the turn finishes, the draft becomes 
 permanent rich message. With `--no-streaming`, the user sees only that final
 message.
 
-In a group, tgfx reacts only to an explicit `/fx` command, an advertised FX
-command, a reply to the bot, or a configured mention. It does not read normal
+In a group, tgfx reacts only to an advertised FX command, a reply to the bot, or
+a configured mention. It does not read normal
 group conversation as agent requests. Groups receive one final response in v1;
 live group previews are left for later because their delivery and visibility
 rules are different.
 
 An allowed group where the bot is a Telegram administrator additionally has
 **admin actions**. This does not make normal conversation autonomous: the same
-`/fx`, mention, or reply trigger still starts a turn. It only gives that route
+command, mention, or reply trigger still starts a turn. It only gives that route
 the administrator actions matching the bot's live Telegram rights, such as
 maintaining one bot-owned pinned bulletin, managing forum topics, deleting
 spam, moderating members, or reviewing join requests. Telegram's promote dialog
 is the capability editor: promotion is the consent, demotion is the revocation,
 and destructive actions still require a single-use approval card.
 
-If a route already has an active turn, later messages wait in arrival order. The
-user can send `/cancel` to cancel the active FX prompt. V1 runs one prompt at a
-time for each bot/chat/topic route.
+If a route already has an active turn, later messages wait in arrival order. In
+a private streaming chat, Telegram's Stop button cancels the turn associated
+with that exact draft ID. V1 runs one prompt at a time for each bot/chat/topic
+route.
 
-The tgfx-owned Telegram command surface is small:
-
-| Command | Purpose |
-| --- | --- |
-| `/fx <prompt>` | Start a turn explicitly; required in groups unless the bot is mentioned or replied to. |
-| `/cancel` | Cancel the active turn for this route. |
-| `/new` | Start a fresh FX session generation for this route. |
-| `/retry` | Explicitly start a new attempt for an interrupted turn after warning that earlier side effects may already exist. |
-| `/discard` | Resolve an interrupted turn without running it again. |
+tgfx currently exposes no built-in Telegram slash commands. The names `fx`,
+`cancel`, `new`, `retry`, and `discard` remain reserved and are not forwarded to
+FX.
 
 Once an FX session exists for a route, tgfx also projects the commands advertised
 by ACP `available_commands_update` into Telegram's slash-command menu for that
@@ -340,10 +336,8 @@ command list are identical.
 1. tgfx authorizes the Telegram sender and route before interpreting any
    command. Telegram's visible command menu is discoverability, not an access
    control boundary.
-2. Built-in tgfx commands are resolved first. `/cancel`, `/new`, `/retry`,
-   `/discard`, and `/fx` are never forwarded to FX. If a future FX catalog uses
-   one of those names, the tgfx command wins and the colliding FX command is not
-   exposed in v1.
+2. The reserved names `cancel`, `new`, `retry`, `discard`, and `fx` are not
+   exposed or forwarded to FX.
 3. A route without an FX session creates or resumes one before resolving a
    non-tgfx slash command. tgfx waits for its first
    `available_commands_update`, then either invokes an exact advertised command
@@ -367,12 +361,11 @@ command list are identical.
    advertises a newer catalog.
 
 tgfx uses Telegram `setMyCommands` with a chat-specific scope for each allowed
-chat. It merges its reserved commands with the representable ACP commands,
-without overwriting the bot's default or BotFather-managed command list. On a
+chat. It installs the representable ACP commands without overwriting the bot's
+default or BotFather-managed command list. On a
 clean handoff it removes the chat-scoped list it owned, revealing any broader
 Telegram configuration underneath. Before a route has an FX session, its scoped
-menu contains only the built-in tgfx commands; the first ACP command snapshot
-expands it.
+menu is empty; the first ACP command snapshot populates it.
 
 Only ACP names that already satisfy Telegram's command-name grammar—1 to 32
 lowercase English letters, digits, or underscores—are placed in the menu.
@@ -1067,8 +1060,8 @@ the message forever.
 The database uses WAL mode and transactions. Successful inbox content, the saved
 retry prompt, and sent outbox bodies are scrubbed immediately; small completion
 rows remain briefly for deduplication and crash reconciliation, then expire.
-Failed or interrupted content remains only so `/retry` or `/discard` can resolve
-it. Attachments stay outside SQLite. V1 does not write raw ACP JSONL. A future
+Failed or interrupted content remains for diagnosis and an explicit later retry.
+Attachments stay outside SQLite. V1 does not write raw ACP JSONL. A future
 explicit debug bundle may capture a bounded, redacted trace, but it is not part
 of normal operation.
 
@@ -1168,7 +1161,7 @@ therefore gives each boundary an explicit delivery semantic:
 | Telegram before local acceptance | Telegram-owned, with no tgfx durability guarantee. Telegram retains unconsumed updates for at most 24 hours. | Poll again while Telegram still retains the update. |
 | Authorized inbound update after SQLite commit | Durable acceptance and deduplication by `(bot_id, update_id)`, assuming the local database remains readable. | The update remains queued until done, failed, interrupted, or explicitly discarded. |
 | Unauthorized update | Intentional discard; its payload is not stored or sent to FX. | Advance the poll cursor and do not replay it. |
-| Dispatching a prompt to FX | At-most-once **automatic** dispatch when acceptance is uncertain. This avoids silently repeating file or tool side effects. | A recovered `dispatching` or `running` row becomes `interrupted`; tgfx notifies the approvals chat and requires `/retry` or `/discard`. |
+| Dispatching a prompt to FX | At-most-once **automatic** dispatch when acceptance is uncertain. This avoids silently repeating file or tool side effects. | A recovered `dispatching` or `running` row becomes `interrupted`; tgfx notifies the approvals chat and does not replay it automatically. |
 | Private rich draft | Best effort and ephemeral. Intermediate frames may be coalesced, skipped, overwritten, or disappear. | Do not persist draft frames. Reconstruct a new draft only from a safely resumed active turn. |
 | Permanent final Telegram reply | At least once after an outbox row exists. | Retry `pending` or `sending` rows. A sent outbox reconciles its inbox to done after a crash; a crash after Telegram accepted but before SQLite committed can still rarely create a duplicate. |
 | Telegram MCP effect | A stable hash of route, active context, tool, and arguments guards one attempt. A completed identical call returns its stored result. | Any thrown or disconnected attempt becomes `unknown` and is not repeated automatically, even when the operation would normally be idempotent. |
@@ -1187,11 +1180,12 @@ therefore gives each boundary an explicit delivery semantic:
 - `received` is safe to dispatch. Before calling `session/prompt`, tgfx commits
   `dispatching`; after FX accepts, it commits `running`. A crash in either latter
   state enters recovery instead of automatic resubmission.
-- A recovered `dispatching` or `running` turn always becomes `interrupted`.
-  `/retry` is a new, explicit attempt and clears the old interrupted row;
-  `/discard` removes interrupted, failed, and still-queued payloads for the route.
-- `/cancel` is best effort. A cancelled prompt is acknowledged and marked done;
-  it does not promise to undo an FX command already in progress.
+- A recovered `dispatching` or `running` turn always becomes `interrupted` and
+  is not replayed automatically. The user can send the request again after
+  reviewing the warning about possible earlier side effects.
+- Telegram's draft Stop button is best effort. A cancelled prompt is
+  acknowledged and marked done; it does not promise to undo an FX command
+  already in progress. Stale or mismatched draft IDs cannot cancel a newer turn.
 
 ### Outgoing delivery and retries
 
@@ -1325,7 +1319,8 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   can approve; onboarding warns about this explicitly. Use an allowlisted private
   user as the approvals chat for the narrowest setup.
 - While approval is pending, the originating rich draft keeps the tool in its
-  running state. `/cancel` cancels the FX turn. Approval timeout is fail-closed.
+  running state. Telegram's Stop button cancels a matching private draft and its
+  FX turn. Approval timeout is fail-closed.
 - FX stdout is reserved for ACP JSON-RPC. Diagnostics go to stderr or an explicit
   log file.
 - Downloaded and generated paths are canonicalized and must remain inside the

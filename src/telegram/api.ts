@@ -70,8 +70,8 @@ export class TelegramApi {
         timeout,
         allowed_updates: [
           "message", "edited_message", "callback_query", "poll_answer",
-          "chat_join_request", "my_chat_member",
-        ],
+          "chat_join_request", "my_chat_member", "stopped_message_generation",
+        ] as never,
       }, signal));
   }
 
@@ -107,7 +107,13 @@ export class TelegramApi {
     richMessage: InputRichMessageWithoutUpload,
     signal?: AbortSignal,
   ): Promise<true> {
-    return this.call(() => this.api.sendRichMessageDraft(Number(chatId), draftId, richMessage, {}, signal));
+    return this.call(() => this.api.sendRichMessageDraft(
+      Number(chatId),
+      draftId,
+      richMessage,
+      { can_stop: true } as never,
+      signal,
+    ));
   }
 
   async answerCallback(callbackQueryId: string, text?: string): Promise<true> {

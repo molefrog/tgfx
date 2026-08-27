@@ -114,57 +114,7 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
-  test("forgets a completed route queue so a later /cancel reports no active turn", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-idle-cancel-"));
-    temporary.push(workspace);
-    const paths = workspacePaths(workspace);
-    const fxBinary = await fakeFx(workspace);
-    const config: TgfxConfig = {
-      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
-      approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", collapseTools: true, updateEveryMs: 10 },
-    };
-    const texts: string[] = [];
-    let phase = 0;
-    let delivered!: () => void;
-    const final = new Promise<void>((resolve) => { delivered = resolve; });
-    let idleReported!: () => void;
-    const idle = new Promise<void>((resolve) => { idleReported = resolve; });
-    const telegram = {
-      getWebhookInfo: async () => ({ url: "" }),
-      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
-        if (phase === 0) { phase = 1; return [update(1, 42, "hello")]; }
-        if (phase === 1) {
-          phase = 2;
-          await final;
-          await Bun.sleep(10);
-          return [update(2, 42, "/cancel")];
-        }
-        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
-      },
-      setCommands: async () => true as const,
-      deleteCommands: async () => true as const,
-      sendText: async (_chat: string, text: string) => {
-        texts.push(text);
-        if (text === "There is no active turn.") idleReported();
-        return { message_id: 550 } as Message.TextMessage;
-      },
-      sendRichDraft: async () => true as const,
-      sendRich: async () => { delivered(); return { message_id: 551 } as Message.TextMessage; },
-    } as unknown as TelegramApi;
-    const app = new TgfxApp({
-      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
-      telegram, fxBinary, log: () => undefined,
-    });
-    const running = app.run();
-    await Promise.race([idle, Bun.sleep(5_000).then(() => { throw new Error("idle cancellation timed out"); })]);
-    await app.stop();
-    await running;
-    expect(texts).toContain("There is no active turn.");
-    expect(texts).not.toContain("Cancelling the active 𝒇x turn…");
-  });
-
-  test("cancels a turn even when the prompt and /cancel arrive in the same poll batch", async () => {
+  test("cancels the matching turn when Telegram reports draft generation stopped", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-cancel-"));
     temporary.push(workspace);
     const paths = workspacePaths(workspace);
@@ -175,15 +125,29 @@ describe("tgfx host pipeline", () => {
       renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 10 },
     };
     const texts: string[] = [];
-    let firstPoll = true;
+    let phase = 0;
+    let activeDraftId = 0;
+    let draftReady!: () => void;
+    const draft = new Promise<void>((resolve) => { draftReady = resolve; });
     let cancelled!: () => void;
     const cancellation = new Promise<void>((resolve) => { cancelled = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
-        if (firstPoll) {
-          firstPoll = false;
-          return [update(1, 42, "WAIT"), update(2, 42, "/cancel")];
+        if (phase === 0) {
+          phase = 1;
+          return [update(1, 42, "WAIT")];
+        }
+        if (phase === 1) {
+          phase = 2;
+          await draft;
+          return [{
+            update_id: 2,
+            stopped_message_generation: {
+              chat: { id: 42, type: "private", first_name: "User 42" },
+              draft_id: activeDraftId,
+            },
+          } as unknown as Update];
         }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
       },
@@ -194,7 +158,11 @@ describe("tgfx host pipeline", () => {
         if (text === "𝒇x turn cancelled.") cancelled();
         return { message_id: 600 } as Message.TextMessage;
       },
-      sendRichDraft: async () => true as const,
+      sendRichDraft: async (_chat: string, draftId: number) => {
+        activeDraftId = draftId;
+        draftReady();
+        return true as const;
+      },
       sendRich: async () => { throw new Error("cancelled turn must not produce a final"); },
     } as unknown as TelegramApi;
     const app = new TgfxApp({
@@ -205,12 +173,13 @@ describe("tgfx host pipeline", () => {
     await Promise.race([cancellation, Bun.sleep(5_000).then(() => { throw new Error("cancellation timed out"); })]);
     await app.stop();
     await running;
-    expect(texts).toContain("Cancelling the active 𝒇x turn…");
     expect(texts).toContain("𝒇x turn cancelled.");
+    expect(texts).not.toContain("Cancelling the active 𝒇x turn…");
     const state = new StateStore(paths.database);
     try {
       expect(state.db.query("SELECT count(*) AS count FROM telegram_outbox").get()).toEqual({ count: 0 });
-      expect(state.db.query("SELECT count(*) AS count FROM telegram_inbox WHERE status='done'").get()).toEqual({ count: 2 });
+      expect(state.nextOffset("100")).toBe(3);
+      expect(state.db.query("SELECT count(*) AS count FROM telegram_inbox WHERE status='done'").get()).toEqual({ count: 1 });
       expect(state.activeContext("100:42:0")).toBeUndefined();
       expect(state.route("100:42:0")?.last_prompt_json).toBeNull();
     } finally { state.close(); }
@@ -237,7 +206,12 @@ describe("tgfx host pipeline", () => {
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) {
           firstPoll = false;
-          return [update(1, 42, "/unknown"), update(2, 42, "/model other"), update(3, 42, "/status")];
+          return [
+            update(1, 42, "/unknown"),
+            update(2, 42, "/cancel"),
+            update(3, 42, "/model other"),
+            update(4, 42, "/status"),
+          ];
         }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
       },
@@ -257,9 +231,16 @@ describe("tgfx host pipeline", () => {
     await running;
 
     expect(texts).toContain("Unknown command /unknown.");
+    expect(texts).toContain("Unknown command /cancel.");
     expect(texts).toContain("The model is pinned by tgfx --model for this run.");
-    expect(menus.at(-1)?.map((entry) => entry.command)).toContain("status");
-    expect(menus.at(-1)?.map((entry) => entry.command)).not.toContain("model");
+    const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
+    expect(commands).toContain("status");
+    expect(commands).not.toContain("model");
+    expect(commands).not.toContain("fx");
+    expect(commands).not.toContain("cancel");
+    expect(commands).not.toContain("new");
+    expect(commands).not.toContain("retry");
+    expect(commands).not.toContain("discard");
     const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(events.filter((entry) => entry.event === "prompt").map((entry) => entry.value.prompt)).toEqual([
       [{ type: "text", text: "/status" }],

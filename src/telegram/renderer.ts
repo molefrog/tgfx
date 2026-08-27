@@ -64,7 +64,7 @@ async function retryTelegram<T>(
 export class TurnRenderer {
   private stopped = false;
   private visibleOutput = false;
-  private readonly draftId = createDraftId();
+  readonly draftId = createDraftId();
   private readonly draftAbort = new AbortController();
   private readonly drafts: AdaptiveDraftScheduler<InputRichMessageWithoutUpload>;
 

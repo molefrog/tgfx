@@ -81,7 +81,7 @@ describe("Telegram input normalization", () => {
       chat: { id: -9, type: "supergroup", title: "Team" }, text: "hello",
     }))!;
     const command = normalizeMessageUpdate(bot, update({
-      chat: { id: -9, type: "supergroup", title: "Team" }, text: "/fx inspect",
+      chat: { id: -9, type: "supergroup", title: "Team" }, text: "/status",
     }))!;
     expect(shouldInvokeAgent(ordinary, bot.username)).toBeFalse();
     expect(shouldInvokeAgent(command, bot.username)).toBeTrue();
@@ -101,7 +101,7 @@ describe("Telegram input normalization", () => {
     const message = normalizeMessageUpdate(bot, update({
       chat: { id: -9, type: "supergroup", title: "Team" },
       from: { id: 77, is_bot: true, first_name: "Other bot", username: "other_bot" },
-      text: "/fx loop",
+      text: "/status",
     }))!;
     expect(isAuthorized({ ...config, access: { userIds: [], chatIds: ["-9"] } }, message)).toBeFalse();
   });

@@ -175,7 +175,7 @@ describe("Telegram MCP actions", () => {
       route: { key: routeKey, botId: "100", chatId: "-9", topicId: "0", chatKind: "supergroup" },
       sender: { kind: "user", id: "42", ref: "usr_operator", displayName: "Operator", isBot: false },
       messageId: "7", messageRef: "msg_current", contextRef: "ctx_admin", timestamp: new Date(),
-      text: "/fx administer", textKind: "text", attachments: [], raw: { update_id: 1 } as never,
+      text: "administer", textKind: "text", attachments: [], raw: { update_id: 1 } as never,
     };
     state.ensureRoute(inbound.route);
     state.registerInbound(inbound);

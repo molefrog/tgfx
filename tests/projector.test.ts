@@ -169,8 +169,8 @@ describe("ordered ACP projector", () => {
     expect(group.summary).toBe("Working...");
     expect(rendered(group)).not.toContain("Pending");
     expect(rendered(group)).not.toContain("Running");
-    expect(rendered(group)).toContain("✓ Complete");
-    expect(rendered(group)).toContain("✗ Failed");
+    expect(rendered(group)).toContain("𝒇 Complete");
+    expect(rendered(group)).toContain("× Failed");
   });
 
   test("opens every draft group as Working and closes every final group", () => {
@@ -387,6 +387,21 @@ describe("ordered ACP projector", () => {
     expect(unknown.plainFinal(true).split("\n")[0]).toBe("Worked for 1s");
   });
 
+  test("omits failed tools from activity summaries", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "command", title: "Running command",
+      kind: "execute", status: "completed", content: [],
+    }));
+    projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "failed", title: "Loading skill",
+      status: "failed", content: [],
+    }));
+
+    expect(details(final(projector)[0]).summary).toBe("Ran 1 command");
+    expect(projector.plainFinal(true).split("\n")[0]).toBe("Ran 1 command");
+  });
+
   test("aggregates listings once and omits unknown tools from composite overflow", () => {
     const projector = new AcpProjector();
     for (let index = 0; index < 5; index += 1) {
@@ -452,11 +467,11 @@ describe("ordered ACP projector", () => {
     expect(group.summary).toBe("Used Telegram");
     expect(group.blocks).toEqual(telegramTools.map(([, title]) => ({
       type: "paragraph",
-      text: { type: "bold", text: `✓ ${title}` },
+      text: { type: "bold", text: `𝒇 ${title}` },
     })));
     expect(projector.plainFinal(true).split("\n")).toEqual([
       "Used Telegram",
-      ...telegramTools.map(([, title]) => `✓ ${title}`),
+      ...telegramTools.map(([, title]) => `𝒇 ${title}`),
     ]);
     expect(rendered(group.blocks)).not.toContain("mcp_telegram_");
 
@@ -474,7 +489,7 @@ describe("ordered ACP projector", () => {
     }
     expect(details(final(named)[0]).blocks).toEqual(telegramTools.map(([, title]) => ({
       type: "paragraph",
-      text: { type: "bold", text: `✓ ${title}` },
+      text: { type: "bold", text: `𝒇 ${title}` },
     })));
   });
 

@@ -73,8 +73,7 @@ type ToolActivity =
   | "used_subagents"
   | "asked_user"
   | "used_telegram"
-  | "used_external_tools"
-  | "failed";
+  | "used_external_tools";
 
 const TOOL_ACTIVITY_ORDER: ToolActivity[] = [
   "commands",
@@ -103,7 +102,6 @@ const TOOL_ACTIVITY_ORDER: ToolActivity[] = [
   "asked_user",
   "used_telegram",
   "used_external_tools",
-  "failed",
 ];
 
 const PROVIDER_SEARCH_TOOLS = new Set(["perplexity_search", "parallel_search"]);
@@ -353,7 +351,7 @@ function canonicalActivity(tool: ToolState, name: CanonicalFxToolName): ToolActi
 }
 
 function toolActivity(tool: ToolState): ToolActivity | undefined {
-  if (failed(tool.status)) return "failed";
+  if (failed(tool.status)) return undefined;
   const name = toolName(tool);
   const namedCanonical = canonicalFxToolName(name);
   if (namedCanonical) return canonicalActivity(tool, namedCanonical);
@@ -439,7 +437,6 @@ function activitySummary(activity: ToolActivity, count: number): string {
     case "asked_user": return "asked user";
     case "used_telegram": return "used Telegram";
     case "used_external_tools": return "used external tools";
-    case "failed": return `${counted(count, "tool")} failed`;
   }
 }
 
@@ -655,7 +652,7 @@ export class AcpProjector {
 
   private toolRow(tool: ToolState): RichBlock {
     const argument = toolArgumentPreview(tool);
-    const title = `${failed(tool.status) ? "✗" : "✓"} ${redactSecrets(displayToolTitle(tool))}`;
+    const title = `${failed(tool.status) ? "×" : "𝒇"} ${redactSecrets(displayToolTitle(tool))}`;
     return {
       type: "paragraph",
       text: argument
@@ -680,7 +677,7 @@ export class AcpProjector {
       if (item.type === "assistant") return item.markdown.trim();
       const rows = item.tools.map((tool) => {
         const argument = toolArgumentPreview(tool);
-        return `${failed(tool.status) ? "✗" : "✓"} ${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
+        return `${failed(tool.status) ? "×" : "𝒇"} ${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
       });
       return [completedToolSummary(item.tools, this.changedAt), ...rows].join("\n");
     });

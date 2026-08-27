@@ -62,12 +62,14 @@ bot in Telegram to enable them, demote it to revoke; destructive actions still
 require a one-tap approval card in the approvals chat. `tgfx doctor` reports
 the bot's current rights in every allowlisted group.
 
-Telegram has `/fx`, `/cancel`, `/new`, `/retry`, and `/discard`. Commands
-advertised by the active 𝒇x ACP session are added to that chat's slash menu. When
-`--model` pins the process model, `/model` is intentionally omitted.
+Telegram's slash menu contains only commands advertised by the active 𝒇x ACP
+session. When `--model` pins the process model, `/model` is intentionally
+omitted. The names `fx`, `cancel`, `new`, `retry`, and `discard` are reserved but
+not currently exposed.
 
 Private chats stream complete Rich Message snapshots through Telegram's draft
-API. Groups and `--no-streaming` receive one final message. `--no-collapse-tools`
+API. Each draft enables Telegram's Stop button, which cancels the matching active
+𝒇x turn. Groups and `--no-streaming` receive one final message. `--no-collapse-tools`
 shows full details for completed tools; otherwise each consecutive tool group is
 compact. Pending tools and private thought events stay hidden and do not trigger
 draft requests. Visible frames stream optimistically, then adapt to Telegram's

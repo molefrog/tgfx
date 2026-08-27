@@ -71,10 +71,14 @@ describe("tgfx over the local Telegram simulator", () => {
     try {
       telegram.sendUserMessage({ userId: 42, text: "hello over http", firstName: "Ada" });
       const finals = await telegram.waitForCalls("sendRichMessage");
+      const drafts = await telegram.waitForCalls("sendRichMessageDraft");
       expect(String(finals[0]!.payload.chat_id)).toBe("42");
       expect(finals[0]!.payload.rich_message).toEqual({
         blocks: [{ type: "paragraph", text: "fake streamed text" }],
       });
+      expect(drafts[0]!.payload.can_stop).toBe(true);
+      const polls = telegram.calls("getUpdates");
+      expect(polls.some((call) => call.payload.allowed_updates?.includes("stopped_message_generation"))).toBe(true);
     } finally {
       await app.stop();
       await running;
