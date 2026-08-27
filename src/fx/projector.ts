@@ -619,6 +619,7 @@ export class AcpProjector {
   rich(options: {
     final: boolean;
     collapseTools: boolean;
+    expandStreamingTools: boolean;
     includeTools?: boolean;
   }): InputRichMessageWithoutUpload {
     const items = this.projected(options.includeTools ?? true);
@@ -627,32 +628,39 @@ export class AcpProjector {
       return { blocks: [{ type: "thinking", text: [THINKING_CUSTOM_EMOJI, " Thinking…"] }] };
     }
 
-    const blocks = items.flatMap((item) => {
+    const blocks = items.flatMap((item, index) => {
       if (item.type === "assistant") return item.blocks;
+      const streaming = !options.final && index === items.length - 1;
       return [this.toolGroupBlock(
         item.tools,
         options.collapseTools,
-        !options.final,
+        streaming,
+        options.expandStreamingTools,
       )];
     });
     return { blocks };
   }
 
-  private toolGroupBlock(tools: ToolState[], collapseTools: boolean, streaming: boolean): RichBlock {
+  private toolGroupBlock(
+    tools: ToolState[],
+    collapseTools: boolean,
+    streaming: boolean,
+    expandStreamingTools: boolean,
+  ): RichBlock {
     const blocks = collapseTools
       ? tools.map((tool) => this.toolRow(tool))
       : tools.flatMap((tool) => this.expandedToolBlocks(tool));
     return {
       type: "details",
-      summary: streaming ? "Working..." : completedToolSummary(tools, this.changedAt),
+      summary: streaming ? [THINKING_CUSTOM_EMOJI, " Working…"] : completedToolSummary(tools, this.changedAt),
       blocks,
-      ...(streaming ? { is_open: true as const } : {}),
+      ...(streaming && expandStreamingTools ? { is_open: true as const } : {}),
     };
   }
 
   private toolRow(tool: ToolState): RichBlock {
     const argument = toolArgumentPreview(tool);
-    const title = `${failed(tool.status) ? "×" : "𝒇"} ${redactSecrets(displayToolTitle(tool))}`;
+    const title = `${failed(tool.status) ? "⊗" : "∴"} ${redactSecrets(displayToolTitle(tool))}`;
     return {
       type: "paragraph",
       text: argument
@@ -677,7 +685,7 @@ export class AcpProjector {
       if (item.type === "assistant") return item.markdown.trim();
       const rows = item.tools.map((tool) => {
         const argument = toolArgumentPreview(tool);
-        return `${failed(tool.status) ? "×" : "𝒇"} ${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
+        return `${failed(tool.status) ? "⊗" : "∴"} ${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
       });
       return [completedToolSummary(item.tools, this.changedAt), ...rows].join("\n");
     });

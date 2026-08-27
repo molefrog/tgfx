@@ -7,13 +7,19 @@ type RichBlock = NonNullable<InputRichMessageWithoutUpload["blocks"]>[number];
 type DetailsBlock = Extract<RichBlock, { type: "details" }>;
 
 const update = (value: object) => value as acp.SessionUpdate;
+const THINKING_EMOJI = {
+  type: "custom_emoji" as const,
+  custom_emoji_id: "5573473356579078196",
+  alternative_text: "🙂",
+};
+const WORKING_SUMMARY = [THINKING_EMOJI, " Working…"];
 
-function draft(projector: AcpProjector, collapseTools = true): RichBlock[] {
-  return projector.rich({ final: false, collapseTools }).blocks ?? [];
+function draft(projector: AcpProjector, collapseTools = true, expandStreamingTools = true): RichBlock[] {
+  return projector.rich({ final: false, collapseTools, expandStreamingTools }).blocks ?? [];
 }
 
 function final(projector: AcpProjector, collapseTools = true): RichBlock[] {
-  return projector.rich({ final: true, collapseTools }).blocks ?? [];
+  return projector.rich({ final: true, collapseTools, expandStreamingTools: true }).blocks ?? [];
 }
 
 function details(block: RichBlock | undefined): DetailsBlock {
@@ -120,12 +126,13 @@ describe("ordered ACP projector", () => {
     expect(rendered(blocks[0])).toContain("research");
 
     const firstGroup = details(blocks[1]);
-    expect(firstGroup.summary).toBe("Working...");
-    expect(firstGroup.is_open).toBeTrue();
+    expect(firstGroup.summary).toBe("Inspected tool results");
+    expect(firstGroup.is_open).toBeUndefined();
+    expect(rendered(firstGroup.summary)).not.toContain("custom_emoji");
     expect(rendered(firstGroup).indexOf("Reading")).toBeLessThan(rendered(firstGroup).indexOf("Searching"));
 
     const trailingGroup = details(blocks[4]);
-    expect(trailingGroup.summary).toBe("Working...");
+    expect(trailingGroup.summary).toEqual(WORKING_SUMMARY);
     expect(trailingGroup.is_open).toBeTrue();
     expect(rendered(trailingGroup)).toContain("Running tests");
     expect(blocks.some((block) => block.type === "thinking")).toBeFalse();
@@ -166,14 +173,14 @@ describe("ordered ACP projector", () => {
     }));
 
     const group = details(draft(projector)[0]);
-    expect(group.summary).toBe("Working...");
+    expect(group.summary).toEqual(WORKING_SUMMARY);
     expect(rendered(group)).not.toContain("Pending");
     expect(rendered(group)).not.toContain("Running");
-    expect(rendered(group)).toContain("𝒇 Complete");
-    expect(rendered(group)).toContain("× Failed");
+    expect(rendered(group)).toContain("∴ Complete");
+    expect(rendered(group)).toContain("⊗ Failed");
   });
 
-  test("opens every draft group as Working and closes every final group", () => {
+  test("animates only the trailing draft group and optionally opens it", () => {
     const projector = new AcpProjector();
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "one", title: "One", status: "completed", content: [],
@@ -184,16 +191,22 @@ describe("ordered ACP projector", () => {
       sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Content after the first group." },
     }));
     let blocks = draft(projector);
-    expect(details(blocks[0]).summary).toBe("Working...");
-    expect(details(blocks[0]).is_open).toBeTrue();
+    expect(details(blocks[0]).summary).toBe("Worked for 1s");
+    expect(details(blocks[0]).is_open).toBeUndefined();
 
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "two", title: "Two", status: "completed", content: [],
     }));
     blocks = draft(projector);
-    expect(details(blocks[0]).is_open).toBeTrue();
+    expect(details(blocks[0]).summary).toBe("Worked for 1s");
+    expect(details(blocks[0]).is_open).toBeUndefined();
     expect(details(blocks[2]).is_open).toBeTrue();
-    expect(details(blocks[2]).summary).toBe("Working...");
+    expect(details(blocks[2]).summary).toEqual(WORKING_SUMMARY);
+
+    const alwaysCollapsed = draft(projector, true, false);
+    expect(details(alwaysCollapsed[0]).is_open).toBeUndefined();
+    expect(details(alwaysCollapsed[2]).summary).toEqual(WORKING_SUMMARY);
+    expect(details(alwaysCollapsed[2]).is_open).toBeUndefined();
 
     const finalBlocks = final(projector);
     expect(details(finalBlocks[0]).is_open).toBeUndefined();
@@ -467,11 +480,11 @@ describe("ordered ACP projector", () => {
     expect(group.summary).toBe("Used Telegram");
     expect(group.blocks).toEqual(telegramTools.map(([, title]) => ({
       type: "paragraph",
-      text: { type: "bold", text: `𝒇 ${title}` },
+      text: { type: "bold", text: `∴ ${title}` },
     })));
     expect(projector.plainFinal(true).split("\n")).toEqual([
       "Used Telegram",
-      ...telegramTools.map(([, title]) => `𝒇 ${title}`),
+      ...telegramTools.map(([, title]) => `∴ ${title}`),
     ]);
     expect(rendered(group.blocks)).not.toContain("mcp_telegram_");
 
@@ -489,7 +502,7 @@ describe("ordered ACP projector", () => {
     }
     expect(details(final(named)[0]).blocks).toEqual(telegramTools.map(([, title]) => ({
       type: "paragraph",
-      text: { type: "bold", text: `𝒇 ${title}` },
+      text: { type: "bold", text: `∴ ${title}` },
     })));
   });
 
@@ -515,14 +528,9 @@ describe("ordered ACP projector", () => {
 
   test("uses only the initial thinking block before real output", () => {
     const projector = new AcpProjector();
-    const emoji = {
-      type: "custom_emoji" as const,
-      custom_emoji_id: "5573473356579078196",
-      alternative_text: "🙂",
-    };
     expect(draft(projector)).toEqual([{
       type: "thinking",
-      text: [emoji, " Thinking…"],
+      text: [THINKING_EMOJI, " Thinking…"],
     }]);
 
     expect(projector.apply(update({
@@ -542,7 +550,7 @@ describe("ordered ACP projector", () => {
     }))).toBe("none");
     expect(draft(projector)).toEqual([{
       type: "thinking",
-      text: [emoji, " Thinking…"],
+      text: [THINKING_EMOJI, " Thinking…"],
     }]);
 
     expect(projector.apply(update({
@@ -576,7 +584,7 @@ describe("ordered ACP projector", () => {
     }));
 
     const group = details(draft(projector)[0]);
-    expect(group.summary).toBe("Working...");
+    expect(group.summary).toEqual(WORKING_SUMMARY);
     expect(rendered(group)).toContain('\\"query\\":\\"needle\\"');
     expect(rendered(group)).toContain("src/projector.ts");
   });
@@ -660,7 +668,7 @@ describe("ordered ACP projector", () => {
 
     const blocks = draft(projector);
     expect(blocks.map((block) => block.type)).toEqual(["details"]);
-    expect(details(blocks[0]).summary).toBe("Working...");
+    expect(details(blocks[0]).summary).toEqual(WORKING_SUMMARY);
     expect(rendered(blocks[0]).indexOf("One")).toBeLessThan(rendered(blocks[0]).indexOf("Two"));
   });
 

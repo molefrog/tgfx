@@ -217,7 +217,7 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
       chatIds: principalKind === "chat" ? [identifier] : [],
     },
     approvals: { chatId: approvalsChatId, topicId: "0" },
-    renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 250 },
+    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: false, updateEveryMs: 250 },
   };
   await telegram.sendText(
     config.approvals.chatId,

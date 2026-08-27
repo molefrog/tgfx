@@ -1,12 +1,18 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { fileURLToPath } from "node:url";
-import type { BotCommand, CallbackQuery, Update } from "grammy/types";
+import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
 import { AcpProjector } from "./fx/projector";
 import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
 import { PeerDraftLimiter } from "./telegram/draft-scheduler";
-import { isRetryableTelegramError, recoverOutbox, TurnRenderer } from "./telegram/renderer";
+import {
+  createDraftId,
+  isRetryableTelegramError,
+  recoverOutbox,
+  streamsRoute,
+  TurnRenderer,
+} from "./telegram/renderer";
 import { redactSecrets } from "./secrets";
 import {
   commandFromText,
@@ -27,7 +33,24 @@ import type {
 import { routeKey } from "./types";
 import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
 
-const REMOVED_COMMAND_NAMES = new Set(["fx", "cancel", "new", "retry", "discard"]);
+const COMMANDS: BotCommand[] = [{
+  command: "compact",
+  description: "Compact the 𝒇x conversation",
+}];
+const THINKING_EMOJI = {
+  type: "custom_emoji" as const,
+  custom_emoji_id: "5573473356579078196",
+  alternative_text: "🙂",
+};
+const COMPACTING_DRAFT: InputRichMessageWithoutUpload = {
+  blocks: [{ type: "thinking", text: [THINKING_EMOJI, " Compacting conversation..."] }],
+};
+const COMPACTING_MESSAGE: InputRichMessageWithoutUpload = {
+  blocks: [{ type: "paragraph", text: [THINKING_EMOJI, " Compacting conversation..."] }],
+};
+const COMPACTED_MESSAGE: InputRichMessageWithoutUpload = {
+  blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
+};
 
 type StopCapableUpdate = Update & {
   stopped_message_generation?: {
@@ -86,17 +109,6 @@ function makePrompt(
   const text = textOverride ?? message.text;
   if (text?.trim()) blocks.push({ type: "text", text });
   return blocks;
-}
-
-function validDynamicCommands(commands: Array<{ name: string; description: string }>, modelPinned: boolean): BotCommand[] {
-  const seen = new Set(REMOVED_COMMAND_NAMES);
-  return commands.flatMap((command) => {
-    const name = command.name.toLowerCase();
-    if (modelPinned && name === "model") return [];
-    if (!/^[a-z0-9_]{1,32}$/.test(name) || seen.has(name)) return [];
-    seen.add(name);
-    return [{ command: name, description: command.description.slice(0, 256) || `𝒇x /${name}` }];
-  }).slice(0, 100);
 }
 
 export type TgfxLogEvent = { event: string; message: string } & Record<string, unknown>;
@@ -523,19 +535,15 @@ export class TgfxApp {
     if (command && !command.addressed) return;
 
     if (command) {
-      await this.session(message.route); // session/new supplies the current catalog
-      const commands = JSON.parse(this.state.route(message.route.key)?.dynamic_commands_json ?? "[]") as Array<{ name: string }>;
-      if (REMOVED_COMMAND_NAMES.has(command.name)
-        || !commands.some((candidate) => candidate.name.toLowerCase() === command.name)) {
+      if (command.name !== "compact") {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
-      if (this.options.model && command.name === "model") {
-        await this.options.telegram.sendText(message.route.chatId, "The model is pinned by tgfx --model for this run.", message.route.topicId);
+      if (command.args) {
+        await this.options.telegram.sendText(message.route.chatId, "Usage: /compact", message.route.topicId);
         return;
       }
-      const exact = `/${command.name}${command.args ? ` ${command.args}` : ""}`;
-      await this.runTurn(row, message, [{ type: "text", text: exact }]);
+      await this.runCompact(row, message);
       return;
     }
 
@@ -592,13 +600,7 @@ export class TgfxApp {
 
     if (migrated.length) {
       await this.options.telegram.deleteCommands(oldChatId).catch(() => undefined);
-      const firstRoute = this.state.routes().find((route) =>
-        route.bot_id === this.options.bot.id && route.chat_id === newChatId
-      );
-      const dynamic = firstRoute
-        ? JSON.parse(firstRoute.dynamic_commands_json) as Array<{ name: string; description: string }>
-        : [];
-      await this.installMenu(newChatId, dynamic).catch((error) => this.log(
+      await this.installMenu(newChatId).catch((error) => this.log(
         `Could not install commands after group migration · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
       ));
       await this.options.telegram.sendText(
@@ -767,6 +769,104 @@ export class TgfxApp {
     await this.options.telegram.answerCallback(callback.id, "This action is no longer active");
   }
 
+  private registerBotMessage(route: Route, messageId: string): void {
+    this.state.registerBotMessage({
+      ref: uuid("msg"),
+      botId: route.botId,
+      routeKey: route.key,
+      chatId: route.chatId,
+      topicId: route.topicId,
+      messageId,
+    });
+  }
+
+  private async runCompact(row: InboxRow, message: InboundMessage): Promise<void> {
+    const blocks: acp.ContentBlock[] = [{ type: "text", text: "/compact" }];
+    const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
+    this.state.setLastPrompt(message.route.key, blocks);
+    const controller = new AbortController();
+    const streaming = streamsRoute(this.rendererConfig, message.route);
+    const draftId = streaming ? createDraftId() : undefined;
+    this.activeTurns.set(message.route.key, controller);
+    if (draftId !== undefined) this.activeDraftIds.set(message.route.key, draftId);
+    const routeLabel = this.label(message.route.chatId, message.route.topicId);
+    const acknowledgeCancellation = async () => {
+      await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
+      this.state.clearLastPrompt(message.route.key);
+      this.log({ event: "turn.cancelled", message: `${routeLabel} · compact cancelled`, chat: message.route.chatId });
+    };
+
+    try {
+      let progressMessageId: number | undefined;
+      if (draftId !== undefined) {
+        await this.options.telegram.sendRichDraft(
+          message.route.chatId,
+          draftId,
+          COMPACTING_DRAFT,
+          controller.signal,
+        );
+      } else {
+        const progress = await this.options.telegram.sendRich(
+          message.route.chatId,
+          COMPACTING_MESSAGE,
+          message.route.topicId,
+          {},
+          controller.signal,
+        );
+        progressMessageId = progress.message_id;
+        this.registerBotMessage(message.route, String(progress.message_id));
+      }
+
+      this.state.markInbox(row.id, "running");
+      const session = await this.session(message.route);
+      if (controller.signal.aborted) {
+        if (this.stopping) throw controller.signal.reason ?? new Error("tgfx stopped");
+        await acknowledgeCancellation();
+        return;
+      }
+      await session.prompt(blocks, {
+        signal: controller.signal,
+        permission: (request) => this.requestPermission(message.route, request, controller.signal),
+      });
+      if (controller.signal.aborted) {
+        if (this.stopping) throw controller.signal.reason ?? new Error("tgfx stopped");
+        await acknowledgeCancellation();
+        return;
+      }
+
+      if (progressMessageId !== undefined) {
+        await this.options.telegram.editRich(
+          message.route.chatId,
+          progressMessageId,
+          COMPACTED_MESSAGE,
+          controller.signal,
+        );
+      } else {
+        const completed = await this.options.telegram.sendRich(
+          message.route.chatId,
+          COMPACTED_MESSAGE,
+          message.route.topicId,
+          {},
+          controller.signal,
+        );
+        this.registerBotMessage(message.route, String(completed.message_id));
+      }
+      this.state.clearLastPrompt(message.route.key);
+      this.log({ event: "turn.delivered", message: `${routeLabel} · conversation compacted`, chat: message.route.chatId });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (this.stopping) throw error;
+        await acknowledgeCancellation();
+        return;
+      }
+      throw error;
+    } finally {
+      this.activeTurns.delete(message.route.key);
+      this.activeDraftIds.delete(message.route.key);
+      if (activeContextRef) this.state.deactivateContext(message.route.key, activeContextRef);
+    }
+  }
+
   private async runTurn(row: InboxRow, message: InboundMessage, blocks: acp.ContentBlock[]): Promise<void> {
     const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
@@ -880,9 +980,6 @@ export class TgfxApp {
       onUpdate: async (update) => {
         if (update.sessionUpdate !== "available_commands_update") return;
         this.state.setCommands(route.key, update.availableCommands);
-        await this.installMenu(route.chatId, update.availableCommands).catch((error) => {
-          this.log(`Could not update command menu for ${route.chatId} · ${error instanceof Error ? error.message : String(error)}`);
-        });
       },
     });
     this.sessions.set(route.key, session);
@@ -995,24 +1092,20 @@ export class TgfxApp {
       ...this.config.access.userIds,
       this.config.approvals.chatId,
     ]);
-    const persisted = new Map<string, Array<{ name: string; description: string }>>();
     for (const route of this.state.routes()) {
-      if (route.bot_id !== this.options.bot.id || persisted.has(route.chat_id)) continue;
-      try { persisted.set(route.chat_id, JSON.parse(route.dynamic_commands_json)); }
-      catch { persisted.set(route.chat_id, []); }
+      if (route.bot_id !== this.options.bot.id) continue;
       chats.add(route.chat_id);
     }
     await Promise.allSettled([...chats].map((chatId) =>
-      this.installMenu(chatId, persisted.get(chatId) ?? [])
+      this.installMenu(chatId)
     ));
   }
 
-  private async installMenu(chatId: string, dynamic: Array<{ name: string; description: string }>): Promise<void> {
-    const commands = validDynamicCommands(dynamic, Boolean(this.options.model));
+  private async installMenu(chatId: string): Promise<void> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        await this.options.telegram.setCommands(chatId, commands);
+        await this.options.telegram.setCommands(chatId, COMMANDS);
         return;
       } catch (error) {
         lastError = error;

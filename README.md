@@ -62,18 +62,24 @@ bot in Telegram to enable them, demote it to revoke; destructive actions still
 require a one-tap approval card in the approvals chat. `tgfx doctor` reports
 the bot's current rights in every allowlisted group.
 
-Telegram's slash menu contains only commands advertised by the active 𝒇x ACP
-session. When `--model` pins the process model, `/model` is intentionally
-omitted. The names `fx`, `cancel`, `new`, `retry`, and `discard` are reserved but
-not currently exposed.
+Telegram currently exposes one slash command: `/compact`. It compacts the active
+𝒇x conversation and shows a purpose-built progress state. Other ACP-advertised
+commands are not projected into Telegram yet.
 
 Private chats stream complete Rich Message snapshots through Telegram's draft
 API. Each draft enables Telegram's Stop button, which cancels the matching active
 𝒇x turn. Groups and `--no-streaming` receive one final message. `--no-collapse-tools`
 shows full details for completed tools; otherwise each consecutive tool group is
-compact. Pending tools and private thought events stay hidden and do not trigger
+compact. The current trailing tool group shows the thinking emoji and `Working…`;
+earlier groups use their final activity labels. The current group stays collapsed
+by default; set `renderer.expandStreamingTools` to `true` in `.tgfx/config.json`
+to open it temporarily while it streams. Pending tools and private thought events stay hidden and do not trigger
 draft requests. Visible frames stream optimistically, then adapt to Telegram's
 per-chat limits and any `retry_after` response.
+
+For `/compact`, streaming mode shows a draft-only Thinking block followed by
+`✓ Conversation compacted`. Without streaming, tgfx sends one regular progress
+message and edits it to that completed state.
 
 The local `.tgfx/state.sqlite` file is an operational journal, not a chat archive:
 accepted inbound and final-delivery bodies are scrubbed after success, drafts are

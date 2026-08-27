@@ -98,8 +98,8 @@ Telegram Bot API:
 5. The terminal becomes a small append-only status view and waits. The same bot
    cannot be active in another local workspace until this process stops.
 6. An allowed person sends the bot a message. An ordinary private message starts
-   a turn; a group message must use an advertised FX command, mention the bot, or
-   reply to it. Everything outside the allowlist is silently discarded.
+   a turn; a group message must use `/compact`, mention the bot, or reply to it.
+   Everything outside the allowlist is silently discarded.
 7. Before acknowledging the update locally, tgfx stores it and advances the
    Telegram polling cursor in one SQLite transaction. It then queues the message
    FIFO for its `{bot_id, chat_id, topic_id}` route.
@@ -296,8 +296,8 @@ rich draft then grows as FX responds. When the turn finishes, the draft becomes 
 permanent rich message. With `--no-streaming`, the user sees only that final
 message.
 
-In a group, tgfx reacts only to an advertised FX command, a reply to the bot, or
-a configured mention. It does not read normal
+In a group, tgfx reacts only to `/compact`, a reply to the bot, or a configured
+mention. It does not read normal
 group conversation as agent requests. Groups receive one final response in v1;
 live group previews are left for later because their delivery and visibility
 rules are different.
@@ -316,69 +316,45 @@ a private streaming chat, Telegram's Stop button cancels the turn associated
 with that exact draft ID. V1 runs one prompt at a time for each bot/chat/topic
 route.
 
-tgfx currently exposes no built-in Telegram slash commands. The names `fx`,
-`cancel`, `new`, `retry`, and `discard` remain reserved and are not forwarded to
-FX.
+tgfx currently exposes one Telegram slash command:
 
-Once an FX session exists for a route, tgfx also projects the commands advertised
-by ACP `available_commands_update` into Telegram's slash-command menu for that
-chat. With the currently checked FX build this includes commands such as
-`/compact`, `/undo`, `/changes`, `/review`, `/status`, `/model`, `/permissions`,
-`/mcp`, `/skills`, and `/fast`. This list is illustrative, not a product-level
-hard-coded catalog.
+| Command | Purpose |
+| --- | --- |
+| `/compact` | Compact the active route's FX conversation. |
+
+Other commands advertised by ACP `available_commands_update` are recorded but
+not projected into Telegram. They can be cherry-picked later with a deliberate
+Telegram interaction instead of inheriting FX's whole interactive command
+surface.
 
 ### FX slash commands in Telegram
 
-The ACP notification is the authoritative, replace-all snapshot for one FX
-session. tgfx never assumes that the interactive FX command list and the ACP
-command list are identical.
+The Telegram command surface is explicit rather than a generic ACP projection.
 
 1. tgfx authorizes the Telegram sender and route before interpreting any
    command. Telegram's visible command menu is discoverability, not an access
    control boundary.
-2. The reserved names `cancel`, `new`, `retry`, `discard`, and `fx` are not
-   exposed or forwarded to FX.
-3. A route without an FX session creates or resumes one before resolving a
-   non-tgfx slash command. tgfx waits for its first
-   `available_commands_update`, then either invokes an exact advertised command
-   or reports that the command is unavailable. An unknown command is never
-   downgraded into an ordinary model prompt.
-4. Telegram input such as `/compact@my_fx_bot` or
-   `/model@my_fx_bot openai/gpt-5.4` is normalized only by removing this bot's
-   `@username` suffix. The command name and remaining argument text are otherwise
-   preserved.
-5. tgfx invokes the FX command with `session/prompt` as one text content block,
-   for example `{ "type": "text", "text": "/compact" }`. It does not prepend
-   the `telegram_message` envelope because doing so would stop the input from
-   being an FX slash command.
-6. FX owns the command's behavior and emits its normal ACP updates. tgfx renders
-   those updates like any other turn. If the command succeeds without visible
-   output, Telegram receives a small completion acknowledgement instead of
-   appearing to ignore the command.
-7. A later `available_commands_update` replaces the route's cached snapshot and
-   triggers command-menu reconciliation. The last snapshot is stored with the
-   route so the menu survives restart, then replaced when the resumed ACP session
-   advertises a newer catalog.
+2. Only `/compact` is accepted. Every other slash command receives an unknown
+   command response and is never downgraded into an ordinary model prompt.
+3. `/compact@my_fx_bot` is normalized by removing this bot's `@username` suffix.
+   Arguments are rejected with `Usage: /compact`.
+4. tgfx invokes FX with one ACP text block:
+   `{ "type": "text", "text": "/compact" }`. It suppresses generic ACP command
+   output and owns the Telegram progress UI.
+5. In private streaming mode, tgfx sends a rich draft whose sole block is a
+   draft-only Thinking block containing the recommended thinking custom emoji
+   and `Compacting conversation...`. Success is persisted visibly with a new
+   rich message containing `✓ Conversation compacted`.
+6. With streaming disabled, and in groups, tgfx sends a regular rich paragraph
+   with the same progress label and edits that message in place to
+   `✓ Conversation compacted`.
 
 tgfx uses Telegram `setMyCommands` with a chat-specific scope for each allowed
-chat. It installs the representable ACP commands without overwriting the bot's
-default or BotFather-managed command list. On a
+chat. It installs only `/compact` without overwriting the bot's default or
+BotFather-managed command list. On a
 clean handoff it removes the chat-scoped list it owned, revealing any broader
-Telegram configuration underneath. Before a route has an FX session, its scoped
-menu is empty; the first ACP command snapshot populates it.
-
-Only ACP names that already satisfy Telegram's command-name grammar—1 to 32
-lowercase English letters, digits, or underscores—are placed in the menu.
-Descriptions are safely truncated to Telegram's limit. Reserved-name collisions,
-invalid names, and entries beyond Telegram's 100-command limit are omitted with
-a local warning; current FX commands fit without translation. A command received
-from Telegram is still checked against the live ACP snapshot because Telegram
-can deliver commands that were never registered or whose menu entry is stale.
-
-When `tgfx --model <id>` pins the FX process model, tgfx omits `/model` from its
-Telegram projection and answers direct `/model` attempts with the effective
-startup pin. This avoids offering a session-level selector that cannot override
-the process-level model.
+Telegram configuration underneath. The menu is available before an FX session
+has been created.
 
 ## Small command and configuration surface
 
@@ -430,6 +406,7 @@ automation, not for a second large configuration system.
   "renderer": {
     "mode": "streaming",
     "collapseTools": true,
+    "expandStreamingTools": false,
     "updateEveryMs": 250
   }
 }
@@ -949,8 +926,10 @@ The primary renderer maps the ACP timeline to Telegram Rich Messages:
   paragraphs, lists, block quotations, preformatted code, math, and tables;
 - one draft-only `tg-thinking` block is shown only before any real output exists;
 - only terminal tool calls are rendered, in their first-observed ACP order;
-- consecutive tools form a details block. The trailing group is open while it is
-  the last item in a streaming draft, then collapses when content follows;
+- consecutive tools form a details block. Only the trailing group uses the
+  custom thinking emoji and `Working…` label. `renderer.expandStreamingTools`
+  opens that group while streaming when true; the false default keeps it collapsed.
+  Earlier groups use their final activity label without the emoji;
 - the final call uses `sendRichMessage`;
 - private streaming uses `sendRichMessageDraft` with one stable `draft_id`.
 
@@ -1387,28 +1366,19 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   `allowed_updates`. V1 can set a reaction and perform moderation, but does not
   turn every ambient reaction/member change into an autonomous FX prompt.
 
-### Command projection
+### Telegram commands
 
 - Telegram command menus persist remotely and can be stale while tgfx is
-  offline. Every received command is re-authorized and checked against the
-  route's live ACP snapshot before dispatch.
+  offline. Every received command is re-authorized before dispatch.
 - Telegram command scopes do not include forum topics. All topics in one group
-  therefore share the group-level discovery menu even though tgfx keeps their FX
-  sessions separate. A command missing from a particular topic session is
-  rejected when invoked there.
-- Telegram clients can send `/name@bot_username`; tgfx accepts only its own bot
-  suffix and ignores commands addressed to another bot.
-- The Bot API caps a menu at 100 entries and restricts names to 32 lowercase
-  English letters, digits, or underscores. tgfx never rewrites an ACP command
-  into a different spelling because that could change what FX executes.
-- A catalog update can arrive while a command is queued. The command is checked
-  again immediately before `session/prompt`; removal wins and produces a visible
-  “no longer available” result.
-- Telegram `setMyCommands` failure does not stop agent messages. tgfx keeps
-  accepting exact authorized commands from the current ACP snapshot, retries
-  menu reconciliation, and reports the degraded discovery state locally.
-- The process-level `tgfx --model` override pins FX. Session-level `/model`
-  discovery is hidden for that run rather than promising an ineffective change.
+  therefore share the group-level `/compact` menu even though tgfx keeps their FX
+  sessions separate.
+- Telegram clients can send `/compact@bot_username`; tgfx accepts only its own
+  bot suffix and ignores commands addressed to another bot.
+- Telegram `setMyCommands` failure does not stop ordinary agent messages. tgfx
+  retries installation and reports the degraded discovery state locally.
+- ACP command-catalog updates are retained as FX session metadata but do not
+  expand Telegram's command surface.
 
 ### FX and concurrency
 
@@ -1450,10 +1420,9 @@ The current official FX behavior matters in several places:
   passes it as `fx acp --model <id>`; ACP diagnostics remain an implementation
   detail unless doctor/debugging needs an explicit log file.
 - New and loaded FX ACP sessions advertise their slash-command surface through
-  `available_commands_update`. tgfx treats each notification as a full dynamic
-  snapshot, projects Telegram-compatible entries into a chat-scoped bot command
-  menu, and invokes an advertised command as a single text block in
-  `session/prompt`.
+  `available_commands_update`. tgfx retains that snapshot as session metadata
+  but exposes only its explicitly implemented `/compact` integration, invoked as
+  one text block in `session/prompt`.
 - ACP prompts accept text and embedded resources but not image or audio blocks.
 - ACP-supplied MCP servers are authoritative for that session and can use stdio,
   HTTP, or legacy SSE transports.
@@ -1493,9 +1462,8 @@ the current private-chat bridge:
   process;
 - FX session resume behavior after abrupt termination, including MCP capability
   restoration and permission state;
-- behavior of every FX `available_commands_update` entry when invoked over ACP,
-  especially terminal-oriented commands that may complete without renderable
-  output, and whether any need a documented compatibility filter;
+- which additional FX commands deserve purpose-built Telegram interactions after
+  `/compact`;
 - approval-card usability, callback expiry, and concurrent permission requests
   across Telegram clients;
 - Rich Message behavior across current Telegram mobile, desktop, and web clients,
@@ -1541,9 +1509,8 @@ From a clean machine and a real repository, a user can:
    accurate context envelope reach the correct FX session;
 3. receive a responsive private rich draft or one final group response, with
    correct markup and optional tool collapsing;
-4. discover the route's live ACP command catalog in Telegram, invoke an
-   advertised command such as `/compact`, and never forward an unknown,
-   unauthorized, stale, or namespace-colliding slash command as a model prompt;
+4. invoke `/compact`, see its dedicated progress and completion states, and never
+   forward any other slash command as a model prompt;
 5. cancel a turn and queue another message without corrupting the route;
 6. restart tgfx at every documented reliability boundary without losing a
    locally accepted update, silently replaying an uncertain FX turn, or violating

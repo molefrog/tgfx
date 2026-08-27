@@ -11,6 +11,7 @@ const draftInterval = z.number().int().min(200).max(10_000).default(250)
 const rendererSchema = z.object({
   mode: z.enum(["streaming", "final"]).default("streaming"),
   collapseTools: z.boolean().default(true),
+  expandStreamingTools: z.boolean().default(false),
   updateEveryMs: draftInterval,
 });
 
@@ -27,6 +28,7 @@ export const configSchema = z.object({
   renderer: rendererSchema.default({
     mode: "streaming",
     collapseTools: true,
+    expandStreamingTools: false,
     updateEveryMs: 250,
   }),
 }) satisfies z.ZodType<TgfxConfig>;

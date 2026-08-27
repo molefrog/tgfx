@@ -116,6 +116,21 @@ export class TelegramApi {
     ));
   }
 
+  async editRich(
+    chatId: string,
+    messageId: number,
+    richMessage: InputRichMessageWithoutUpload,
+    signal?: AbortSignal,
+  ) {
+    return this.call(() => this.api.editMessageText(
+      chatId,
+      messageId,
+      richMessage,
+      {},
+      signal,
+    ));
+  }
+
   async answerCallback(callbackQueryId: string, text?: string): Promise<true> {
     return this.call(() => this.api.answerCallbackQuery(callbackQueryId, text ? { text } : {}));
   }

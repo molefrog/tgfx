@@ -28,7 +28,9 @@ async function fakeFx(directory: string): Promise<string> {
 
 const BOT: BotIdentity = { id: "100", username: "fake_bot", displayName: "Fake Bot" };
 
-async function makeWorkspace(config: Omit<TgfxConfig, "version" | "activeBotId" | "renderer">): Promise<{
+async function makeWorkspace(
+  config: Omit<TgfxConfig, "version" | "activeBotId" | "renderer"> & { renderer?: TgfxConfig["renderer"] },
+): Promise<{
   paths: WorkspacePaths; fxBinary: string;
 }> {
   const workspace = await mkdtemp(join(tmpdir(), "tgfx-e2e-"));
@@ -37,7 +39,7 @@ async function makeWorkspace(config: Omit<TgfxConfig, "version" | "activeBotId" 
   await saveConfig(paths, {
     version: 1,
     activeBotId: BOT.id,
-    renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 500 },
+    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 500 },
     ...config,
   });
   return { paths, fxBinary: await fakeFx(workspace) };
@@ -89,5 +91,34 @@ describe("tgfx over the local Telegram simulator", () => {
       expect(state.db.query("SELECT status FROM telegram_inbox").all()).toEqual([{ status: "done" }]);
       expect(state.db.query("SELECT status FROM telegram_outbox").all()).toEqual([{ status: "sent" }]);
     } finally { state.close(); }
+  }, 15_000);
+
+  test("edits the /compact progress message when streaming is disabled", async () => {
+    const telegram = new FakeTelegram();
+    const { paths, fxBinary } = await makeWorkspace({
+      access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      renderer: { mode: "final", collapseTools: true, expandStreamingTools: true, updateEveryMs: 500 },
+    });
+    const { app, running } = await startApp(paths, fxBinary, telegram);
+    try {
+      telegram.sendUserMessage({ userId: 42, text: "/compact", firstName: "Ada" });
+      const edits = await telegram.waitForCalls("editMessageText");
+      const progress = telegram.calls("sendRichMessage");
+      expect(progress).toHaveLength(1);
+      expect(progress[0]!.payload.rich_message.blocks[0].type).toBe("paragraph");
+      expect(edits[0]!.payload.rich_message).toEqual({
+        blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
+      });
+      expect(telegram.calls("sendRichMessageDraft")).toHaveLength(0);
+      expect(telegram.calls("setMyCommands").at(-1)?.payload.commands).toEqual([{
+        command: "compact",
+        description: "Compact the 𝒇x conversation",
+      }]);
+    } finally {
+      await app.stop();
+      await running;
+      await telegram.stop();
+    }
   }, 15_000);
 });

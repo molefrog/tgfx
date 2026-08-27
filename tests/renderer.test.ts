@@ -26,7 +26,7 @@ describe("Telegram renderer boundaries", () => {
   });
 
   test("streams only private routes", () => {
-    const config = { mode: "streaming" as const, collapseTools: true, updateEveryMs: 800 };
+    const config = { mode: "streaming" as const, collapseTools: true, expandStreamingTools: true, updateEveryMs: 800 };
     expect(streamsRoute(config, {
       key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private",
     })).toBeTrue();
@@ -140,7 +140,7 @@ describe("Telegram renderer boundaries", () => {
       api,
       state,
       { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
-      { mode: "streaming", collapseTools: true, updateEveryMs: 0 },
+      { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 0 },
       projector,
       undefined,
       new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),

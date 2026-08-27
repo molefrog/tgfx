@@ -17,7 +17,7 @@ function config(): TgfxConfig {
     activeBotId: "123456",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 250 },
+    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 250 },
   };
 }
 
@@ -45,6 +45,14 @@ describe("workspace config", () => {
       ...config(),
       renderer: { ...config().renderer, updateEveryMs: 1_000 },
     }).renderer.updateEveryMs).toBe(1_000);
+  });
+
+  test("keeps the active streaming tool group collapsed by default", () => {
+    const renderer = configSchema.parse({
+      ...config(),
+      renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 250 },
+    }).renderer;
+    expect(renderer.expandStreamingTools).toBeFalse();
   });
 
   test("redacts tokens both standalone and inside Bot API file URLs", () => {

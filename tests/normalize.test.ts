@@ -8,7 +8,7 @@ const config: TgfxConfig = {
   version: 1, activeBotId: "100",
   access: { userIds: ["42"], chatIds: [] },
   approvals: { chatId: "42", topicId: "0" },
-  renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 800 },
+  renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 800 },
 };
 
 function update(overrides: Record<string, unknown> = {}): Update {

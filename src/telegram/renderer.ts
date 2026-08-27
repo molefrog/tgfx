@@ -99,6 +99,7 @@ export class TurnRenderer {
     this.drafts.start(this.projector.rich({
       final: false,
       collapseTools: this.config.collapseTools,
+      expandStreamingTools: this.config.expandStreamingTools,
     }));
   }
 
@@ -111,6 +112,7 @@ export class TurnRenderer {
     this.drafts.offer(this.projector.rich({
       final: false,
       collapseTools: this.config.collapseTools,
+      expandStreamingTools: this.config.expandStreamingTools,
     }), priority);
   }
 
@@ -134,6 +136,7 @@ export class TurnRenderer {
     const rich = this.projector.rich({
       final: true,
       collapseTools: this.config.collapseTools,
+      expandStreamingTools: this.config.expandStreamingTools,
       includeTools,
     });
     const plain = this.projector.plainFinal(includeTools);

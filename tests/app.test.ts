@@ -51,7 +51,7 @@ describe("tgfx host pipeline", () => {
       activeBotId: "100",
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
     };
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
@@ -122,7 +122,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
     };
     const texts: string[] = [];
     let phase = 0;
@@ -185,7 +185,7 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
-  test("forwards only live ACP slash commands and keeps a process-pinned model authoritative", async () => {
+  test("exposes only /compact and uses a Thinking draft while streaming", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-commands-"));
     temporary.push(workspace);
     const paths = workspacePaths(workspace);
@@ -194,10 +194,12 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", collapseTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
     };
     const texts: string[] = [];
     const menus: Array<Array<{ command: string }>> = [];
+    const drafts: InputRichMessageWithoutUpload[] = [];
+    const finals: InputRichMessageWithoutUpload[] = [];
     let firstPoll = true;
     let delivered!: () => void;
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
@@ -208,9 +210,8 @@ describe("tgfx host pipeline", () => {
           firstPoll = false;
           return [
             update(1, 42, "/unknown"),
-            update(2, 42, "/cancel"),
-            update(3, 42, "/model other"),
-            update(4, 42, "/status"),
+            update(2, 42, "/status"),
+            update(3, 42, "/compact"),
           ];
         }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -218,12 +219,20 @@ describe("tgfx host pipeline", () => {
       setCommands: async (_chat: string, menu: Array<{ command: string }>) => { menus.push(menu); return true as const; },
       deleteCommands: async () => true as const,
       sendText: async (_chat: string, text: string) => { texts.push(text); return { message_id: 700 } as Message.TextMessage; },
-      sendRichDraft: async () => true as const,
-      sendRich: async () => { delivered(); return { message_id: 701 } as Message.TextMessage; },
+      sendRichDraft: async (_chat: string, _draftId: number, rich: InputRichMessageWithoutUpload) => {
+        drafts.push(rich);
+        return true as const;
+      },
+      sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
+        finals.push(rich);
+        delivered();
+        return { message_id: 701 } as Message.TextMessage;
+      },
+      editRich: async () => { throw new Error("streaming compact must not edit a regular message"); },
     } as unknown as TelegramApi;
     const app = new TgfxApp({
       config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
-      telegram, fxBinary, model: "pinned-model", log: () => undefined,
+      telegram, fxBinary, log: () => undefined,
     });
     const running = app.run();
     await Promise.race([permanent, Bun.sleep(5_000).then(() => { throw new Error("command delivery timed out"); })]);
@@ -231,20 +240,89 @@ describe("tgfx host pipeline", () => {
     await running;
 
     expect(texts).toContain("Unknown command /unknown.");
-    expect(texts).toContain("Unknown command /cancel.");
-    expect(texts).toContain("The model is pinned by tgfx --model for this run.");
+    expect(texts).toContain("Unknown command /status.");
     const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
-    expect(commands).toContain("status");
-    expect(commands).not.toContain("model");
-    expect(commands).not.toContain("fx");
-    expect(commands).not.toContain("cancel");
-    expect(commands).not.toContain("new");
-    expect(commands).not.toContain("retry");
-    expect(commands).not.toContain("discard");
+    expect(commands).toEqual(["compact"]);
+    expect(drafts).toEqual([{
+      blocks: [{
+        type: "thinking",
+        text: [{
+          type: "custom_emoji",
+          custom_emoji_id: "5573473356579078196",
+          alternative_text: "🙂",
+        }, " Compacting conversation..."],
+      }],
+    }]);
+    expect(finals).toEqual([{
+      blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
+    }]);
     const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(events.filter((entry) => entry.event === "prompt").map((entry) => entry.value.prompt)).toEqual([
-      [{ type: "text", text: "/status" }],
+      [{ type: "text", text: "/compact" }],
     ]);
+  });
+
+  test("edits one regular progress message for /compact when streaming is disabled", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-compact-final-"));
+    temporary.push(workspace);
+    const paths = workspacePaths(workspace);
+    const fxBinary = await fakeFx(workspace);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      renderer: { mode: "final", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+    };
+    const sent: InputRichMessageWithoutUpload[] = [];
+    const edits: Array<{ messageId: number; rich: InputRichMessageWithoutUpload }> = [];
+    let firstPoll = true;
+    let edited!: () => void;
+    const completed = new Promise<void>((resolve) => { edited = resolve; });
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        if (firstPoll) {
+          firstPoll = false;
+          return [update(1, 42, "/compact")];
+        }
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => true as const,
+      deleteCommands: async () => true as const,
+      sendText: async () => ({ message_id: 710 }) as Message.TextMessage,
+      sendRichDraft: async () => { throw new Error("final mode must not send a draft"); },
+      sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
+        sent.push(rich);
+        return { message_id: 711 } as Message.TextMessage;
+      },
+      editRich: async (_chat: string, messageId: number, rich: InputRichMessageWithoutUpload) => {
+        edits.push({ messageId, rich });
+        edited();
+        return true as const;
+      },
+    } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined,
+    });
+    const running = app.run();
+    await Promise.race([completed, Bun.sleep(5_000).then(() => { throw new Error("compact edit timed out"); })]);
+    await app.stop();
+    await running;
+
+    expect(sent).toEqual([{
+      blocks: [{
+        type: "paragraph",
+        text: [{
+          type: "custom_emoji",
+          custom_emoji_id: "5573473356579078196",
+          alternative_text: "🙂",
+        }, " Compacting conversation..."],
+      }],
+    }]);
+    expect(edits).toEqual([{
+      messageId: 711,
+      rich: { blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }] },
+    }]);
   });
 
   test("resolves an FX permission callback immediately when the control chat is the active route", async () => {
@@ -256,7 +334,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
     };
     let phase = 0;
     let approvalData!: string;

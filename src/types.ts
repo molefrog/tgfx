@@ -7,6 +7,7 @@ type RenderMode = "streaming" | "final";
 export type RendererConfig = {
   mode: RenderMode;
   collapseTools: boolean;
+  expandStreamingTools: boolean;
   updateEveryMs: number;
 };
 
