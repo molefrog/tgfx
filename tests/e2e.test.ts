@@ -114,6 +114,7 @@ describe("tgfx over the local Telegram simulator", () => {
       expect(telegram.calls("setMyCommands").at(-1)?.payload.commands).toEqual([
         { command: "compact", description: "Compact the 𝒇x conversation" },
         { command: "model", description: "Choose the 𝒇x model" },
+        { command: "cost", description: "Show local 𝒇x usage and spend" },
       ]);
     } finally {
       await app.stop();

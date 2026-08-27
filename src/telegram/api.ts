@@ -120,13 +120,14 @@ export class TelegramApi {
     chatId: string,
     messageId: number,
     richMessage: InputRichMessageWithoutUpload,
+    options: Record<string, unknown> = {},
     signal?: AbortSignal,
   ) {
     return this.call(() => this.api.editMessageText(
       chatId,
       messageId,
       richMessage,
-      {},
+      options,
       signal,
     ));
   }

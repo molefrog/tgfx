@@ -242,7 +242,7 @@ describe("tgfx host pipeline", () => {
     expect(texts).toContain("Unknown command /unknown.");
     expect(texts).toContain("Unknown command /status.");
     const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
-    expect(commands).toEqual(["compact", "model"]);
+    expect(commands).toEqual(["compact", "model", "cost"]);
     expect(drafts).toEqual([{
       blocks: [{
         type: "thinking",
@@ -359,6 +359,90 @@ describe("tgfx host pipeline", () => {
       configId: "model",
       value: "openai/gpt-5.6-luna",
     });
+  });
+
+  test("renders /cost and switches its reporting period with buttons", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-cost-"));
+    temporary.push(workspace);
+    const paths = workspacePaths(workspace);
+    const logPath = join(workspace, "fx-events.jsonl");
+    const fxBinary = await fakeFx(workspace, logPath);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+    };
+    let phase = 0;
+    let sevenDayCallback = "";
+    let reportReady!: () => void;
+    const reportSent = new Promise<void>((resolve) => { reportReady = resolve; });
+    let editReady!: () => void;
+    const reportEdited = new Promise<void>((resolve) => { editReady = resolve; });
+    const sent: Array<{ rich: InputRichMessageWithoutUpload; options: any }> = [];
+    const edited: Array<{ rich: InputRichMessageWithoutUpload; options: any }> = [];
+    const callbackAnswers: string[] = [];
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        if (phase === 0) {
+          phase = 1;
+          return [update(1, 42, "/cost")];
+        }
+        if (phase === 1) {
+          phase = 2;
+          await reportSent;
+          return [{
+            update_id: 2,
+            callback_query: {
+              id: "cost-callback", chat_instance: "instance", data: sevenDayCallback,
+              from: { id: 42, is_bot: false, first_name: "Ada" },
+              message: {
+                message_id: 740, date: Math.floor(Date.now() / 1_000),
+                chat: { id: 42, type: "private", first_name: "Ada" }, text: "Usage",
+              },
+            },
+          } as Update];
+        }
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => true as const,
+      deleteCommands: async () => true as const,
+      sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload, _topic: string, options: any) => {
+        sent.push({ rich, options });
+        sevenDayCallback = options.reply_markup.inline_keyboard.flat()
+          .find((button: { text: string }) => button.text === "7 days").callback_data;
+        reportReady();
+        return { message_id: 740 } as Message.TextMessage;
+      },
+      answerCallback: async (id: string) => {
+        callbackAnswers.push(id);
+        return true as const;
+      },
+      editRich: async (_chat: string, _message: number, rich: InputRichMessageWithoutUpload, options: any) => {
+        edited.push({ rich, options });
+        editReady();
+        return true;
+      },
+      sendText: async () => { throw new Error("cost report should not fall back to plain text"); },
+    } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined,
+    });
+    const running = app.run();
+    await Promise.race([reportEdited, Bun.sleep(5_000).then(() => { throw new Error("cost report timed out"); })]);
+    await app.stop();
+    await running;
+
+    expect(sent[0]?.rich.blocks?.some((block) => block.type === "table")).toBeTrue();
+    expect(sevenDayCallback).toBe("cost:7d");
+    expect(edited[0]?.rich.blocks?.some((block) => block.type === "table")).toBeTrue();
+    expect(edited[0]?.options.reply_markup.inline_keyboard.flat()).toContainEqual({
+      text: "7 days", callback_data: "cost:n",
+    });
+    expect(callbackAnswers).toEqual(["cost-callback"]);
+    const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(events.filter((entry) => entry.event === "usage").map((entry) => entry.value.period)).toEqual(["24h", "7d"]);
   });
 
   test("edits one regular progress message for /compact when streaming is disabled", async () => {

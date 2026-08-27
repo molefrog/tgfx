@@ -7,6 +7,40 @@ const logPath = process.env.FAKE_FX_LOG;
 const record = (event: string, value: unknown = {}) => {
   if (logPath) appendFileSync(logPath, `${JSON.stringify({ event, value })}\n`);
 };
+if (process.argv[2] === "usage") {
+  const period = process.argv[process.argv.indexOf("--period") + 1] ?? "24h";
+  const multiplier = period === "30d" ? 30 : period === "7d" ? 7 : 1;
+  record("usage", { period });
+  console.log(JSON.stringify({
+    kind: "usage",
+    schema_version: 1,
+    period,
+    totals: {
+      total_tokens: 9_884_362 * multiplier,
+      input_tokens: 9_833_472 * multiplier,
+      output_tokens: 50_890 * multiplier,
+      cache_read_tokens: 7_938_042 * multiplier,
+      cache_write_tokens: 0,
+      reasoning_tokens: 21_649 * multiplier,
+      request_count: 253 * multiplier,
+      spend: 6.1857 * multiplier,
+    },
+    models: [{
+      model: "zai/glm-5.2-fast",
+      totals: {
+        total_tokens: 9_653_614 * multiplier,
+        input_tokens: 9_610_000 * multiplier,
+        output_tokens: 43_614 * multiplier,
+        cache_read_tokens: 7_800_000 * multiplier,
+        cache_write_tokens: 0,
+        reasoning_tokens: 20_000 * multiplier,
+        request_count: 200 * multiplier,
+        spend: 5.6345 * multiplier,
+      },
+    }],
+  }));
+  process.exit(0);
+}
 const modelIndex = process.argv.indexOf("--model");
 let model = modelIndex >= 0 ? process.argv[modelIndex + 1] ?? "fake-default" : "fake-default";
 const availableModels = [...new Set([

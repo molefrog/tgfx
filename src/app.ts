@@ -3,8 +3,10 @@ import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
 import { AcpProjector } from "./fx/projector";
+import { isFxUsagePeriod, readFxUsage, type FxUsagePeriod } from "./fx/usage";
 import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
+import { costReport, type CostReportView } from "./telegram/cost-report";
 import { PeerDraftLimiter } from "./telegram/draft-scheduler";
 import {
   closedModelPicker,
@@ -47,6 +49,9 @@ const COMMANDS: BotCommand[] = [{
 }, {
   command: "model",
   description: "Choose the 𝒇x model",
+}, {
+  command: "cost",
+  description: "Show local 𝒇x usage and spend",
 }];
 const THINKING_EMOJI = {
   type: "custom_emoji" as const,
@@ -547,7 +552,7 @@ export class TgfxApp {
     if (command && !command.addressed) return;
 
     if (command) {
-      if (command.name !== "compact" && command.name !== "model") {
+      if (command.name !== "compact" && command.name !== "model" && command.name !== "cost") {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
@@ -561,6 +566,10 @@ export class TgfxApp {
       }
       if (command.name === "model") {
         await this.openModelPicker(message);
+        return;
+      }
+      if (command.name === "cost") {
+        await this.openCostReport(message);
         return;
       }
       await this.runCompact(row, message);
@@ -604,6 +613,35 @@ export class TgfxApp {
     } catch (error) {
       this.state.expireInteraction(id);
       throw error;
+    }
+  }
+
+  private async costView(period: FxUsagePeriod): Promise<CostReportView> {
+    return costReport(await readFxUsage(this.options.fxBinary, this.options.paths.workspace, period));
+  }
+
+  private async openCostReport(message: InboundMessage): Promise<void> {
+    try {
+      const view = await this.costView("24h");
+      const sent = await this.options.telegram.sendRich(
+        message.route.chatId,
+        view.richMessage,
+        message.route.topicId,
+        { reply_markup: view.replyMarkup },
+      );
+      this.registerBotMessage(message.route, String(sent.message_id));
+    } catch (error) {
+      this.log({
+        event: "usage.failed",
+        message: `${this.label(message.route.chatId, message.route.topicId)} · usage failed · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+        chat: message.route.chatId,
+        topic: message.route.topicId,
+      });
+      await this.options.telegram.sendText(
+        message.route.chatId,
+        "Could not load 𝒇x usage right now.",
+        message.route.topicId,
+      );
     }
   }
 
@@ -735,6 +773,39 @@ export class TgfxApp {
     const [kind, id, value] = callback.data.split(":", 3);
     const inApprovalsRoute = route.chatId === this.config.approvals.chatId
       && route.topicId === this.config.approvals.topicId;
+    if (kind === "cost" && id) {
+      if (id === "n") {
+        await this.options.telegram.answerCallback(callback.id, "Already showing this period");
+        return;
+      }
+      if (!isFxUsagePeriod(id)) {
+        await this.options.telegram.answerCallback(callback.id, "Unknown usage period");
+        return;
+      }
+      await this.options.telegram.answerCallback(callback.id);
+      try {
+        const view = await this.costView(id);
+        await this.options.telegram.editRich(
+          route.chatId,
+          callback.message.message_id,
+          view.richMessage,
+          { reply_markup: view.replyMarkup },
+        );
+      } catch (error) {
+        this.log({
+          event: "usage.failed",
+          message: `${this.label(route.chatId, route.topicId)} · usage failed · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+          chat: route.chatId,
+          topic: route.topicId,
+        });
+        await this.options.telegram.sendText(
+          route.chatId,
+          "Could not load 𝒇x usage right now.",
+          route.topicId,
+        );
+      }
+      return;
+    }
     if (kind === "model" && id && value) {
       const interaction = this.state.interaction(id);
       if (!interaction
@@ -978,6 +1049,7 @@ export class TgfxApp {
           message.route.chatId,
           progressMessageId,
           COMPACTED_MESSAGE,
+          {},
           controller.signal,
         );
       } else {

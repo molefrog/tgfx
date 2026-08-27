@@ -316,11 +316,13 @@ a private streaming chat, Telegram's Stop button cancels the turn associated
 with that exact draft ID. V1 runs one prompt at a time for each bot/chat/topic
 route.
 
-tgfx currently exposes one Telegram slash command:
+tgfx currently exposes three Telegram slash commands:
 
 | Command | Purpose |
 | --- | --- |
 | `/compact` | Compact the active route's FX conversation. |
+| `/model` | Choose a model from the live FX ACP model catalog. |
+| `/cost` | Show FX's local usage and spend over 24-hour, 7-day, or 30-day windows. |
 
 Other commands advertised by ACP `available_commands_update` are recorded but
 not projected into Telegram. They can be cherry-picked later with a deliberate
@@ -334,24 +336,32 @@ The Telegram command surface is explicit rather than a generic ACP projection.
 1. tgfx authorizes the Telegram sender and route before interpreting any
    command. Telegram's visible command menu is discoverability, not an access
    control boundary.
-2. Only `/compact` is accepted. Every other slash command receives an unknown
-   command response and is never downgraded into an ordinary model prompt.
-3. `/compact@my_fx_bot` is normalized by removing this bot's `@username` suffix.
+2. Only `/compact`, `/model`, and `/cost` are accepted. Every other slash
+   command receives an unknown command response and is never downgraded into an
+   ordinary model prompt.
+3. `/compact` invokes the corresponding FX session command. `/model` uses ACP's
+   live model configuration. `/cost` invokes `fx usage --json` on the host and
+   renders the result as Telegram rich text, including a structured model table.
+4. `/cost` defaults to 24 hours. Its only buttons select 24 hours, 7 days, or
+   30 days and edit the existing report. The selected period is inert; there is
+   no refresh action. These totals cover local FX activity and are not scoped to
+   one Telegram route.
+5. `/compact@my_fx_bot` is normalized by removing this bot's `@username` suffix.
    Arguments are rejected with `Usage: /compact`.
-4. tgfx invokes FX with one ACP text block:
+6. tgfx invokes FX with one ACP text block:
    `{ "type": "text", "text": "/compact" }`. It suppresses generic ACP command
    output and owns the Telegram progress UI.
-5. In private streaming mode, tgfx sends a rich draft whose sole block is a
+7. In private streaming mode, tgfx sends a rich draft whose sole block is a
    draft-only Thinking block containing the recommended thinking custom emoji
    and `Compacting conversation...`. Success is persisted visibly with a new
    rich message containing `✓ Conversation compacted`.
-6. With streaming disabled, and in groups, tgfx sends a regular rich paragraph
+8. With streaming disabled, and in groups, tgfx sends a regular rich paragraph
    with the same progress label and edits that message in place to
    `✓ Conversation compacted`.
 
 tgfx uses Telegram `setMyCommands` with a chat-specific scope for each allowed
-chat. It installs only `/compact` without overwriting the bot's default or
-BotFather-managed command list. On a
+chat. It installs only the explicit `/compact`, `/model`, and `/cost` list
+without overwriting the bot's default or BotFather-managed command list. On a
 clean handoff it removes the chat-scoped list it owned, revealing any broader
 Telegram configuration underneath. The menu is available before an FX session
 has been created.
@@ -1424,8 +1434,9 @@ The current official FX behavior matters in several places:
   detail unless doctor/debugging needs an explicit log file.
 - New and loaded FX ACP sessions advertise their slash-command surface through
   `available_commands_update`. tgfx retains that snapshot as session metadata
-  but exposes only its explicitly implemented `/compact` integration, invoked as
-  one text block in `session/prompt`.
+  but exposes only its explicitly implemented command integrations. `/compact`
+  is invoked as one text block in `session/prompt`; `/model` uses ACP model
+  configuration; `/cost` reads FX's separate machine-readable usage report.
 - ACP prompts accept text and embedded resources but not image or audio blocks.
 - ACP-supplied MCP servers are authoritative for that session and can use stdio,
   HTTP, or legacy SSE transports.
