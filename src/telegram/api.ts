@@ -139,6 +139,15 @@ export class TelegramApi {
     return this.call(() => this.api.editMessageReplyMarkup(chatId, messageId, { reply_markup: replyMarkup as never }));
   }
 
+  async editText(
+    chatId: string,
+    messageId: number,
+    text: string,
+    options: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    return this.call(() => this.api.editMessageText(chatId, messageId, text, options as never));
+  }
+
   async setCommands(chatId: string, commands: BotCommand[]): Promise<true> {
     return this.call(() => this.api.setMyCommands(commands, { scope: { type: "chat", chat_id: chatId } }));
   }

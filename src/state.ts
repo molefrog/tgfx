@@ -822,6 +822,13 @@ export class StateStore {
     `).run({ id, now: now() }).changes === 1;
   }
 
+  expireInteractions(routeKey: string, kind: string): number {
+    return this.db.query(`
+      UPDATE telegram_interactions SET state='expired',updated_at=$now
+      WHERE route_key=$route AND kind=$kind AND state='pending'
+    `).run({ route: routeKey, kind, now: now() }).changes;
+  }
+
   prune(): void {
     const retention = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     this.db.transaction(() => {

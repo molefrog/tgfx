@@ -185,7 +185,7 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
-  test("exposes only /compact and uses a Thinking draft while streaming", async () => {
+  test("exposes /compact and /model and uses a Thinking draft while streaming", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-commands-"));
     temporary.push(workspace);
     const paths = workspacePaths(workspace);
@@ -242,7 +242,7 @@ describe("tgfx host pipeline", () => {
     expect(texts).toContain("Unknown command /unknown.");
     expect(texts).toContain("Unknown command /status.");
     const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
-    expect(commands).toEqual(["compact"]);
+    expect(commands).toEqual(["compact", "model"]);
     expect(drafts).toEqual([{
       blocks: [{
         type: "thinking",
@@ -260,6 +260,105 @@ describe("tgfx host pipeline", () => {
     expect(events.filter((entry) => entry.event === "prompt").map((entry) => entry.value.prompt)).toEqual([
       [{ type: "text", text: "/compact" }],
     ]);
+  });
+
+  test("switches the route model through the live /model button flow", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-model-picker-"));
+    temporary.push(workspace);
+    const paths = workspacePaths(workspace);
+    const logPath = join(workspace, "fx-events.jsonl");
+    const fxBinary = await fakeFx(workspace, logPath);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+    };
+    let phase = 0;
+    let providerData = "";
+    let selectionData = "";
+    let pickerReady!: () => void;
+    const picker = new Promise<void>((resolve) => { pickerReady = resolve; });
+    let modelsReady!: () => void;
+    const models = new Promise<void>((resolve) => { modelsReady = resolve; });
+    let selected!: () => void;
+    const selection = new Promise<void>((resolve) => { selected = resolve; });
+    const edits: string[] = [];
+    const callbackAnswers: string[] = [];
+    const callback = (updateId: number, data: string): Update => ({
+      update_id: updateId,
+      callback_query: {
+        id: `callback-${updateId}`,
+        chat_instance: "instance",
+        data,
+        from: { id: 42, is_bot: false, first_name: "Ada" },
+        message: {
+          message_id: 720,
+          date: Math.floor(Date.now() / 1_000),
+          chat: { id: 42, type: "private", first_name: "Ada" },
+          text: "model picker",
+        },
+      },
+    } as Update);
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        if (phase === 0) {
+          phase = 1;
+          return [update(1, 42, "/model")];
+        }
+        if (phase === 1) {
+          phase = 2;
+          await picker;
+          return [callback(2, providerData)];
+        }
+        if (phase === 2) {
+          phase = 3;
+          await models;
+          return [callback(3, selectionData)];
+        }
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => true as const,
+      deleteCommands: async () => true as const,
+      sendText: async (_chat: string, text: string, _topic: string, options?: any) => {
+        if (text.startsWith("Choose a model")) {
+          providerData = options.reply_markup.inline_keyboard.flat()
+            .find((button: { text: string }) => button.text.startsWith("OpenAI ·"))
+            .callback_data;
+          pickerReady();
+        }
+        return { message_id: 720 } as Message.TextMessage;
+      },
+      answerCallback: async (id: string) => { callbackAnswers.push(id); return true as const; },
+      editText: async (_chat: string, _message: number, text: string, options?: any) => {
+        edits.push(text);
+        if (text.startsWith("Choose a model · OpenAI")) {
+          selectionData = options.reply_markup.inline_keyboard.flat()
+            .find((button: { text: string }) => button.text === "gpt-5.6-luna")
+            .callback_data;
+          modelsReady();
+        } else if (text.startsWith("Model changed to")) selected();
+        return true;
+      },
+    } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined,
+    });
+    const running = app.run();
+    await Promise.race([selection, Bun.sleep(5_000).then(() => { throw new Error("model selection timed out"); })]);
+    await app.stop();
+    await running;
+
+    expect(edits[0]).toContain("Choose a model · OpenAI");
+    expect(edits[1]).toBe("Model changed to\n\nopenai/gpt-5.6-luna");
+    expect(callbackAnswers).toEqual(["callback-2", "callback-3"]);
+    const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(events.find((entry) => entry.event === "set_config_option")?.value).toEqual({
+      sessionId: "fake-new-session",
+      configId: "model",
+      value: "openai/gpt-5.6-luna",
+    });
   });
 
   test("edits one regular progress message for /compact when streaming is disabled", async () => {

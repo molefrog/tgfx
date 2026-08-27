@@ -9,6 +9,17 @@ export type FxSessionInfo = {
   replacedPrevious: boolean;
 };
 
+export type FxModelOption = {
+  value: string;
+  name: string;
+  description?: string;
+};
+
+export type FxModelConfig = {
+  currentValue: string;
+  options: FxModelOption[];
+};
+
 export type FxPermissionHandler = (
   request: acp.RequestPermissionRequest,
 ) => Promise<acp.RequestPermissionResponse>;
@@ -67,6 +78,22 @@ function selectValue(options: acp.SessionConfigOption[] | null | undefined, id: 
   return option?.type === "select" ? option.currentValue : undefined;
 }
 
+function modelConfig(options: acp.SessionConfigOption[] | null | undefined): FxModelConfig | undefined {
+  const config = options?.find((candidate) => candidate.id === "model" && candidate.type === "select");
+  if (!config || config.type !== "select") return undefined;
+  return {
+    currentValue: config.currentValue,
+    options: config.options.flatMap((entry) => {
+      const values = "value" in entry ? [entry] : entry.options;
+      return values.map((value) => ({
+        value: value.value,
+        name: value.name,
+        ...(value.description ? { description: value.description } : {}),
+      }));
+    }),
+  };
+}
+
 function rejectPermission(request: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
   const option = request.options.find((item) => item.kind === "reject_once")
     ?? request.options.find((item) => item.kind === "reject_always");
@@ -111,6 +138,7 @@ export class FxRouteSession {
   private ready = Promise.withResolvers<FxSessionInfo>();
   private closeGate = Promise.withResolvers<void>();
   private currentPermission?: FxPermissionHandler;
+  private configOptions: acp.SessionConfigOption[] = [];
   private updateListeners = new Set<(update: acp.SessionUpdate) => void | Promise<void>>();
   private closed = false;
   private connectionError?: unknown;
@@ -166,6 +194,9 @@ export class FxRouteSession {
     const stream = preserveFxExtensions(acp.ndJsonStream(input, output));
     const app = acp.client({ name: "tgfx" })
       .onNotification(acp.methods.client.session.update, async ({ params }) => {
+        if (params.update.sessionUpdate === "config_option_update") {
+          this.configOptions = params.update.configOptions;
+        }
         for (const listener of this.updateListeners) await listener(params.update);
       })
       .onRequest(acp.methods.client.session.requestPermission, async ({ params }) => {
@@ -216,6 +247,7 @@ export class FxRouteSession {
       }
 
       const configOptions = "configOptions" in response ? response.configOptions : undefined;
+      this.configOptions = configOptions ?? [];
       const modes = "modes" in response ? response.modes : undefined;
       const model = selectValue(configOptions, "model") ?? this.options.model ?? "default";
       if (permissionMode === "auto") {
@@ -238,11 +270,12 @@ export class FxRouteSession {
             : [];
           const value = values.includes("auto") ? "auto" : values.includes("code") ? "code" : undefined;
           if (!value) throw new Error("fx ACP does not expose the required auto/code mode");
-          await ctx.request(acp.methods.agent.session.setConfigOption, {
+          const updated = await ctx.request(acp.methods.agent.session.setConfigOption, {
             sessionId: this.sessionId,
             configId: "mode",
             value,
           });
+          this.configOptions = updated.configOptions;
         }
       }
       const sessionId = this.sessionId;
@@ -268,6 +301,34 @@ export class FxRouteSession {
   onUpdate(listener: (update: acp.SessionUpdate) => void | Promise<void>): () => void {
     this.updateListeners.add(listener);
     return () => this.updateListeners.delete(listener);
+  }
+
+  async modelConfig(): Promise<FxModelConfig> {
+    await this.start();
+    if (this.connectionError) throw this.connectionError;
+    const config = modelConfig(this.configOptions);
+    if (!config) throw new Error("fx ACP does not expose model selection");
+    return config;
+  }
+
+  async setModel(value: string): Promise<FxModelConfig> {
+    const current = await this.modelConfig();
+    if (!current.options.some((option) => option.value === value)) {
+      throw new Error(`fx ACP does not offer model ${value}`);
+    }
+    if (!this.context || !this.sessionId) throw new Error("fx ACP session is not ready");
+    const response = await this.context.request(acp.methods.agent.session.setConfigOption, {
+      sessionId: this.sessionId,
+      configId: "model",
+      value,
+    });
+    this.configOptions = response.configOptions;
+    const updated = modelConfig(this.configOptions);
+    if (!updated) throw new Error("fx ACP stopped exposing model selection");
+    if (updated.currentValue !== value) {
+      throw new Error(`fx ACP kept model ${updated.currentValue} instead of ${value}`);
+    }
+    return updated;
   }
 
   async prompt(

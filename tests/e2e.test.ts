@@ -111,10 +111,10 @@ describe("tgfx over the local Telegram simulator", () => {
         blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
       });
       expect(telegram.calls("sendRichMessageDraft")).toHaveLength(0);
-      expect(telegram.calls("setMyCommands").at(-1)?.payload.commands).toEqual([{
-        command: "compact",
-        description: "Compact the 𝒇x conversation",
-      }]);
+      expect(telegram.calls("setMyCommands").at(-1)?.payload.commands).toEqual([
+        { command: "compact", description: "Compact the 𝒇x conversation" },
+        { command: "model", description: "Choose the 𝒇x model" },
+      ]);
     } finally {
       await app.stop();
       await running;

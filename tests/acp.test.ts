@@ -172,6 +172,14 @@ describe("FX ACP transport", () => {
         model: "pinned-model",
         replacedPrevious: true,
       });
+      const models = await session.modelConfig();
+      expect(models.currentValue).toBe("pinned-model");
+      expect(models.options.map((option) => option.value)).toContain("openai/gpt-5.6-sol");
+      const changed = await session.setModel("openai/gpt-5.6-sol");
+      expect(changed.currentValue).toBe("openai/gpt-5.6-sol");
+      await expect(session.setModel("missing/model")).rejects.toThrow(
+        "fx ACP does not offer model missing/model",
+      );
 
       const response = await session.prompt([{ type: "text", text: "PERMISSION" }], {
         permission: async (request) => {
@@ -208,6 +216,11 @@ describe("FX ACP transport", () => {
     }]);
     expect(log.find((entry) => entry.event === "permission_mode")?.value).toBe("auto");
     expect(log.find((entry) => entry.event === "set_mode")?.value.modeId).toBe("code");
+    expect(log.find((entry) => entry.event === "set_config_option")?.value).toEqual({
+      sessionId: "fake-new-session",
+      configId: "model",
+      value: "openai/gpt-5.6-sol",
+    });
     expect(log.find((entry) => entry.event === "permission_result")?.value.outcome.optionId).toBe("allow");
     expect(log.some((entry) => entry.event === "cancel")).toBeTrue();
     expect(log.some((entry) => entry.event === "close")).toBeTrue();

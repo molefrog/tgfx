@@ -7,6 +7,14 @@ import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
 import { PeerDraftLimiter } from "./telegram/draft-scheduler";
 import {
+  closedModelPicker,
+  failedModelSelection,
+  modelPicker,
+  providerPicker,
+  selectedModel,
+  type ModelPickerData,
+} from "./telegram/model-picker";
+import {
   createDraftId,
   isRetryableTelegramError,
   recoverOutbox,
@@ -36,6 +44,9 @@ import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
 const COMMANDS: BotCommand[] = [{
   command: "compact",
   description: "Compact the 𝒇x conversation",
+}, {
+  command: "model",
+  description: "Choose the 𝒇x model",
 }];
 const THINKING_EMOJI = {
   type: "custom_emoji" as const,
@@ -387,7 +398,8 @@ export class TgfxApp {
         authorized,
       });
       if (id !== undefined) {
-        const controlCallback = callback.data?.startsWith("fxp:") || callback.data?.startsWith("mcp:");
+        const controlCallback = callback.data?.startsWith("fxp:")
+          || callback.data?.startsWith("mcp:");
         if (controlCallback) await this.dispatch(id);
         else this.enqueue(id, route.key);
       }
@@ -535,12 +547,20 @@ export class TgfxApp {
     if (command && !command.addressed) return;
 
     if (command) {
-      if (command.name !== "compact") {
+      if (command.name !== "compact" && command.name !== "model") {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
       if (command.args) {
-        await this.options.telegram.sendText(message.route.chatId, "Usage: /compact", message.route.topicId);
+        await this.options.telegram.sendText(
+          message.route.chatId,
+          `Usage: /${command.name}`,
+          message.route.topicId,
+        );
+        return;
+      }
+      if (command.name === "model") {
+        await this.openModelPicker(message);
         return;
       }
       await this.runCompact(row, message);
@@ -548,6 +568,43 @@ export class TgfxApp {
     }
 
     await this.runTurn(row, message, makePrompt(message, undefined, await this.adminContext(message.route)));
+  }
+
+  private async openModelPicker(message: InboundMessage): Promise<void> {
+    const config = await (await this.session(message.route)).modelConfig();
+    if (!config.options.length) {
+      await this.options.telegram.sendText(
+        message.route.chatId,
+        "fx did not return any selectable models.",
+        message.route.topicId,
+      );
+      return;
+    }
+    const id = crypto.randomUUID().replaceAll("-", "");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const data: ModelPickerData = { ...config, interactionId: id };
+    this.state.expireInteractions(message.route.key, "model_picker");
+    this.state.createInteraction({
+      id,
+      botId: this.options.bot.id,
+      routeKey: message.route.key,
+      kind: "model_picker",
+      payload: config,
+      expiresAt,
+    });
+    try {
+      const view = providerPicker(data);
+      const sent = await this.options.telegram.sendText(
+        message.route.chatId,
+        view.text,
+        message.route.topicId,
+        { reply_markup: view.replyMarkup },
+      );
+      this.registerBotMessage(message.route, String(sent.message_id));
+    } catch (error) {
+      this.state.expireInteraction(id);
+      throw error;
+    }
   }
 
   private async adminCapabilities(chatId: string): Promise<AdminCapability[]> {
@@ -678,6 +735,88 @@ export class TgfxApp {
     const [kind, id, value] = callback.data.split(":", 3);
     const inApprovalsRoute = route.chatId === this.config.approvals.chatId
       && route.topicId === this.config.approvals.topicId;
+    if (kind === "model" && id && value) {
+      const interaction = this.state.interaction(id);
+      if (!interaction
+        || interaction.kind !== "model_picker"
+        || interaction.route_key !== route.key
+        || interaction.state !== "pending"
+        || Date.parse(interaction.expires_at) <= Date.now()) {
+        if (interaction?.state === "pending") this.state.expireInteraction(id);
+        await this.options.telegram.answerCallback(callback.id, "This model picker expired");
+        return;
+      }
+      const stored = JSON.parse(interaction.payload_json) as Omit<ModelPickerData, "interactionId">;
+      const data: ModelPickerData = { ...stored, interactionId: id };
+      if (value === "n") {
+        await this.options.telegram.answerCallback(callback.id);
+        return;
+      }
+      if (value === "x") {
+        this.state.expireInteraction(id);
+        const view = closedModelPicker();
+        await this.options.telegram.answerCallback(callback.id, "Closed");
+        await this.options.telegram.editText(
+          route.chatId,
+          callback.message.message_id,
+          view.text,
+          { reply_markup: view.replyMarkup },
+        ).catch(() => undefined);
+        return;
+      }
+      let view;
+      const [action, first, second] = value.split(".", 3);
+      if (action === "p") view = providerPicker(data, Number(first));
+      else if (action === "v") view = modelPicker(data, Number(first), Number(second));
+      else if (action === "s") {
+        const model = data.options[Number(first)];
+        if (!model || !this.state.resolveInteraction(id, { model: model.value })) {
+          await this.options.telegram.answerCallback(callback.id, "This model picker expired");
+          return;
+        }
+        await this.options.telegram.answerCallback(callback.id, "Changing model");
+        try {
+          const updated = await (await this.session(route)).setModel(model.value);
+          const selected = updated.options.find((option) => option.value === updated.currentValue) ?? model;
+          view = selectedModel(selected);
+          this.log({
+            event: "session.model_changed",
+            message: `${this.label(route.chatId, route.topicId)} · model changed · ${updated.currentValue}`,
+            chat: route.chatId,
+            topic: route.topicId,
+            model: updated.currentValue,
+          });
+        } catch (error) {
+          view = failedModelSelection(model);
+          this.log({
+            event: "session.model_change_failed",
+            message: `${this.label(route.chatId, route.topicId)} · model change failed · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+            chat: route.chatId,
+            topic: route.topicId,
+            model: model.value,
+          });
+        }
+        await this.options.telegram.editText(
+          route.chatId,
+          callback.message.message_id,
+          view.text,
+          { reply_markup: view.replyMarkup },
+        );
+        return;
+      }
+      if (!view) {
+        await this.options.telegram.answerCallback(callback.id, "This model choice is no longer available");
+        return;
+      }
+      await this.options.telegram.answerCallback(callback.id);
+      await this.options.telegram.editText(
+        route.chatId,
+        callback.message.message_id,
+        view.text,
+        { reply_markup: view.replyMarkup },
+      );
+      return;
+    }
     if (kind === "mcp" && id && (value === "approve" || value === "deny")) {
       if (!inApprovalsRoute) {
         await this.options.telegram.answerCallback(callback.id, "This approval belongs to the approvals chat");

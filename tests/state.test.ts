@@ -152,6 +152,26 @@ describe("SQLite operational journal", () => {
     state.close();
   });
 
+  test("expires only matching pending interactions on a route", () => {
+    const state = store();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    state.createInteraction({
+      id: "old-picker", botId: "100", routeKey: "100:42:0", kind: "model_picker", payload: {}, expiresAt,
+    });
+    state.createInteraction({
+      id: "other-route", botId: "100", routeKey: "100:43:0", kind: "model_picker", payload: {}, expiresAt,
+    });
+    state.createInteraction({
+      id: "permission", botId: "100", routeKey: "100:42:0", kind: "fx_permission", payload: {}, expiresAt,
+    });
+
+    expect(state.expireInteractions("100:42:0", "model_picker")).toBe(1);
+    expect(state.interaction("old-picker")?.state).toBe("expired");
+    expect(state.interaction("other-route")?.state).toBe("pending");
+    expect(state.interaction("permission")?.state).toBe("pending");
+    state.close();
+  });
+
   test("requires explicit handoff for unfinished work and preserves unknown effect safety", () => {
     const state = store();
     const id = state.ingestUpdate({

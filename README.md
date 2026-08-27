@@ -62,9 +62,11 @@ bot in Telegram to enable them, demote it to revoke; destructive actions still
 require a one-tap approval card in the approvals chat. `tgfx doctor` reports
 the bot's current rights in every allowlisted group.
 
-Telegram currently exposes one slash command: `/compact`. It compacts the active
-𝒇x conversation and shows a purpose-built progress state. Other ACP-advertised
-commands are not projected into Telegram yet.
+Telegram exposes `/compact` and `/model`. `/compact` compacts the active 𝒇x
+conversation and shows a purpose-built progress state. `/model` reads the live
+model catalog from the route's FX session and switches that session through a
+provider-first, paginated button picker. Other ACP-advertised commands are not
+projected into Telegram yet.
 
 Private chats stream complete Rich Message snapshots through Telegram's draft
 API. Each draft enables Telegram's Stop button, which cancels the matching active

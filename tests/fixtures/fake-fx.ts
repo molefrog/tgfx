@@ -8,7 +8,19 @@ const record = (event: string, value: unknown = {}) => {
   if (logPath) appendFileSync(logPath, `${JSON.stringify({ event, value })}\n`);
 };
 const modelIndex = process.argv.indexOf("--model");
-const model = modelIndex >= 0 ? process.argv[modelIndex + 1] ?? "fake-default" : "fake-default";
+let model = modelIndex >= 0 ? process.argv[modelIndex + 1] ?? "fake-default" : "fake-default";
+const availableModels = [...new Set([
+  model,
+  "anthropic/claude-opus-5",
+  "anthropic/claude-sonnet-5",
+  "openai/gpt-5.6-luna",
+  "openai/gpt-5.6-luna-fast",
+  "openai/gpt-5.6-sol",
+  "openai/gpt-5.6-sol-fast",
+  "openai/gpt-5.6-terra",
+  "openai/gpt-5.6-terra-fast",
+  "openai/gpt-5.5",
+])];
 let cancelled: (() => void) | undefined;
 
 const sessionState = () => ({
@@ -24,7 +36,7 @@ const sessionState = () => ({
     id: "model",
     name: "Model",
     currentValue: model,
-    options: [{ value: model, name: model }],
+    options: availableModels.map((value) => ({ value, name: value })),
   }],
 });
 
@@ -61,6 +73,14 @@ const app = acp.agent({ name: "fake-fx" })
   .onRequest(acp.methods.agent.session.setMode, ({ params }) => {
     record("set_mode", params);
     return {};
+  })
+  .onRequest(acp.methods.agent.session.setConfigOption, ({ params }) => {
+    record("set_config_option", params);
+    if (params.configId !== "model" || typeof params.value !== "string" || !availableModels.includes(params.value)) {
+      throw new Error("unsupported fake config option");
+    }
+    model = params.value;
+    return { configOptions: sessionState().configOptions };
   })
   .onRequest(acp.methods.agent.session.prompt, async (context) => {
     record("prompt", context.params);
