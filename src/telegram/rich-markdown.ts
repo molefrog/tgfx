@@ -311,6 +311,23 @@ function blocksFromTokens(tokens: Token[]): RichBlock[] {
   return blocks;
 }
 
+function spaceAdjacentParagraphs(blocks: RichBlock[]): RichBlock[] {
+  const spaced: RichBlock[] = [];
+  for (const block of blocks) {
+    const previous = spaced.at(-1);
+    if (
+      previous?.type === "paragraph"
+      && block.type === "paragraph"
+      && previous.text !== "\u00a0"
+      && block.text !== "\u00a0"
+    ) {
+      spaced.push({ type: "paragraph", text: "\u00a0" });
+    }
+    spaced.push(block);
+  }
+  return spaced;
+}
+
 /**
  * Converts the complete Markdown accumulated so far into Telegram rich blocks.
  * Calling this again with the next snapshot is intentional: incomplete Markdown
@@ -319,7 +336,10 @@ function blocksFromTokens(tokens: Token[]): RichBlock[] {
 export function markdownToRichBlocks(markdown: string): RichBlock[] {
   if (!markdown) return [];
   try {
-    return blocksFromTokens(markdownParser.lexer(markdown));
+    // Telegram clients currently give adjacent paragraph blocks no visible
+    // margin and collapse repeated newlines inside one paragraph. A non-empty
+    // NBSP-only paragraph survives rendering as a visible spacer.
+    return spaceAdjacentParagraphs(blocksFromTokens(markdownParser.lexer(markdown)));
   } catch {
     return [{ type: "paragraph", text: markdown }];
   }

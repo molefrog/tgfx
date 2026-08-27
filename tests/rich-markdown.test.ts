@@ -59,6 +59,18 @@ describe("streaming Markdown rich blocks", () => {
     }]);
   });
 
+  test("separates adjacent Markdown paragraphs with NBSP spacer blocks", () => {
+    expect(markdownToRichBlocks(
+      "First **bold** paragraph.\n\nSecond *italic* paragraph.\n\nThird paragraph.",
+    )).toEqual([
+      { type: "paragraph", text: ["First ", { type: "bold", text: "bold" }, " paragraph."] },
+      { type: "paragraph", text: "\u00a0" },
+      { type: "paragraph", text: ["Second ", { type: "italic", text: "italic" }, " paragraph."] },
+      { type: "paragraph", text: "\u00a0" },
+      { type: "paragraph", text: "Third paragraph." },
+    ]);
+  });
+
   test("renders all six heading sizes", () => {
     const markdown = [1, 2, 3, 4, 5, 6].map((size) => `${"#".repeat(size)} H${size}`).join("\n\n");
     expect(markdownToRichBlocks(markdown)).toEqual(
@@ -154,6 +166,7 @@ describe("streaming Markdown rich blocks", () => {
   test("skips separators, footer HTML, and other raw block HTML", () => {
     expect(markdownToRichBlocks("before\n\n---\n\n<footer>diagnostic</footer>\n\n<div>raw block</div>\n\nafter")).toEqual([
       { type: "paragraph", text: "before" },
+      { type: "paragraph", text: "\u00a0" },
       { type: "paragraph", text: "after" },
     ]);
   });

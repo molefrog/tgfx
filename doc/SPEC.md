@@ -924,6 +924,9 @@ The primary renderer maps the ACP timeline to Telegram Rich Messages:
 
 - accumulated Markdown is reparsed on every frame into headings, rich
   paragraphs, lists, block quotations, preformatted code, math, and tables;
+- adjacent Markdown paragraphs receive a non-breaking-space-only spacer block
+  because Telegram clients render neighboring paragraph blocks without visible
+  margins and collapse repeated newlines inside one paragraph;
 - one draft-only `tg-thinking` block is shown only before any real output exists;
 - only terminal tool calls are rendered, in their first-observed ACP order;
 - consecutive tools form a details block. Only the trailing group uses the
