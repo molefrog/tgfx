@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { modelPicker, providerPicker, selectedModel, type ModelPickerData } from "../src/telegram/model-picker";
+import {
+  modelPicker,
+  providerIconsFromStickerSet,
+  providerPicker,
+  selectedModel,
+  type ModelPickerData,
+} from "../src/telegram/model-picker";
 
 const values = [
   "anthropic/claude-opus-5",
@@ -26,25 +32,45 @@ const data: ModelPickerData = {
 };
 
 describe("model picker", () => {
-  test("paginates live providers in a two-column grid", () => {
-    const first = providerPicker(data);
+  test("paginates live providers with optional custom icons in a two-column grid", () => {
+    const icons = providerIconsFromStickerSet(Array.from(
+      { length: 18 },
+      (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
+    ));
+    const first = providerPicker(data, 0, icons);
     expect(first.text).toContain("Current: gpt-5.6-sol");
     expect(first.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("OpenAI · 7");
     expect(first.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("Next ›");
+    expect(first.replyMarkup.inline_keyboard.flat().find((button) => button.text.startsWith("Anthropic")))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-2" });
 
-    const second = providerPicker(data, 1);
+    const second = providerPicker(data, 1, icons);
     expect(second.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("xAI · 1");
     expect(second.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("‹ Previous");
     expect(second.replyMarkup.inline_keyboard.flat().every((button) => button.callback_data.length <= 64)).toBeTrue();
-    expect(second.replyMarkup.inline_keyboard.flat().some((button) => "icon_custom_emoji_id" in button)).toBeFalse();
+    expect(second.replyMarkup.inline_keyboard.flat().find((button) => button.text.startsWith("xAI")))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-8" });
+
+    const plain = providerPicker(data, 1);
+    expect(plain.replyMarkup.inline_keyboard.flat().some((button) => "icon_custom_emoji_id" in button)).toBeFalse();
   });
 
   test("paginates models, marks the current value, and renders a terminal selection", () => {
-    const first = modelPicker(data, 1);
+    const icons = providerIconsFromStickerSet(Array.from(
+      { length: 18 },
+      (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
+    ));
+    const first = modelPicker(data, 1, 0, icons);
     expect(first?.text).toContain("Choose a model · OpenAI");
     expect(first?.replyMarkup.inline_keyboard[0]?.[0]?.text).toBe("gpt-5.6-luna");
     expect(first?.replyMarkup.inline_keyboard[2]?.[0]?.text).toBe("Current · gpt-5.6-sol");
     expect(first?.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("Next ›");
+    expect(first?.replyMarkup.inline_keyboard.slice(0, 6).flat().every((button) =>
+      button.icon_custom_emoji_id === "emoji-7"
+    )).toBeTrue();
+
+    const plain = modelPicker(data, 1);
+    expect(plain?.replyMarkup.inline_keyboard.flat().some((button) => "icon_custom_emoji_id" in button)).toBeFalse();
 
     const selected = selectedModel(data.options[3]!);
     expect(selected.text).toBe("Model changed to\n\nopenai/gpt-5.6-sol");
@@ -53,5 +79,36 @@ describe("model picker", () => {
 
   test("rejects an unknown provider index", () => {
     expect(modelPicker(data, 999)).toBeUndefined();
+  });
+
+  test("uses readable names for providers in the current FX catalog", () => {
+    const icons = providerIconsFromStickerSet(Array.from(
+      { length: 31 },
+      (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
+    ));
+    const currentProviders: ModelPickerData = {
+      ...data,
+      options: [
+        { value: "kwaipilot/kat-coder-pro-v2.5", name: "kwaipilot/kat-coder-pro-v2.5" },
+        { value: "thinkingmachines/inkling", name: "thinkingmachines/inkling" },
+        { value: "inception/mercury-2", name: "inception/mercury-2" },
+        { value: "arcee-ai/trinity-large-thinking", name: "arcee-ai/trinity-large-thinking" },
+      ],
+    };
+    const buttons = providerPicker(currentProviders, 0, icons).replyMarkup.inline_keyboard.flat();
+    expect(buttons.map((button) => button.text)).toEqual(expect.arrayContaining([
+        "KwaiPilot · 1",
+        "Thinking Machines · 1",
+        "Inception Labs · 1",
+        "Arcee AI · 1",
+      ]));
+    expect(buttons.find((button) => button.text.startsWith("KwaiPilot")))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-19" });
+    expect(buttons.find((button) => button.text.startsWith("Inception Labs")))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-25" });
+    expect(buttons.find((button) => button.text.startsWith("Arcee AI")))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-24" });
+    expect(buttons.find((button) => button.text.startsWith("Thinking Machines")))
+      .not.toHaveProperty("icon_custom_emoji_id");
   });
 });

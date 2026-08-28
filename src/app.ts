@@ -12,9 +12,12 @@ import {
   closedModelPicker,
   failedModelSelection,
   modelPicker,
+  providerIconsFromStickerSet,
   providerPicker,
   selectedModel,
   type ModelPickerData,
+  type ModelPickerView,
+  type ProviderIconMap,
 } from "./telegram/model-picker";
 import {
   createDraftId,
@@ -67,6 +70,7 @@ const COMPACTING_MESSAGE: InputRichMessageWithoutUpload = {
 const COMPACTED_MESSAGE: InputRichMessageWithoutUpload = {
   blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
 };
+const PROVIDER_ICON_PACK = "ai_provider_labs_by_fxharness_bot";
 
 type StopCapableUpdate = Update & {
   stopped_message_generation?: {
@@ -140,6 +144,8 @@ export class TgfxApp {
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
+  private customModelIconsEnabled: boolean;
+  private providerIcons?: Promise<ProviderIconMap>;
   private pollTask?: Promise<void>;
   private stopping = false;
   private stopTask?: Promise<void>;
@@ -159,6 +165,7 @@ export class TgfxApp {
     log?: (event: TgfxLogEvent) => void;
   }) {
     this.config = options.config;
+    this.customModelIconsEnabled = options.config.modelPicker?.customIcons ?? true;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
   }
@@ -602,18 +609,55 @@ export class TgfxApp {
       expiresAt,
     });
     try {
-      const view = providerPicker(data);
-      const sent = await this.options.telegram.sendText(
-        message.route.chatId,
-        view.text,
-        message.route.topicId,
-        { reply_markup: view.replyMarkup },
-      );
+      let view = providerPicker(data, 0, await this.modelProviderIcons(true));
+      let sent;
+      try {
+        sent = await this.options.telegram.sendText(
+          message.route.chatId,
+          view.text,
+          message.route.topicId,
+          { reply_markup: view.replyMarkup },
+        );
+      } catch (error) {
+        if (!this.hasCustomModelIcons(view)) throw error;
+        this.disableCustomModelIcons(error);
+        view = providerPicker(data);
+        sent = await this.options.telegram.sendText(
+          message.route.chatId,
+          view.text,
+          message.route.topicId,
+          { reply_markup: view.replyMarkup },
+        );
+      }
       this.registerBotMessage(message.route, String(sent.message_id));
     } catch (error) {
       this.state.expireInteraction(id);
       throw error;
     }
+  }
+
+  private async modelProviderIcons(refresh = false): Promise<ProviderIconMap> {
+    if (!this.customModelIconsEnabled) return {};
+    if (refresh) this.providerIcons = undefined;
+    this.providerIcons ??= Promise.resolve()
+      .then(() => this.options.telegram.getStickerSet(PROVIDER_ICON_PACK))
+      .then((set) => providerIconsFromStickerSet(set.stickers))
+      .catch((error) => {
+        this.log(`Could not load ${PROVIDER_ICON_PACK}; using plain model buttons: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
+        return {};
+      });
+    return this.providerIcons;
+  }
+
+  private hasCustomModelIcons(view: ModelPickerView): boolean {
+    return view.replyMarkup.inline_keyboard.some((row) =>
+      row.some((button) => button.icon_custom_emoji_id !== undefined)
+    );
+  }
+
+  private disableCustomModelIcons(error: unknown): void {
+    this.customModelIconsEnabled = false;
+    this.log(`Telegram rejected model picker custom icons; using plain buttons: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
   }
 
   private async costView(period: FxUsagePeriod): Promise<CostReportView> {
@@ -837,8 +881,10 @@ export class TgfxApp {
       }
       let view;
       const [action, first, second] = value.split(".", 3);
-      if (action === "p") view = providerPicker(data, Number(first));
-      else if (action === "v") view = modelPicker(data, Number(first), Number(second));
+      if (action === "p") view = providerPicker(data, Number(first), await this.modelProviderIcons());
+      else if (action === "v") {
+        view = modelPicker(data, Number(first), Number(second), await this.modelProviderIcons());
+      }
       else if (action === "s") {
         const model = data.options[Number(first)];
         if (!model || !this.state.resolveInteraction(id, { model: model.value })) {
@@ -880,12 +926,27 @@ export class TgfxApp {
         return;
       }
       await this.options.telegram.answerCallback(callback.id);
-      await this.options.telegram.editText(
-        route.chatId,
-        callback.message.message_id,
-        view.text,
-        { reply_markup: view.replyMarkup },
-      );
+      try {
+        await this.options.telegram.editText(
+          route.chatId,
+          callback.message.message_id,
+          view.text,
+          { reply_markup: view.replyMarkup },
+        );
+      } catch (error) {
+        if (!this.hasCustomModelIcons(view)) throw error;
+        this.disableCustomModelIcons(error);
+        const plain = action === "p"
+          ? providerPicker(data, Number(first))
+          : action === "v" ? modelPicker(data, Number(first), Number(second)) : undefined;
+        if (!plain) throw error;
+        await this.options.telegram.editText(
+          route.chatId,
+          callback.message.message_id,
+          plain.text,
+          { reply_markup: plain.replyMarkup },
+        );
+      }
       return;
     }
     if (kind === "mcp" && id && (value === "approve" || value === "deny")) {

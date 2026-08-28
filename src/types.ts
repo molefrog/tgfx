@@ -31,6 +31,9 @@ export type TgfxConfig = {
     topicId: DecimalId;
   };
   renderer: RendererConfig;
+  modelPicker?: {
+    customIcons: boolean;
+  };
 };
 
 export type Route = {

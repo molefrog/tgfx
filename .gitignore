@@ -11,3 +11,4 @@ prototypes/
 .DS_Store
 coverage/
 *.tgz
+/telegram-provider-emoji/

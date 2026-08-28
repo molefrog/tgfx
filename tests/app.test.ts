@@ -262,7 +262,7 @@ describe("tgfx host pipeline", () => {
     ]);
   });
 
-  test("switches the route model through the live /model button flow", async () => {
+  test("switches the route model through the live /model button flow with custom icons disabled", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-model-picker-"));
     temporary.push(workspace);
     const paths = workspacePaths(workspace);
@@ -272,8 +272,10 @@ describe("tgfx host pipeline", () => {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
       renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      modelPicker: { customIcons: false },
     };
     let phase = 0;
+    let packLookups = 0;
     let providerData = "";
     let selectionData = "";
     let pickerReady!: () => void;
@@ -320,11 +322,16 @@ describe("tgfx host pipeline", () => {
       },
       setCommands: async () => true as const,
       deleteCommands: async () => true as const,
+      getStickerSet: async () => {
+        packLookups += 1;
+        throw new Error("disabled custom icons must not load the pack");
+      },
       sendText: async (_chat: string, text: string, _topic: string, options?: any) => {
         if (text.startsWith("Choose a model")) {
-          providerData = options.reply_markup.inline_keyboard.flat()
-            .find((button: { text: string }) => button.text.startsWith("OpenAI ·"))
-            .callback_data;
+          const providerButton = options.reply_markup.inline_keyboard.flat()
+            .find((button: { text: string }) => button.text.startsWith("OpenAI ·"));
+          expect(providerButton).not.toHaveProperty("icon_custom_emoji_id");
+          providerData = providerButton.callback_data;
           pickerReady();
         }
         return { message_id: 720 } as Message.TextMessage;
@@ -333,9 +340,10 @@ describe("tgfx host pipeline", () => {
       editText: async (_chat: string, _message: number, text: string, options?: any) => {
         edits.push(text);
         if (text.startsWith("Choose a model · OpenAI")) {
-          selectionData = options.reply_markup.inline_keyboard.flat()
-            .find((button: { text: string }) => button.text === "gpt-5.6-luna")
-            .callback_data;
+          const modelButton = options.reply_markup.inline_keyboard.flat()
+            .find((button: { text: string }) => button.text === "gpt-5.6-luna");
+          expect(modelButton).not.toHaveProperty("icon_custom_emoji_id");
+          selectionData = modelButton.callback_data;
           modelsReady();
         } else if (text.startsWith("Model changed to")) selected();
         return true;
@@ -352,6 +360,7 @@ describe("tgfx host pipeline", () => {
 
     expect(edits[0]).toContain("Choose a model · OpenAI");
     expect(edits[1]).toBe("Model changed to\n\nopenai/gpt-5.6-luna");
+    expect(packLookups).toBe(0);
     expect(callbackAnswers).toEqual(["callback-2", "callback-3"]);
     const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(events.find((entry) => entry.event === "set_config_option")?.value).toEqual({

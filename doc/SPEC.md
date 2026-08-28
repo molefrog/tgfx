@@ -340,7 +340,9 @@ The Telegram command surface is explicit rather than a generic ACP projection.
    command receives an unknown command response and is never downgraded into an
    ordinary model prompt.
 3. `/compact` invokes the corresponding FX session command. `/model` uses ACP's
-   live model configuration. `/cost` invokes `fx usage --json` on the host and
+   live model configuration. Its provider and model buttons use the public
+   `tgfx icons` custom emoji set when `modelPicker.customIcons` is true, then retry without
+   icons if Telegram rejects them. `/cost` invokes `fx usage --json` on the host and
    renders the result as Telegram rich text, including a structured model table.
 4. `/cost` defaults to 24 hours. Its only buttons select 24 hours, 7 days, or
    30 days and edit the existing report. The selected period is inert; there is
@@ -418,6 +420,9 @@ automation, not for a second large configuration system.
     "collapseTools": true,
     "expandStreamingTools": false,
     "updateEveryMs": 250
+  },
+  "modelPicker": {
+    "customIcons": true
   }
 }
 ```

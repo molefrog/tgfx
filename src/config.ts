@@ -31,6 +31,9 @@ export const configSchema = z.object({
     expandStreamingTools: false,
     updateEveryMs: 250,
   }),
+  modelPicker: z.object({
+    customIcons: z.boolean().default(true),
+  }).default({ customIcons: true }),
 }) satisfies z.ZodType<TgfxConfig>;
 
 export type WorkspacePaths = {

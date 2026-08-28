@@ -18,6 +18,7 @@ function config(): TgfxConfig {
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
     renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 250 },
+    modelPicker: { customIcons: true },
   };
 }
 
@@ -53,6 +54,15 @@ describe("workspace config", () => {
       renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 250 },
     }).renderer;
     expect(renderer.expandStreamingTools).toBeFalse();
+  });
+
+  test("enables model picker icons by default and allows disabling them", () => {
+    const { modelPicker: _modelPicker, ...legacy } = config();
+    expect(configSchema.parse(legacy).modelPicker.customIcons).toBeTrue();
+    expect(configSchema.parse({
+      ...config(),
+      modelPicker: { customIcons: false },
+    }).modelPicker.customIcons).toBeFalse();
   });
 
   test("redacts tokens both standalone and inside Bot API file URLs", () => {

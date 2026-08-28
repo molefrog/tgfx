@@ -218,6 +218,7 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
     },
     approvals: { chatId: approvalsChatId, topicId: "0" },
     renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: false, updateEveryMs: 250 },
+    modelPicker: { customIcons: true },
   };
   await telegram.sendText(
     config.approvals.chatId,

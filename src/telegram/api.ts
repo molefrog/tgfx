@@ -64,6 +64,8 @@ export class TelegramApi {
 
   getWebhookInfo() { return this.call(() => this.api.getWebhookInfo()); }
 
+  getStickerSet(name: string) { return this.call(() => this.api.getStickerSet(name)); }
+
   async getUpdates(offset: number, timeout = 25, signal?: AbortSignal): Promise<Update[]> {
     return this.call(() => this.api.getUpdates({
         offset,
