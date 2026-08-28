@@ -3,9 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
-import sharp from "sharp";
 import { StateStore } from "../src/state";
 import type { InboundMessage } from "../src/types";
+
+const ONE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -87,9 +91,7 @@ describe("Telegram MCP actions", () => {
     state.registerInbound(inbound);
     state.close();
     await writeFile(join(workspace, "result.txt"), "workspace result");
-    await sharp({
-      create: { width: 64, height: 32, channels: 4, background: { r: 20, g: 180, b: 80, alpha: 1 } },
-    }).png().toFile(join(workspace, "custom.png"));
+    await writeFile(join(workspace, "custom.png"), ONE_PIXEL_PNG);
 
     let nextMessageId = 100;
     const requests: Array<{ method: string; body: string }> = [];

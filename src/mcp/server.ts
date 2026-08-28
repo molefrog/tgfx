@@ -3,7 +3,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
-import sharp from "sharp";
 import * as z from "zod/v4";
 import { StateStore } from "../state";
 import { adminCapabilitiesForMember, TelegramApi } from "../telegram/api";
@@ -84,11 +83,11 @@ function effectKey(routeKey: string, contextRef: string, tool: string, args: unk
 async function stickerWebp(path: string): Promise<Uint8Array> {
   const maxBytes = 512 * 1024;
   for (const quality of [90, 80, 70, 60, 50, 40]) {
-    const bytes = await sharp(path)
-      .rotate()
+    const bytes = await Bun.file(path)
+      .image()
       .resize(512, 512, { fit: "inside", withoutEnlargement: false })
       .webp({ quality })
-      .toBuffer();
+      .bytes();
     if (bytes.byteLength <= maxBytes) return bytes;
   }
   throw new Error("The custom image could not be compressed below Telegram's 512 KB static sticker limit.");
