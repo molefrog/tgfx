@@ -327,7 +327,7 @@ describe("tgfx host pipeline", () => {
         throw new Error("disabled custom icons must not load the pack");
       },
       sendText: async (_chat: string, text: string, _topic: string, options?: any) => {
-        if (text.startsWith("Choose a model")) {
+        if (text.startsWith("Choose model:")) {
           expect(options.parse_mode).toBe("HTML");
           const providerButton = options.reply_markup.inline_keyboard.flat()
             .find((button: { text: string }) => button.text.startsWith("OpenAI ·"));
@@ -340,7 +340,7 @@ describe("tgfx host pipeline", () => {
       answerCallback: async (id: string) => { callbackAnswers.push(id); return true as const; },
       editText: async (_chat: string, _message: number, text: string, options?: any) => {
         edits.push(text);
-        if (text.startsWith("Choose a model · OpenAI")) {
+        if (text.startsWith("Choose model:")) {
           expect(options.parse_mode).toBe("HTML");
           const modelButton = options.reply_markup.inline_keyboard.flat()
             .find((button: { text: string }) => button.text === "gpt-5.6-luna");
@@ -360,7 +360,7 @@ describe("tgfx host pipeline", () => {
     await app.stop();
     await running;
 
-    expect(edits[0]).toContain("Choose a model · OpenAI");
+    expect(edits[0]).toBe("Choose model: <b>fake-default</b>");
     expect(edits[1]).toBe("Model changed to\n\n<b>openai/gpt-5.6-luna</b>");
     expect(packLookups).toBe(0);
     expect(callbackAnswers).toEqual(["callback-2", "callback-3"]);

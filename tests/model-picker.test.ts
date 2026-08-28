@@ -38,7 +38,7 @@ describe("model picker", () => {
       (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
     ));
     const first = providerPicker(data, 0, icons);
-    expect(first.text).toContain("Current: <b>gpt-5.6-sol</b>");
+    expect(first.text).toBe("Choose model: <b>gpt-5.6-sol</b>");
     expect(first.text).not.toContain("choose a provider");
     expect(first.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("OpenAI · 7");
     expect(first.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("Next ›");
@@ -62,7 +62,7 @@ describe("model picker", () => {
       (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
     ));
     const first = modelPicker(data, 1, 0, icons);
-    expect(first?.text).toContain("Choose a model · OpenAI");
+    expect(first?.text).toBe("Choose model: <b>gpt-5.6-sol</b>");
     expect(first?.replyMarkup.inline_keyboard[0]?.[0]?.text).toBe("gpt-5.6-luna");
     expect(first?.replyMarkup.inline_keyboard[2]?.[0]?.text).toBe("Current · gpt-5.6-sol");
     expect(first?.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("Next ›");

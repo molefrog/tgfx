@@ -229,8 +229,8 @@ function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-function currentLine(data: ModelPickerData): string {
-  return `Current: <b>${escapeHtml(currentLabel(data))}</b>`;
+function pickerTitle(data: ModelPickerData): string {
+  return `Choose model: <b>${escapeHtml(currentLabel(data))}</b>`;
 }
 
 function navigation(
@@ -266,11 +266,7 @@ export function providerPicker(
     };
   });
   return {
-    text: [
-      "Choose a model",
-      "",
-      currentLine(data),
-    ].join("\n"),
+    text: pickerTitle(data),
     replyMarkup: {
       inline_keyboard: [
         ...rowsOfTwo(buttons),
@@ -294,11 +290,7 @@ export function modelPicker(
   const visible = provider.models.slice(page * MODELS_PER_PAGE, (page + 1) * MODELS_PER_PAGE);
   const icon = icons[provider.id];
   return {
-    text: [
-      `Choose a model · ${escapeHtml(provider.name)}`,
-      "",
-      currentLine(data),
-    ].join("\n"),
+    text: pickerTitle(data),
     replyMarkup: {
       inline_keyboard: [
         ...visible.map((model) => [{
