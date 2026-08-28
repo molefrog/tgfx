@@ -83,7 +83,7 @@ describe("model picker", () => {
 
   test("uses readable names for providers in the current FX catalog", () => {
     const icons = providerIconsFromStickerSet(Array.from(
-      { length: 31 },
+      { length: 35 },
       (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
     ));
     const currentProviders: ModelPickerData = {
@@ -109,7 +109,7 @@ describe("model picker", () => {
     expect(buttons.find((button) => button.text.startsWith("Arcee AI")))
       .toMatchObject({ icon_custom_emoji_id: "emoji-24" });
     expect(buttons.find((button) => button.text.startsWith("Thinking Machines")))
-      .not.toHaveProperty("icon_custom_emoji_id");
+      .toMatchObject({ icon_custom_emoji_id: "emoji-33" });
   });
 
   test("infers providers when FX returns narrowed unqualified model values", () => {
@@ -134,5 +134,17 @@ describe("model picker", () => {
       .toMatchObject({ icon_custom_emoji_id: "emoji-7" });
     expect(buttons.find((button) => button.text === "DeepSeek · 1"))
       .toMatchObject({ icon_custom_emoji_id: "emoji-3" });
+  });
+
+  test("uses bundled IDs while Telegram returns a stale shorter pack snapshot", () => {
+    const stale = providerIconsFromStickerSet(Array.from(
+      { length: 31 },
+      (_, index) => ({ custom_emoji_id: `remote-${index + 1}` }),
+    ));
+    expect(stale.morph).toBe("remote-31");
+    expect(stale.sakana).toBe("5226456375772618542");
+    expect(stale.thinkingmachines).toBe("5226528183330838677");
+    expect(stale.inclusionai).toBe("5229191144658739880");
+    expect(stale.interfaze).toBe("5229187485346606266");
   });
 });
