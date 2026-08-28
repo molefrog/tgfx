@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { InputRichMessageWithoutUpload, Message, Update } from "grammy/types";
@@ -112,6 +112,68 @@ describe("tgfx host pipeline", () => {
       expect(state.activeContext("100:42:0")).toBeUndefined();
       expect(state.route("100:42:0")?.last_prompt_json).toBeNull();
     } finally { state.close(); }
+  });
+
+  test("downloads sticker images before teaching the agent their name and IDs", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-sticker-"));
+    temporary.push(workspace);
+    const paths = workspacePaths(workspace);
+    const logPath = join(workspace, "fx-events.jsonl");
+    const fxBinary = await fakeFx(workspace, logPath);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+    };
+    const stickerUpdate = update(1, 42, "") as any;
+    delete stickerUpdate.message.text;
+    stickerUpdate.message.sticker = {
+      file_id: "secret-file-id", file_unique_id: "stable-sticker-id",
+      width: 512, height: 512, is_animated: false, is_video: false,
+      set_name: "FriendlyFrogs", emoji: "🐸", file_size: 7,
+    };
+    let firstPoll = true;
+    let delivered!: () => void;
+    const permanent = new Promise<void>((resolve) => { delivered = resolve; });
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        if (firstPoll) { firstPoll = false; return [stickerUpdate as Update]; }
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => true as const,
+      deleteCommands: async () => true as const,
+      downloadFile: async (fileId: string) => {
+        expect(fileId).toBe("secret-file-id");
+        return { filePath: "stickers/frog.webp", response: new Response("webp!!!") };
+      },
+      sendRichDraft: async () => true as const,
+      sendRich: async () => { delivered(); return { message_id: 700 } as Message.TextMessage; },
+      sendText: async () => ({ message_id: 701 }) as Message.TextMessage,
+    } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined,
+    });
+    const running = app.run();
+    await Promise.race([permanent, Bun.sleep(5_000).then(() => { throw new Error("sticker turn timed out"); })]);
+    const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const prompt = events.find((event) => event.event === "prompt").value.prompt;
+    const envelope = JSON.parse(prompt[0].text).telegram_message;
+    expect(envelope.attachments[0]).toMatchObject({
+      kind: "sticker", state: "local",
+      sticker: {
+        id: "secret-file-id", unique_id: "stable-sticker-id", name: "FriendlyFrogs", emoji: "🐸",
+        image: { state: "local", mime: "image/webp" },
+      },
+    });
+    const imagePath = envelope.attachments[0].sticker.image.path;
+    expect(await realpath(imagePath)).toStartWith(await realpath(tmpdir()));
+    expect(await realpath(imagePath)).not.toStartWith(await realpath(paths.workspace));
+    expect(await readFile(imagePath, "utf8")).toBe("webp!!!");
+    await app.stop();
+    await running;
+    await expect(readFile(imagePath)).rejects.toThrow();
   });
 
   test("cancels the matching turn when Telegram reports draft generation stopped", async () => {

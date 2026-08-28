@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
+import sharp from "sharp";
 import { StateStore } from "../src/state";
 import type { InboundMessage } from "../src/types";
 
@@ -75,6 +76,10 @@ describe("Telegram MCP actions", () => {
       attachments: [{
         ref: "att_current", kind: "document", fileId: "file-secret", fileUniqueId: "unique",
         name: "source.txt", mimeType: "text/plain", size: 5,
+      }, {
+        ref: "sticker_current", kind: "sticker", fileId: "sticker-file-id",
+        fileUniqueId: "stable-sticker-id", stickerId: "stable-sticker-id",
+        stickerName: "FriendlyFrogs", mimeType: "image/webp", width: 512, height: 512,
       }],
       raw: { update_id: 1 } as never,
     };
@@ -82,9 +87,14 @@ describe("Telegram MCP actions", () => {
     state.registerInbound(inbound);
     state.close();
     await writeFile(join(workspace, "result.txt"), "workspace result");
+    await sharp({
+      create: { width: 64, height: 32, channels: 4, background: { r: 20, g: 180, b: 80, alpha: 1 } },
+    }).png().toFile(join(workspace, "custom.png"));
 
     let nextMessageId = 100;
     const requests: Array<{ method: string; body: string }> = [];
+    let activeGetFiles = 0;
+    let maxActiveGetFiles = 0;
     const token = "100:offline-test-token";
     const server = Bun.serve({
       port: 0,
@@ -98,8 +108,29 @@ describe("Telegram MCP actions", () => {
           message_id: nextMessageId++, date: Math.floor(Date.now() / 1000),
           chat: { id: 42, type: "private", first_name: "Ada" },
         };
+        if (method === "getFile") {
+          activeGetFiles += 1;
+          maxActiveGetFiles = Math.max(maxActiveGetFiles, activeGetFiles);
+          await Bun.sleep(20);
+          activeGetFiles -= 1;
+        }
         const result = method === "getFile"
           ? { file_id: "file-secret", file_unique_id: "unique", file_path: "attachments/source.txt" }
+          : method === "getStickerSet"
+            ? {
+                name: "FriendlyFrogs", title: "Friendly Frogs", sticker_type: "regular",
+                is_animated: false, is_video: false,
+                stickers: [
+                  {
+                    file_id: "pack-sticker-id-1", file_unique_id: "pack-stable-id-1",
+                    width: 512, height: 512, is_animated: false, is_video: false, emoji: "🐸",
+                  },
+                  {
+                    file_id: "pack-sticker-id-2", file_unique_id: "pack-stable-id-2",
+                    width: 512, height: 512, is_animated: false, is_video: false, emoji: "🌿",
+                  },
+                ],
+              }
           : method === "sendPoll"
             ? { ...message, poll: { id: "poll-telegram-id", question: "Pick", options: [] } }
             : method === "setMessageReaction" ? true : message;
@@ -147,14 +178,48 @@ describe("Telegram MCP actions", () => {
       const sentFile = await call("send_file", { path: "result.txt" });
       if (!sentFile.structuredContent) throw new Error(JSON.stringify(sentFile));
       expect(sentFile.structuredContent.sent).toBeTrue();
+      const sentSticker = await call("send_sticker", { sticker_ref: "sticker_current" });
+      expect(sentSticker.structuredContent).toMatchObject({ sent: true });
+      const getFilesBeforeMetadata = requests.filter((request) => request.method === "getFile").length;
+      const pack = await call("get_sticker_pack", { name: "FriendlyFrogs" });
+      expect(pack.structuredContent).toMatchObject({
+        name: "FriendlyFrogs",
+        total: 2,
+      });
+      expect(pack.structuredContent.stickers[0]).toMatchObject({
+        id: "pack-sticker-id-1", unique_id: "pack-stable-id-1", emoji: "🐸", format: "static",
+      });
+      expect(pack.structuredContent.stickers[0].image).toBeUndefined();
+      expect(requests.filter((request) => request.method === "getFile")).toHaveLength(getFilesBeforeMetadata);
+
+      const [downloadedPack, secondDownloadedPack] = await Promise.all([
+        call("get_sticker_pack", { name: "FriendlyFrogs", download_images: true }),
+        call("get_sticker_pack", { name: "OtherFrogs", download_images: true }),
+      ]);
+      expect(downloadedPack.structuredContent.stickers[0].image).toMatchObject({ mime: "image/webp" });
+      expect(secondDownloadedPack.structuredContent.stickers[1].image).toMatchObject({ mime: "image/webp" });
+      expect(await readFile(downloadedPack.structuredContent.stickers[0].image.path, "utf8")).toBe("hello");
+      expect(maxActiveGetFiles).toBe(2);
+
+      expect((await call("send_sticker", { sticker_id: "pack-sticker-id-1" })).structuredContent.sent).toBeTrue();
+      expect((await call("send_sticker", {
+        path: "custom.png", emoji: "✨",
+      })).structuredContent.sent).toBeTrue();
       const download = await call("download_attachment", { attachment_ref: "att_current" });
       expect(download.structuredContent).toMatchObject({ downloaded: true, bytes: 5, mime_type: "text/plain" });
       expect(await readFile(download.structuredContent.path, "utf8")).toBe("hello");
 
       expect(requests.map((request) => request.method)).toEqual(expect.arrayContaining([
-        "sendMessage", "setMessageReaction", "sendPoll", "sendDocument", "getFile",
+        "sendMessage", "setMessageReaction", "sendPoll", "sendDocument", "sendSticker", "getStickerSet", "getFile",
       ]));
       expect(requests.filter((request) => request.method === "setMessageReaction")).toHaveLength(1);
+      const stickerRequest = requests.find((request) => request.method === "sendSticker");
+      expect(stickerRequest?.body).toContain("sticker-file-id");
+      expect(stickerRequest?.body).not.toContain("stable-sticker-id");
+      const stickerRequests = requests.filter((request) => request.method === "sendSticker");
+      expect(stickerRequests).toHaveLength(3);
+      expect(stickerRequests[1]?.body).toContain("pack-sticker-id-1");
+      expect(stickerRequests[2]?.body).toContain('name="emoji"');
     } finally {
       child.kill();
       await child.exited;

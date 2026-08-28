@@ -1,4 +1,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
@@ -45,6 +48,7 @@ import type {
 } from "./types";
 import { routeKey } from "./types";
 import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
+import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
   command: "compact",
@@ -142,6 +146,7 @@ export class TgfxApp {
   private readonly draftLimiters = new Map<string, PeerDraftLimiter>();
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
+  private readonly stickerTemporaryDirectories = new Set<string>();
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
   private customModelIconsEnabled: boolean;
@@ -265,6 +270,10 @@ export class TgfxApp {
     await Promise.race([queued, Bun.sleep(3_000)]);
     await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
     await queued;
+    await Promise.allSettled([...this.stickerTemporaryDirectories].map((directory) =>
+      rm(directory, { recursive: true, force: true })
+    ));
+    this.stickerTemporaryDirectories.clear();
     const menuChats = new Set([
       ...this.config.access.chatIds,
       ...this.config.access.userIds,
@@ -553,8 +562,10 @@ export class TgfxApp {
   }
 
   private async dispatchMessage(row: InboxRow, message: InboundMessage): Promise<void> {
+    const invokesAgent = shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id);
+    if (invokesAgent) await this.prepareStickerImages(message);
     this.state.registerInbound(message);
-    if (!shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id)) return;
+    if (!invokesAgent) return;
     const command = commandFromText(message.text, this.options.bot.username);
     if (command && !command.addressed) return;
 
@@ -584,6 +595,39 @@ export class TgfxApp {
     }
 
     await this.runTurn(row, message, makePrompt(message, undefined, await this.adminContext(message.route)));
+  }
+
+  private async prepareStickerImages(message: InboundMessage): Promise<void> {
+    const stickers = message.attachments.filter((attachment) => attachment.kind === "sticker");
+    if (!stickers.length) return;
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-stickers-"));
+    this.stickerTemporaryDirectories.add(temporaryRoot);
+    try {
+      await Promise.all(stickers.map(async (sticker) => {
+        const file = await this.options.telegram.downloadFile(sticker.fileId);
+        const fallbackExtension = sticker.mimeType === "application/x-tgsticker"
+          ? ".tgs"
+          : sticker.mimeType === "video/webm" ? ".webm" : ".webp";
+        const extension = extname(file.filePath) || fallbackExtension;
+        const path = await safeDownloadPath(
+          temporaryRoot,
+          message.contextRef,
+          `sticker_${sticker.ref}${extension}`,
+        );
+        try {
+          const existing = await stat(path);
+          if (!existing.isFile()) throw new Error("The temporary sticker image is not a regular file.");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await writeResponseLimited(file.response, path, 20 * 1024 * 1024);
+        }
+        sticker.localPath = path;
+      }));
+    } catch (error) {
+      this.stickerTemporaryDirectories.delete(temporaryRoot);
+      await rm(temporaryRoot, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   private async openModelPicker(message: InboundMessage): Promise<void> {

@@ -453,6 +453,8 @@ describe("ordered ACP projector", () => {
       ["set_reaction", "Reacting to Telegram message"],
       ["download_attachment", "Downloading Telegram attachment"],
       ["send_file", "Sending workspace file"],
+      ["get_sticker_pack", "Loading Telegram sticker pack"],
+      ["send_sticker", "Sending Telegram sticker"],
       ["request_choice", "Asking Telegram user to choose"],
       ["create_poll", "Creating Telegram poll"],
       ["set_pinned_message", "Setting managed pinned message"],

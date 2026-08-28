@@ -85,6 +85,12 @@ export type AttachmentRef = {
   width?: number;
   height?: number;
   duration?: number;
+  /** Stable Telegram identity for a sticker (safe to expose; unlike fileId it cannot download the file). */
+  stickerId?: string;
+  stickerName?: string;
+  emoji?: string;
+  customEmojiId?: string;
+  localPath?: string;
 };
 
 type TelegramEnvelope = {
@@ -129,13 +135,26 @@ type TelegramEnvelope = {
     attachments: Array<{
       ref: string;
       kind: AttachmentKind;
-      state: "remote";
+      state: "remote" | "local";
       size?: number;
       mime?: string;
       name?: string;
       width?: number;
       height?: number;
       duration_seconds?: number;
+      sticker?: {
+        id: string;
+        unique_id: string;
+        name?: string;
+        emoji?: string;
+        custom_emoji_id?: string;
+        image: {
+          state: "local" | "remote";
+          path?: string;
+          attachment_ref?: string;
+          mime?: string;
+        };
+      };
     }>;
     reply?: {
       message_ref: string;

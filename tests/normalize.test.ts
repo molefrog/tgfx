@@ -159,6 +159,32 @@ describe("Telegram input normalization", () => {
     expect(message?.text).toBeUndefined();
   });
 
+  test("exposes sendable and stable sticker IDs, name, and its automatically downloaded image", () => {
+    const message = normalizeMessageUpdate(bot, update({
+      text: undefined,
+      sticker: {
+        file_id: "reusable-secret-id", file_unique_id: "stable-sticker-id",
+        width: 512, height: 512, is_animated: false, is_video: false,
+        set_name: "FriendlyFrogs", emoji: "🐸", file_size: 321,
+      },
+    }))!;
+    message.attachments[0]!.localPath = "/tmp/tgfx/sticker.webp";
+    const attachment = toEnvelope(message).telegram_message.attachments[0]!;
+    expect(attachment).toMatchObject({
+      kind: "sticker",
+      state: "local",
+      mime: "image/webp",
+      sticker: {
+        id: "reusable-secret-id",
+        unique_id: "stable-sticker-id",
+        name: "FriendlyFrogs",
+        emoji: "🐸",
+        image: { state: "local", path: "/tmp/tgfx/sticker.webp", mime: "image/webp" },
+      },
+    });
+    expect(JSON.stringify(attachment)).toContain("reusable-secret-id");
+  });
+
   test("recognizes both halves of a group-to-supergroup migration", () => {
     expect(groupMigrationFromUpdate(update({
       text: undefined,

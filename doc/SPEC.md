@@ -107,12 +107,15 @@ Telegram Bot API:
    host-generated `telegram_message` JSON block followed by the person's original
    text or caption unchanged.
 9. Attachments and observed Telegram objects enter the prompt as scoped
-   references. If the agent needs attachment bytes, it calls
-   `download_attachment`; tgfx validates and downloads
-   the file into `.tgfx/files/` without revealing the bot token or a reusable file
-   URL.
+   references. Sticker images are downloaded automatically into a private
+   operating-system temporary directory and include their stable ID, set name,
+   emoji, sendable `file_id`, stable `file_unique_id`, MIME, and local path
+   directly in the envelope. For other attachment bytes, the agent calls `download_attachment`;
+   tgfx validates and downloads the file without revealing the bot token or a
+   reusable file URL.
 10. 𝒇x works with its normal tools and may use the small scoped Telegram MCP
-    action plane. It can reply explicitly, send a file, present choices or a
+    action plane. It can reply explicitly, send a file or sticker, load an
+    existing sticker pack, present choices or a
     poll, and react to the current or an earlier referenced message. In an
     allowlisted group it sees only the admin tools for which the bot currently
     holds the matching Telegram administrator right.
@@ -813,8 +816,10 @@ MCP tools:
 - an attachment must be downloaded before the agent claims to have inspected it;
 - a destructive administrator tool should be used only for an explicit user
   request, and may still pause for host approval;
-- the agent must not ask for or invent a `chat_id`, Telegram `file_id`, raw
-  message ID, member ID, or attachment destination path.
+- the agent must not ask for or invent a `chat_id`, raw message ID, member ID,
+  attachment destination path, or Telegram `file_id`; sendable sticker
+  `file_id` values are used only when tgfx supplies them in an envelope or tool
+  result.
 
 The important rule is enforced in code, not only in prose: every MCP call carries
 an opaque, short-lived `context_ref`. The server resolves it to the authorized
@@ -837,6 +842,8 @@ The first server exposes this small core:
 | `set_reaction` | `emoji`, optional `message_ref` | Sets one bot reaction on the current message or a previously referenced message in the same route. Telegram validates whether that reaction is available. |
 | `download_attachment` | `attachment_ref`, optional safe `filename` | Enforces Telegram's 20 MB cloud-download limit, saves into `.tgfx/files/<context_ref>/`, and returns the local path, exact byte count, and known MIME. |
 | `send_file` | workspace-local `path`, optional `caption` and `filename` | Sends one regular file of at most 50 MB after canonical-path checks. It cannot target another chat. |
+| `get_sticker_pack` | sticker pack short `name`; optional `offset`, `limit`, and `download_images` (default `false`) | Loads up to 50 pack entries at a time and returns each sticker's sendable ID, stable unique ID, emoji, dimensions, and format. When requested, it downloads system-temporary previews in bounded batches so the agent can inspect them. |
+| `send_sticker` | exactly one of current-turn `sticker_ref`, supplied `sticker_id`, or workspace-local image `path`; optional upload `emoji` | Sends an existing sticker by ID. Raster images are resized, compressed below Telegram's static-sticker limit, and converted to WebP; `.TGS` and `.WEBM` stickers pass through. |
 | `request_choice` | `question`, 2–8 bounded `options` | Sends inline buttons and returns `interaction_ref` and `message_ref`. A click is a later Telegram event and a new FX turn; the call does not wait. |
 | `create_poll` | `question`, 2–12 `options`, `anonymous`, `multiple` | Sends a poll and returns opaque `poll_ref` and `message_ref`. Non-anonymous votes can arrive later as new turns. |
 
