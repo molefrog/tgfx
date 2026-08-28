@@ -38,7 +38,8 @@ describe("model picker", () => {
       (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
     ));
     const first = providerPicker(data, 0, icons);
-    expect(first.text).toContain("Current: gpt-5.6-sol");
+    expect(first.text).toContain("Current: <b>gpt-5.6-sol</b>");
+    expect(first.text).not.toContain("choose a provider");
     expect(first.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("OpenAI · 7");
     expect(first.replyMarkup.inline_keyboard.flat().map((button) => button.text)).toContain("Next ›");
     expect(first.replyMarkup.inline_keyboard.flat().find((button) => button.text.startsWith("Anthropic")))
@@ -73,7 +74,7 @@ describe("model picker", () => {
     expect(plain?.replyMarkup.inline_keyboard.flat().some((button) => "icon_custom_emoji_id" in button)).toBeFalse();
 
     const selected = selectedModel(data.options[3]!);
-    expect(selected.text).toBe("Model changed to\n\nopenai/gpt-5.6-sol");
+    expect(selected.text).toBe("Model changed to\n\n<b>openai/gpt-5.6-sol</b>");
     expect(selected.replyMarkup.inline_keyboard).toEqual([]);
   });
 

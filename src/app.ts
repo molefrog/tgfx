@@ -616,7 +616,7 @@ export class TgfxApp {
           message.route.chatId,
           view.text,
           message.route.topicId,
-          { reply_markup: view.replyMarkup },
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
         );
       } catch (error) {
         if (!this.hasCustomModelIcons(view)) throw error;
@@ -626,7 +626,7 @@ export class TgfxApp {
           message.route.chatId,
           view.text,
           message.route.topicId,
-          { reply_markup: view.replyMarkup },
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
         );
       }
       this.registerBotMessage(message.route, String(sent.message_id));
@@ -875,7 +875,7 @@ export class TgfxApp {
           route.chatId,
           callback.message.message_id,
           view.text,
-          { reply_markup: view.replyMarkup },
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
         ).catch(() => undefined);
         return;
       }
@@ -917,7 +917,7 @@ export class TgfxApp {
           route.chatId,
           callback.message.message_id,
           view.text,
-          { reply_markup: view.replyMarkup },
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
         );
         return;
       }
@@ -931,7 +931,7 @@ export class TgfxApp {
           route.chatId,
           callback.message.message_id,
           view.text,
-          { reply_markup: view.replyMarkup },
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
         );
       } catch (error) {
         if (!this.hasCustomModelIcons(view)) throw error;
@@ -944,7 +944,7 @@ export class TgfxApp {
           route.chatId,
           callback.message.message_id,
           plain.text,
-          { reply_markup: plain.replyMarkup },
+          { parse_mode: "HTML", reply_markup: plain.replyMarkup },
         );
       }
       return;

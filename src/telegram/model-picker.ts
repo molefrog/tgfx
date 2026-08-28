@@ -225,6 +225,14 @@ function currentLabel(data: ModelPickerData): string {
   return current ? modelLabel(current) : data.currentValue;
 }
 
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function currentLine(data: ModelPickerData): string {
+  return `Current: <b>${escapeHtml(currentLabel(data))}</b>`;
+}
+
 function navigation(
   data: ModelPickerData,
   page: number,
@@ -261,9 +269,7 @@ export function providerPicker(
     text: [
       "Choose a model",
       "",
-      `Current: ${currentLabel(data)}`,
-      "",
-      "First choose a provider.",
+      currentLine(data),
     ].join("\n"),
     replyMarkup: {
       inline_keyboard: [
@@ -289,9 +295,9 @@ export function modelPicker(
   const icon = icons[provider.id];
   return {
     text: [
-      `Choose a model · ${provider.name}`,
+      `Choose a model · ${escapeHtml(provider.name)}`,
       "",
-      `Current: ${currentLabel(data)}`,
+      currentLine(data),
     ].join("\n"),
     replyMarkup: {
       inline_keyboard: [
@@ -314,7 +320,7 @@ export function modelPicker(
 
 export function selectedModel(model: FxModelOption): ModelPickerView {
   return {
-    text: `Model changed to\n\n${model.name}`,
+    text: `Model changed to\n\n<b>${escapeHtml(model.name)}</b>`,
     replyMarkup: { inline_keyboard: [] },
   };
 }
@@ -328,7 +334,7 @@ export function closedModelPicker(): ModelPickerView {
 
 export function failedModelSelection(model: FxModelOption): ModelPickerView {
   return {
-    text: `Could not change the model to ${model.name}.\n\nRun /model to try again.`,
+    text: `Could not change the model to ${escapeHtml(model.name)}.\n\nRun /model to try again.`,
     replyMarkup: { inline_keyboard: [] },
   };
 }

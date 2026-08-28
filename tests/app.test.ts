@@ -328,6 +328,7 @@ describe("tgfx host pipeline", () => {
       },
       sendText: async (_chat: string, text: string, _topic: string, options?: any) => {
         if (text.startsWith("Choose a model")) {
+          expect(options.parse_mode).toBe("HTML");
           const providerButton = options.reply_markup.inline_keyboard.flat()
             .find((button: { text: string }) => button.text.startsWith("OpenAI ·"));
           expect(providerButton).not.toHaveProperty("icon_custom_emoji_id");
@@ -340,6 +341,7 @@ describe("tgfx host pipeline", () => {
       editText: async (_chat: string, _message: number, text: string, options?: any) => {
         edits.push(text);
         if (text.startsWith("Choose a model · OpenAI")) {
+          expect(options.parse_mode).toBe("HTML");
           const modelButton = options.reply_markup.inline_keyboard.flat()
             .find((button: { text: string }) => button.text === "gpt-5.6-luna");
           expect(modelButton).not.toHaveProperty("icon_custom_emoji_id");
@@ -359,7 +361,7 @@ describe("tgfx host pipeline", () => {
     await running;
 
     expect(edits[0]).toContain("Choose a model · OpenAI");
-    expect(edits[1]).toBe("Model changed to\n\nopenai/gpt-5.6-luna");
+    expect(edits[1]).toBe("Model changed to\n\n<b>openai/gpt-5.6-luna</b>");
     expect(packLookups).toBe(0);
     expect(callbackAnswers).toEqual(["callback-2", "callback-3"]);
     const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
