@@ -10,8 +10,7 @@ const draftInterval = z.number().int().min(200).max(10_000).default(250)
   .transform((value) => value === 800 ? 250 : value);
 const rendererSchema = z.object({
   mode: z.enum(["streaming", "final"]).default("streaming"),
-  collapseTools: z.boolean().default(true),
-  expandStreamingTools: z.boolean().default(false),
+  expandStreamingTools: z.boolean().default(true),
   updateEveryMs: draftInterval,
 });
 
@@ -27,8 +26,7 @@ export const configSchema = z.object({
   approvals: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
   renderer: rendererSchema.default({
     mode: "streaming",
-    collapseTools: true,
-    expandStreamingTools: false,
+    expandStreamingTools: true,
     updateEveryMs: 250,
   }),
   modelPicker: z.object({

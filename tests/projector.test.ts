@@ -12,14 +12,14 @@ const THINKING_EMOJI = {
   custom_emoji_id: "5573473356579078196",
   alternative_text: "🙂",
 };
-const WORKING_SUMMARY = [THINKING_EMOJI, " Working…"];
+const WORKING_SUMMARY = "Working...";
 
-function draft(projector: AcpProjector, collapseTools = true, expandStreamingTools = true): RichBlock[] {
-  return projector.rich({ final: false, collapseTools, expandStreamingTools }).blocks ?? [];
+function draft(projector: AcpProjector, expandStreamingTools = true): RichBlock[] {
+  return projector.rich({ final: false, expandStreamingTools }).blocks ?? [];
 }
 
-function final(projector: AcpProjector, collapseTools = true): RichBlock[] {
-  return projector.rich({ final: true, collapseTools, expandStreamingTools: true }).blocks ?? [];
+function final(projector: AcpProjector): RichBlock[] {
+  return projector.rich({ final: true, expandStreamingTools: true }).blocks ?? [];
 }
 
 function details(block: RichBlock | undefined): DetailsBlock {
@@ -126,8 +126,8 @@ describe("ordered ACP projector", () => {
     expect(rendered(blocks[0])).toContain("research");
 
     const firstGroup = details(blocks[1]);
-    expect(firstGroup.summary).toBe("Inspected tool results");
-    expect(firstGroup.is_open).toBeUndefined();
+    expect(firstGroup.summary).toBe(WORKING_SUMMARY);
+    expect(firstGroup.is_open).toBeTrue();
     expect(rendered(firstGroup.summary)).not.toContain("custom_emoji");
     expect(rendered(firstGroup).indexOf("Reading")).toBeLessThan(rendered(firstGroup).indexOf("Searching"));
 
@@ -176,11 +176,11 @@ describe("ordered ACP projector", () => {
     expect(group.summary).toEqual(WORKING_SUMMARY);
     expect(rendered(group)).not.toContain("Pending");
     expect(rendered(group)).not.toContain("Running");
-    expect(rendered(group)).toContain("∴ Complete");
-    expect(rendered(group)).toContain("⊗ Failed");
+    expect(rendered(group)).toContain("┣ Complete");
+    expect(rendered(group)).toContain("┗ × Failed");
   });
 
-  test("animates only the trailing draft group and optionally opens it", () => {
+  test("keeps every draft group working and open until finalization", () => {
     const projector = new AcpProjector();
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "one", title: "One", status: "completed", content: [],
@@ -191,20 +191,21 @@ describe("ordered ACP projector", () => {
       sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Content after the first group." },
     }));
     let blocks = draft(projector);
-    expect(details(blocks[0]).summary).toBe("Worked for 1s");
-    expect(details(blocks[0]).is_open).toBeUndefined();
+    expect(details(blocks[0]).summary).toBe(WORKING_SUMMARY);
+    expect(details(blocks[0]).is_open).toBeTrue();
 
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "two", title: "Two", status: "completed", content: [],
     }));
     blocks = draft(projector);
-    expect(details(blocks[0]).summary).toBe("Worked for 1s");
-    expect(details(blocks[0]).is_open).toBeUndefined();
+    expect(details(blocks[0]).summary).toBe(WORKING_SUMMARY);
+    expect(details(blocks[0]).is_open).toBeTrue();
     expect(details(blocks[2]).is_open).toBeTrue();
     expect(details(blocks[2]).summary).toEqual(WORKING_SUMMARY);
 
-    const alwaysCollapsed = draft(projector, true, false);
+    const alwaysCollapsed = draft(projector, false);
     expect(details(alwaysCollapsed[0]).is_open).toBeUndefined();
+    expect(details(alwaysCollapsed[0]).summary).toEqual(WORKING_SUMMARY);
     expect(details(alwaysCollapsed[2]).summary).toEqual(WORKING_SUMMARY);
     expect(details(alwaysCollapsed[2]).is_open).toBeUndefined();
 
@@ -454,7 +455,8 @@ describe("ordered ACP projector", () => {
       ["download_attachment", "Downloading Telegram attachment"],
       ["send_file", "Sending workspace file"],
       ["get_sticker_pack", "Loading Telegram sticker pack"],
-      ["send_sticker", "Sending Telegram sticker"],
+      ["send_sticker_by_id", "Sending Telegram sticker"],
+      ["send_sticker_file", "Uploading Telegram sticker"],
       ["request_choice", "Asking Telegram user to choose"],
       ["create_poll", "Creating Telegram poll"],
       ["set_pinned_message", "Setting managed pinned message"],
@@ -480,13 +482,15 @@ describe("ordered ACP projector", () => {
 
     const group = details(final(projector)[0]);
     expect(group.summary).toBe("Used Telegram");
-    expect(group.blocks).toEqual(telegramTools.map(([, title]) => ({
+    expect(group.blocks).toEqual(telegramTools.map(([, title], index) => ({
       type: "paragraph",
-      text: { type: "bold", text: `∴ ${title}` },
+      text: `${index === telegramTools.length - 1 ? "┗" : "┣"} ${title}`,
     })));
     expect(projector.plainFinal(true).split("\n")).toEqual([
       "Used Telegram",
-      ...telegramTools.map(([, title]) => `∴ ${title}`),
+      ...telegramTools.map(([, title], index) => (
+        `${index === telegramTools.length - 1 ? "┗" : "┣"} ${title}`
+      )),
     ]);
     expect(rendered(group.blocks)).not.toContain("mcp_telegram_");
 
@@ -502,9 +506,9 @@ describe("ordered ACP projector", () => {
         content: [],
       }));
     }
-    expect(details(final(named)[0]).blocks).toEqual(telegramTools.map(([, title]) => ({
+    expect(details(final(named)[0]).blocks).toEqual(telegramTools.map(([, title], index) => ({
       type: "paragraph",
-      text: { type: "bold", text: `∴ ${title}` },
+      text: `${index === telegramTools.length - 1 ? "┗" : "┣"} ${title}`,
     })));
   });
 
@@ -620,8 +624,8 @@ describe("ordered ACP projector", () => {
       status: "completed", rawOutput: { command, exit_code: 0 }, content: [],
     }));
 
-    const collapsed = details(draft(projector, true)[0]);
-    const row = collapsed.blocks[0];
+    const group = details(draft(projector)[0]);
+    const row = group.blocks[0];
     if (row?.type !== "paragraph" || !Array.isArray(row.text)) {
       throw new Error("Expected a rich tool preview row");
     }
@@ -637,23 +641,20 @@ describe("ordered ACP projector", () => {
     expect([...preview.text].length).toBe(60);
     expect(preview.text.endsWith("…")).toBeTrue();
 
-    const expanded = details(draft(projector, false)[0]);
-    const fullOutput = expanded.blocks.find((block) => block.type === "pre");
-    if (!fullOutput || fullOutput.type !== "pre" || typeof fullOutput.text !== "string") {
-      throw new Error("Expected complete expanded tool output");
-    }
-    expect(JSON.parse(fullOutput.text).command).toBe(command);
   });
 
-  test("keeps expanded tool output directly inside its ordered outer group", () => {
+  test("never renders tool results inside the group", () => {
     const projector = new AcpProjector();
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "expanded", title: "Inspecting",
-      status: "completed", rawInput: { path: "src/app.ts" }, rawOutput: { lines: 10 }, content: [],
+      status: "completed", rawInput: { path: "src/app.ts" }, rawOutput: { lines: 10 },
+      content: [{ type: "content", content: { type: "text", text: "hidden result" } }],
     }));
-    const group = details(draft(projector, false)[0]);
+    const group = details(draft(projector)[0]);
     expect(group.is_open).toBeTrue();
-    expect(group.blocks.map((block) => block.type)).toEqual(["paragraph", "pre", "pre"]);
+    expect(group.blocks.map((block) => block.type)).toEqual(["paragraph"]);
+    expect(rendered(group)).not.toContain("lines");
+    expect(rendered(group)).not.toContain("hidden result");
   });
 
   test("does not split a tool group on whitespace-only assistant chunks", () => {
@@ -732,7 +733,7 @@ describe("ordered ACP projector", () => {
     ]);
   });
 
-  test("redacts split secrets across streamed prose and terminal tool details", () => {
+  test("redacts split secrets across streamed prose and compact tool rows", () => {
     const projector = new AcpProjector();
     const token = `123456789:${"A".repeat(30)}`;
     projector.apply(update({
@@ -748,10 +749,10 @@ describe("ordered ACP projector", () => {
       content: [{ type: "content", content: { type: "text", text: `<path>${token}</path>` } }],
     }));
 
-    const collapsed = rendered(draft(projector, true));
-    const expanded = rendered(final(projector, false));
+    const draftOutput = rendered(draft(projector));
+    const finalOutput = rendered(final(projector));
     const plain = projector.plainFinal(true);
-    for (const output of [collapsed, expanded, plain]) {
+    for (const output of [draftOutput, finalOutput, plain]) {
       expect(output).not.toContain(token);
       expect(output).toContain("[redacted Telegram token]");
     }

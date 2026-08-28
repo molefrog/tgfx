@@ -39,7 +39,7 @@ async function makeWorkspace(
   await saveConfig(paths, {
     version: 1,
     activeBotId: BOT.id,
-    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 500 },
+    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 500 },
     ...config,
   });
   return { paths, fxBinary: await fakeFx(workspace) };
@@ -98,7 +98,7 @@ describe("tgfx over the local Telegram simulator", () => {
     const { paths, fxBinary } = await makeWorkspace({
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", collapseTools: true, expandStreamingTools: true, updateEveryMs: 500 },
+      renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 500 },
     });
     const { app, running } = await startApp(paths, fxBinary, telegram);
     try {
@@ -112,6 +112,7 @@ describe("tgfx over the local Telegram simulator", () => {
       });
       expect(telegram.calls("sendRichMessageDraft")).toHaveLength(0);
       expect(telegram.calls("setMyCommands").at(-1)?.payload.commands).toEqual([
+        { command: "clear", description: "Start a fresh 𝒇x conversation" },
         { command: "compact", description: "Compact the 𝒇x conversation" },
         { command: "model", description: "Choose the 𝒇x model" },
         { command: "cost", description: "Show local 𝒇x usage and spend" },

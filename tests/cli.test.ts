@@ -46,7 +46,7 @@ async function workspace(): Promise<WorkspacePaths> {
     activeBotId: "100",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 800 },
+    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 800 },
   });
   return paths;
 }

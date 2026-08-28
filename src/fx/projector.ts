@@ -618,7 +618,6 @@ export class AcpProjector {
 
   rich(options: {
     final: boolean;
-    collapseTools: boolean;
     expandStreamingTools: boolean;
     includeTools?: boolean;
   }): InputRichMessageWithoutUpload {
@@ -628,14 +627,12 @@ export class AcpProjector {
       return { blocks: [{ type: "thinking", text: [THINKING_CUSTOM_EMOJI, " Thinking…"] }] };
     }
 
-    const blocks = items.flatMap((item, index) => {
+    const blocks = items.flatMap((item) => {
       if (item.type === "assistant") return item.blocks;
-      const streaming = !options.final && index === items.length - 1;
       return [this.toolGroupBlock(
         item.tools,
-        options.collapseTools,
-        streaming,
-        options.expandStreamingTools,
+        !options.final,
+        !options.final && options.expandStreamingTools,
       )];
     });
     return { blocks };
@@ -643,49 +640,37 @@ export class AcpProjector {
 
   private toolGroupBlock(
     tools: ToolState[],
-    collapseTools: boolean,
-    streaming: boolean,
-    expandStreamingTools: boolean,
+    working: boolean,
+    expanded: boolean,
   ): RichBlock {
-    const blocks = collapseTools
-      ? tools.map((tool) => this.toolRow(tool))
-      : tools.flatMap((tool) => this.expandedToolBlocks(tool));
+    const blocks = tools.map((tool, index) => this.toolRow(tool, index === tools.length - 1));
     return {
       type: "details",
-      summary: streaming ? [THINKING_CUSTOM_EMOJI, " Working…"] : completedToolSummary(tools, this.changedAt),
+      summary: working ? "Working..." : completedToolSummary(tools, this.changedAt),
       blocks,
-      ...(streaming && expandStreamingTools ? { is_open: true as const } : {}),
+      ...(expanded ? { is_open: true as const } : {}),
     };
   }
 
-  private toolRow(tool: ToolState): RichBlock {
+  private toolRow(tool: ToolState, last: boolean): RichBlock {
     const argument = toolArgumentPreview(tool);
-    const title = `${failed(tool.status) ? "⊗" : "∴"} ${redactSecrets(displayToolTitle(tool))}`;
+    const branch = last ? "┗" : "┣";
+    const title = `${branch} ${failed(tool.status) ? "× " : ""}${redactSecrets(displayToolTitle(tool))}`;
     return {
       type: "paragraph",
       text: argument
-        ? [{ type: "bold", text: title }, " ", { type: "code", text: argument }]
-        : { type: "bold", text: title },
+        ? [title, " ", { type: "code", text: argument }]
+        : title,
     };
-  }
-
-  private expandedToolBlocks(tool: ToolState): RichBlock[] {
-    const blocks: RichBlock[] = [this.toolRow(tool)];
-    const input = stringify(tool.input);
-    const output = stringify(tool.output);
-    const content = contentText(tool.content).map((value) => stringify(value)).filter(Boolean).join("\n\n");
-    if (input) blocks.push({ type: "pre", text: input, language: "json" });
-    if (output) blocks.push({ type: "pre", text: output, language: "json" });
-    if (!output && content) blocks.push({ type: "pre", text: content });
-    return blocks;
   }
 
   plainFinal(includeTools: boolean): string {
     const parts = this.projected(includeTools).map((item) => {
       if (item.type === "assistant") return item.markdown.trim();
-      const rows = item.tools.map((tool) => {
+      const rows = item.tools.map((tool, index) => {
         const argument = toolArgumentPreview(tool);
-        return `${failed(tool.status) ? "⊗" : "∴"} ${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
+        const branch = index === item.tools.length - 1 ? "┗" : "┣";
+        return `${branch} ${failed(tool.status) ? "× " : ""}${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
       });
       return [completedToolSummary(item.tools, this.changedAt), ...rows].join("\n");
     });

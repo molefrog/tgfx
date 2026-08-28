@@ -48,9 +48,8 @@ tgfx doctor                    deep diagnostics: token, chats, rights, fx
 
 `tgfx allow` infers users from positive IDs and chats from negative ones
 (`--chat` overrides). Configuration edits are saved immediately and apply the
-next time `tgfx` starts. Run flags: `--model <id>`, `--yolo`,
-`--no-streaming`, `--no-collapse-tools`; global: `--json`, `--no-color`,
-`--debug`.
+next time `tgfx` starts. Run flags: `--model <id>`, `--yolo`, and
+`--no-streaming`; global: `--json`, `--no-color`, `--debug`.
 
 FX starts in its automatic-review permission mode. `tgfx --yolo` disables FX's
 permission checks for that process. It does not bypass tgfx's separate approval
@@ -62,8 +61,10 @@ bot in Telegram to enable them, demote it to revoke; destructive actions still
 require a one-tap approval card in the approvals chat. `tgfx doctor` reports
 the bot's current rights in every allowlisted group.
 
-Telegram exposes `/compact`, `/model`, and `/cost`. `/compact` compacts the active 𝒇x
-conversation and shows a purpose-built progress state. `/model` reads the live
+Telegram exposes `/clear`, `/compact`, `/model`, and `/cost`. `/clear` immediately
+starts a fresh route conversation and makes it current without prompting the agent.
+`/compact` compacts the active 𝒇x conversation and shows a purpose-built progress
+state. `/model` reads the live
 model catalog from the route's FX session and switches that session through a
 provider-first, paginated button picker. Provider and model buttons use the
 public `tgfx icons` custom emoji pack by default and retry as
@@ -75,12 +76,12 @@ buttons. Other ACP-advertised commands are not projected into Telegram yet.
 
 Private chats stream complete Rich Message snapshots through Telegram's draft
 API. Each draft enables Telegram's Stop button, which cancels the matching active
-𝒇x turn. Groups and `--no-streaming` receive one final message. `--no-collapse-tools`
-shows full details for completed tools; otherwise each consecutive tool group is
-compact. The current trailing tool group shows the thinking emoji and `Working…`;
-earlier groups use their final activity labels. The current group stays collapsed
-by default; set `renderer.expandStreamingTools` to `true` in `.tgfx/config.json`
-to open it temporarily while it streams. Pending tools and private thought events stay hidden and do not trigger
+𝒇x turn. Groups and `--no-streaming` receive one final message. Tool groups
+always use compact rows and never include tool results. Every draft tool group
+keeps the `Working...` label and stays open while the draft streams. The final
+message replaces those headers with formatted activity labels and collapses the
+groups in both streaming and non-streaming modes. Set `renderer.expandStreamingTools`
+to `false` in `.tgfx/config.json` to keep draft groups collapsed. Pending tools and private thought events stay hidden and do not trigger
 draft requests. Visible frames stream optimistically, then adapt to Telegram's
 per-chat limits and any `retry_after` response.
 

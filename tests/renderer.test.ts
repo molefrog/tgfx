@@ -26,7 +26,7 @@ describe("Telegram renderer boundaries", () => {
   });
 
   test("streams only private routes", () => {
-    const config = { mode: "streaming" as const, collapseTools: true, expandStreamingTools: true, updateEveryMs: 800 };
+    const config = { mode: "streaming" as const, expandStreamingTools: true, updateEveryMs: 800 };
     expect(streamsRoute(config, {
       key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private",
     })).toBeTrue();
@@ -36,6 +36,46 @@ describe("Telegram renderer boundaries", () => {
     expect(streamsRoute({ ...config, mode: "final" }, {
       key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private",
     })).toBeFalse();
+  });
+
+  test("includes labeled, collapsed tool groups in a non-streaming final message", async () => {
+    const sent: Array<{ blocks?: unknown[] }> = [];
+    const api = {
+      sendRich: async (_chatId: string, rich: { blocks?: unknown[] }) => {
+        sent.push(rich);
+        return { message_id: 42 };
+      },
+    } as unknown as TelegramApi;
+    const state = {
+      createOutbox: () => 1,
+      markOutbox: () => undefined,
+      registerBotMessage: () => undefined,
+    } as unknown as StateStore;
+    const projector = new AcpProjector();
+    projector.apply({
+      sessionUpdate: "tool_call",
+      toolCallId: "tests",
+      title: "Running tests",
+      kind: "execute",
+      status: "completed",
+      content: [],
+    });
+    const renderer = new TurnRenderer(
+      api,
+      state,
+      { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
+      { mode: "final", expandStreamingTools: true, updateEveryMs: 800 },
+      projector,
+    );
+
+    await renderer.finish({ botId: "1", inboxId: 1, effectKey: "final:1:1" });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.blocks).toEqual([{
+      type: "details",
+      summary: "Ran 1 command",
+      blocks: [{ type: "paragraph", text: "┗ Running tests" }],
+    }]);
   });
 
   test("splits final messages without truncation or broken surrogate pairs", () => {
@@ -140,7 +180,7 @@ describe("Telegram renderer boundaries", () => {
       api,
       state,
       { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
-      { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 0 },
+      { mode: "streaming", expandStreamingTools: true, updateEveryMs: 0 },
       projector,
       undefined,
       new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),

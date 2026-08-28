@@ -6,7 +6,6 @@ type RenderMode = "streaming" | "final";
 
 export type RendererConfig = {
   mode: RenderMode;
-  collapseTools: boolean;
   expandStreamingTools: boolean;
   updateEveryMs: number;
 };
@@ -85,8 +84,6 @@ export type AttachmentRef = {
   width?: number;
   height?: number;
   duration?: number;
-  /** Stable Telegram identity for a sticker (safe to expose; unlike fileId it cannot download the file). */
-  stickerId?: string;
   stickerName?: string;
   emoji?: string;
   customEmojiId?: string;
@@ -97,6 +94,7 @@ type TelegramEnvelope = {
   telegram_message: {
     version: 1;
     source: "tgfx:telegram";
+    instructions: string;
     event: "message.created" | "message.edited" | "interaction.choice" | "poll.answer";
     event_id: string;
     context_ref: string;
@@ -143,8 +141,7 @@ type TelegramEnvelope = {
       height?: number;
       duration_seconds?: number;
       sticker?: {
-        id: string;
-        unique_id: string;
+        file_id: string;
         name?: string;
         emoji?: string;
         custom_emoji_id?: string;

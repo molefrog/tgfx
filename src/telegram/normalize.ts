@@ -93,7 +93,6 @@ function attachmentRefs(message: Message): AttachmentRef[] {
     mimeType: message.sticker.is_animated
       ? "application/x-tgsticker"
       : message.sticker.is_video ? "video/webm" : "image/webp",
-    stickerId: message.sticker.file_unique_id,
     ...(message.sticker.set_name ? { stickerName: message.sticker.set_name } : {}),
     ...(message.sticker.emoji ? { emoji: message.sticker.emoji } : {}),
     ...(message.sticker.custom_emoji_id ? { customEmojiId: message.sticker.custom_emoji_id } : {}),
@@ -239,6 +238,7 @@ export function toEnvelope(message: InboundMessage) {
     telegram_message: {
       version: 1 as const,
       source: "tgfx:telegram" as const,
+      instructions: "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), polls, group admin actions and more. Use search.",
       event: message.event,
       event_id: `tg:${message.updateId}`,
       context_ref: message.contextRef,
@@ -270,10 +270,9 @@ export function toEnvelope(message: InboundMessage) {
         ...(attachment.width === undefined ? {} : { width: attachment.width }),
         ...(attachment.height === undefined ? {} : { height: attachment.height }),
         ...(attachment.duration === undefined ? {} : { duration_seconds: attachment.duration }),
-        ...(attachment.kind === "sticker" && attachment.stickerId ? {
+        ...(attachment.kind === "sticker" ? {
           sticker: {
-            id: attachment.fileId,
-            unique_id: attachment.stickerId,
+            file_id: attachment.fileId,
             ...(attachment.stickerName ? { name: attachment.stickerName } : {}),
             ...(attachment.emoji ? { emoji: attachment.emoji } : {}),
             ...(attachment.customEmojiId ? { custom_emoji_id: attachment.customEmojiId } : {}),

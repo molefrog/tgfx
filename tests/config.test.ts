@@ -17,7 +17,7 @@ function config(): TgfxConfig {
     activeBotId: "123456",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 250 },
+    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 250 },
     modelPicker: { customIcons: true },
   };
 }
@@ -48,12 +48,12 @@ describe("workspace config", () => {
     }).renderer.updateEveryMs).toBe(1_000);
   });
 
-  test("keeps the active streaming tool group collapsed by default", () => {
+  test("keeps streaming tool groups expanded by default", () => {
     const renderer = configSchema.parse({
       ...config(),
-      renderer: { mode: "streaming", collapseTools: true, updateEveryMs: 250 },
+      renderer: { mode: "streaming", updateEveryMs: 250 },
     }).renderer;
-    expect(renderer.expandStreamingTools).toBeFalse();
+    expect(renderer.expandStreamingTools).toBeTrue();
   });
 
   test("enables model picker icons by default and allows disabling them", () => {

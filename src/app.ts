@@ -51,6 +51,9 @@ import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
 import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
+  command: "clear",
+  description: "Start a fresh 𝒇x conversation",
+}, {
   command: "compact",
   description: "Compact the 𝒇x conversation",
 }, {
@@ -209,7 +212,7 @@ export class TgfxApp {
     }
     this.log({
       event: "polling.started",
-      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.rendererConfig.mode}${this.rendererConfig.collapseTools ? " · collapsed tools" : " · visible tools"}`,
+      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.rendererConfig.mode}`,
       bot: this.options.bot.id,
       workspace: this.options.paths.workspace,
       renderer: this.rendererConfig.mode,
@@ -570,7 +573,7 @@ export class TgfxApp {
     if (command && !command.addressed) return;
 
     if (command) {
-      if (command.name !== "compact" && command.name !== "model" && command.name !== "cost") {
+      if (command.name !== "clear" && command.name !== "compact" && command.name !== "model" && command.name !== "cost") {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
@@ -588,6 +591,10 @@ export class TgfxApp {
       }
       if (command.name === "cost") {
         await this.openCostReport(message);
+        return;
+      }
+      if (command.name === "clear") {
+        await this.runClear(message.route);
         return;
       }
       await this.runCompact(row, message);
@@ -1092,6 +1099,21 @@ export class TgfxApp {
       chatId: route.chatId,
       topicId: route.topicId,
       messageId,
+    });
+  }
+
+  private async runClear(route: Route): Promise<void> {
+    const previous = this.sessions.get(route.key);
+    this.sessions.delete(route.key);
+    this.state.resetRoute(route.key);
+    if (previous) await previous.dispose({ closeSession: true });
+    await this.session(route);
+    await this.options.telegram.sendText(route.chatId, "✓ Started a fresh conversation", route.topicId);
+    this.log({
+      event: "session.cleared",
+      message: `${this.label(route.chatId, route.topicId)} · fresh conversation started`,
+      chat: route.chatId,
+      topic: route.topicId,
     });
   }
 

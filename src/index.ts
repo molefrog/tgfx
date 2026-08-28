@@ -217,7 +217,7 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
       chatIds: principalKind === "chat" ? [identifier] : [],
     },
     approvals: { chatId: approvalsChatId, topicId: "0" },
-    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: false, updateEveryMs: 250 },
+    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 250 },
     modelPicker: { customIcons: true },
   };
   await telegram.sendText(
@@ -329,8 +329,6 @@ async function runCommand(tokens: string[]): Promise<void> {
       yolo: "boolean",
       streaming: "boolean",
       "no-streaming": "boolean",
-      "collapse-tools": "boolean",
-      "no-collapse-tools": "boolean",
       json: "boolean",
       "no-color": "boolean",
       debug: "boolean",
@@ -341,11 +339,7 @@ async function runCommand(tokens: string[]): Promise<void> {
   if (flags.help) { process.stderr.write(helpText()); return; }
   if (flags.version) { console.log(VERSION); return; }
   if (flags.streaming && flags["no-streaming"]) throw new CliError("choose --streaming or --no-streaming, not both");
-  if (flags["collapse-tools"] && flags["no-collapse-tools"]) {
-    throw new CliError("choose --collapse-tools or --no-collapse-tools, not both");
-  }
   const streaming = flags.streaming ? true : flags["no-streaming"] ? false : undefined;
-  const collapseTools = flags["collapse-tools"] ? true : flags["no-collapse-tools"] ? false : undefined;
   const json = Boolean(flags.json);
   const resolved = await runtime(workspacePaths(), { json });
   const { release, ...appRuntime } = resolved;
@@ -366,7 +360,6 @@ async function runCommand(tokens: string[]): Promise<void> {
       permissionMode: flags.yolo ? "yolo" : "auto",
       renderer: {
         ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),
-        ...(collapseTools === undefined ? {} : { collapseTools }),
       },
       log,
     });

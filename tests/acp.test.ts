@@ -138,7 +138,7 @@ describe("FX ACP transport", () => {
       "# Section heading\n\nParagraph with **bold",
       "** and *italic*.",
     ]);
-    expect(projector.rich({ final: true, collapseTools: true, expandStreamingTools: true }).blocks).toEqual([
+    expect(projector.rich({ final: true, expandStreamingTools: true }).blocks).toEqual([
       { type: "heading", size: 1, text: "Section heading" },
       {
         type: "paragraph",

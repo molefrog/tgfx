@@ -8,7 +8,7 @@ const config: TgfxConfig = {
   version: 1, activeBotId: "100",
   access: { userIds: ["42"], chatIds: [] },
   approvals: { chatId: "42", topicId: "0" },
-  renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 800 },
+  renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 800 },
 };
 
 function update(overrides: Record<string, unknown> = {}): Update {
@@ -31,6 +31,9 @@ describe("Telegram input normalization", () => {
     const envelope = toEnvelope(message);
     expect(message.text).toBe("hello");
     expect(envelope.telegram_message.source).toBe("tgfx:telegram");
+    expect(envelope.telegram_message.instructions).toBe(
+      "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), polls, group admin actions and more. Use search.",
+    );
     expect(envelope.telegram_message.event).toBe("message.created");
     expect(envelope.telegram_message.event_id).toBe("tg:11");
     expect(envelope.telegram_message.sender).toMatchObject({ user_id: "42", display_name: "Ada" });
@@ -159,7 +162,7 @@ describe("Telegram input normalization", () => {
     expect(message?.text).toBeUndefined();
   });
 
-  test("exposes sendable and stable sticker IDs, name, and its automatically downloaded image", () => {
+  test("exposes a sendable sticker file ID, name, and its automatically downloaded image", () => {
     const message = normalizeMessageUpdate(bot, update({
       text: undefined,
       sticker: {
@@ -175,8 +178,7 @@ describe("Telegram input normalization", () => {
       state: "local",
       mime: "image/webp",
       sticker: {
-        id: "reusable-secret-id",
-        unique_id: "stable-sticker-id",
+        file_id: "reusable-secret-id",
         name: "FriendlyFrogs",
         emoji: "🐸",
         image: { state: "local", path: "/tmp/tgfx/sticker.webp", mime: "image/webp" },

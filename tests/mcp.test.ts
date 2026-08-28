@@ -90,10 +90,11 @@ describe("Telegram MCP catalog", () => {
     expect(stderr).toContain("Invalid internal tgfx MCP environment: TGFX_MCP_ALLOWED_CHATS");
   });
 
-  test("exposes only the seven scoped core tools by default", async () => {
+  test("exposes only the eight scoped core tools by default", async () => {
     const tools = await listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
-      "set_reaction", "download_attachment", "send_file", "get_sticker_pack", "send_sticker",
+      "set_reaction", "download_attachment", "send_file", "get_sticker_pack",
+      "send_sticker_by_id", "send_sticker_file",
       "request_choice", "create_poll",
     ]);
     const schemas = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
@@ -102,7 +103,8 @@ describe("Telegram MCP catalog", () => {
     expect(schemas.send_file.required).toEqual(["path"]);
     expect(schemas.get_sticker_pack.required).toEqual(["name"]);
     expect(schemas.get_sticker_pack.properties?.download_images.default).toBeFalse();
-    expect(schemas.send_sticker.required).toBeUndefined();
+    expect(schemas.send_sticker_by_id.required).toEqual(["file_id"]);
+    expect(schemas.send_sticker_file.required).toEqual(["path"]);
     expect(schemas.request_choice.required).toEqual(["question", "options"]);
     expect(schemas.request_choice.properties?.options).toMatchObject({ minItems: 2, maxItems: 8 });
     expect(schemas.create_poll.required).toEqual(["question", "options"]);
@@ -131,7 +133,7 @@ describe("Telegram MCP catalog", () => {
       expect(names).toContain("delete_messages");
       expect(names).toContain("moderate_member");
       expect(names).toContain("review_join_request");
-      expect(tools).toHaveLength(14);
+      expect(tools).toHaveLength(15);
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
       expect(byName.delete_messages!.annotations?.destructiveHint).toBeTrue();
       expect(byName.moderate_member!.inputSchema.properties?.action.enum).toEqual([
@@ -176,7 +178,8 @@ describe("Telegram MCP catalog", () => {
     try {
       const tools = await listTools({ chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
       expect(tools.map((tool) => tool.name)).toEqual([
-        "set_reaction", "download_attachment", "send_file", "get_sticker_pack", "send_sticker",
+        "set_reaction", "download_attachment", "send_file", "get_sticker_pack",
+        "send_sticker_by_id", "send_sticker_file",
         "request_choice", "create_poll",
       ]);
     } finally {

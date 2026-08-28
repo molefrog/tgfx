@@ -51,7 +51,7 @@ describe("tgfx host pipeline", () => {
       activeBotId: "100",
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
     };
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
@@ -114,7 +114,7 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
-  test("downloads sticker images before teaching the agent their name and IDs", async () => {
+  test("downloads sticker images before teaching the agent their name and file ID", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-sticker-"));
     temporary.push(workspace);
     const paths = workspacePaths(workspace);
@@ -123,7 +123,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
     };
     const stickerUpdate = update(1, 42, "") as any;
     delete stickerUpdate.message.text;
@@ -163,7 +163,7 @@ describe("tgfx host pipeline", () => {
     expect(envelope.attachments[0]).toMatchObject({
       kind: "sticker", state: "local",
       sticker: {
-        id: "secret-file-id", unique_id: "stable-sticker-id", name: "FriendlyFrogs", emoji: "🐸",
+        file_id: "secret-file-id", name: "FriendlyFrogs", emoji: "🐸",
         image: { state: "local", mime: "image/webp" },
       },
     });
@@ -184,7 +184,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
     };
     const texts: string[] = [];
     let phase = 0;
@@ -247,7 +247,7 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
-  test("exposes /compact and /model and uses a Thinking draft while streaming", async () => {
+  test("exposes /clear, /compact, and /model and uses a Thinking draft while streaming", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-commands-"));
     temporary.push(workspace);
     const paths = workspacePaths(workspace);
@@ -256,7 +256,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
     };
     const texts: string[] = [];
     const menus: Array<Array<{ command: string }>> = [];
@@ -274,20 +274,24 @@ describe("tgfx host pipeline", () => {
             update(1, 42, "/unknown"),
             update(2, 42, "/status"),
             update(3, 42, "/compact"),
+            update(4, 42, "/clear"),
           ];
         }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
       },
       setCommands: async (_chat: string, menu: Array<{ command: string }>) => { menus.push(menu); return true as const; },
       deleteCommands: async () => true as const,
-      sendText: async (_chat: string, text: string) => { texts.push(text); return { message_id: 700 } as Message.TextMessage; },
+      sendText: async (_chat: string, text: string) => {
+        texts.push(text);
+        if (text === "✓ Started a fresh conversation") delivered();
+        return { message_id: 700 } as Message.TextMessage;
+      },
       sendRichDraft: async (_chat: string, _draftId: number, rich: InputRichMessageWithoutUpload) => {
         drafts.push(rich);
         return true as const;
       },
       sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
         finals.push(rich);
-        delivered();
         return { message_id: 701 } as Message.TextMessage;
       },
       editRich: async () => { throw new Error("streaming compact must not edit a regular message"); },
@@ -303,8 +307,9 @@ describe("tgfx host pipeline", () => {
 
     expect(texts).toContain("Unknown command /unknown.");
     expect(texts).toContain("Unknown command /status.");
+    expect(texts).toContain("✓ Started a fresh conversation");
     const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
-    expect(commands).toEqual(["compact", "model", "cost"]);
+    expect(commands).toEqual(["clear", "compact", "model", "cost"]);
     expect(drafts).toEqual([{
       blocks: [{
         type: "thinking",
@@ -322,6 +327,8 @@ describe("tgfx host pipeline", () => {
     expect(events.filter((entry) => entry.event === "prompt").map((entry) => entry.value.prompt)).toEqual([
       [{ type: "text", text: "/compact" }],
     ]);
+    expect(events.filter((entry) => entry.event === "new")).toHaveLength(2);
+    expect(events.filter((entry) => entry.event === "close")).toHaveLength(1);
   });
 
   test("switches the route model through the live /model button flow with custom icons disabled", async () => {
@@ -333,7 +340,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
       modelPicker: { customIcons: false },
     };
     let phase = 0;
@@ -443,7 +450,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
     };
     let phase = 0;
     let sevenDayCallback = "";
@@ -526,7 +533,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 10 },
     };
     const sent: InputRichMessageWithoutUpload[] = [];
     const edits: Array<{ messageId: number; rich: InputRichMessageWithoutUpload }> = [];
@@ -590,7 +597,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 10 },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
     };
     let phase = 0;
     let approvalData!: string;

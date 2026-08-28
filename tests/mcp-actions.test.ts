@@ -78,7 +78,7 @@ describe("Telegram MCP actions", () => {
         name: "source.txt", mimeType: "text/plain", size: 5,
       }, {
         ref: "sticker_current", kind: "sticker", fileId: "sticker-file-id",
-        fileUniqueId: "stable-sticker-id", stickerId: "stable-sticker-id",
+        fileUniqueId: "stable-sticker-id",
         stickerName: "FriendlyFrogs", mimeType: "image/webp", width: 512, height: 512,
       }],
       raw: { update_id: 1 } as never,
@@ -178,7 +178,7 @@ describe("Telegram MCP actions", () => {
       const sentFile = await call("send_file", { path: "result.txt" });
       if (!sentFile.structuredContent) throw new Error(JSON.stringify(sentFile));
       expect(sentFile.structuredContent.sent).toBeTrue();
-      const sentSticker = await call("send_sticker", { sticker_ref: "sticker_current" });
+      const sentSticker = await call("send_sticker_by_id", { file_id: "sticker-file-id" });
       expect(sentSticker.structuredContent).toMatchObject({ sent: true });
       const getFilesBeforeMetadata = requests.filter((request) => request.method === "getFile").length;
       const pack = await call("get_sticker_pack", { name: "FriendlyFrogs" });
@@ -187,7 +187,7 @@ describe("Telegram MCP actions", () => {
         total: 2,
       });
       expect(pack.structuredContent.stickers[0]).toMatchObject({
-        id: "pack-sticker-id-1", unique_id: "pack-stable-id-1", emoji: "🐸", format: "static",
+        file_id: "pack-sticker-id-1", emoji: "🐸", format: "static",
       });
       expect(pack.structuredContent.stickers[0].image).toBeUndefined();
       expect(requests.filter((request) => request.method === "getFile")).toHaveLength(getFilesBeforeMetadata);
@@ -201,8 +201,8 @@ describe("Telegram MCP actions", () => {
       expect(await readFile(downloadedPack.structuredContent.stickers[0].image.path, "utf8")).toBe("hello");
       expect(maxActiveGetFiles).toBe(2);
 
-      expect((await call("send_sticker", { sticker_id: "pack-sticker-id-1" })).structuredContent.sent).toBeTrue();
-      expect((await call("send_sticker", {
+      expect((await call("send_sticker_by_id", { file_id: "pack-sticker-id-1" })).structuredContent.sent).toBeTrue();
+      expect((await call("send_sticker_file", {
         path: "custom.png", emoji: "✨",
       })).structuredContent.sent).toBeTrue();
       const download = await call("download_attachment", { attachment_ref: "att_current" });
