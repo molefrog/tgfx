@@ -220,6 +220,10 @@ function modelLabel(model: FxModelOption): string {
   return slash > 0 ? model.value.slice(slash + 1) : model.value;
 }
 
+function modelIconProvider(model: FxModelOption, provider: string): string {
+  return `${model.value} ${model.name}`.toLowerCase().includes("codex") ? "codex" : provider;
+}
+
 function currentLabel(data: ModelPickerData): string {
   const current = data.options.find((model) => model.value === data.currentValue);
   return current ? modelLabel(current) : data.currentValue;
@@ -288,16 +292,18 @@ export function modelPicker(
   const pages = Math.max(1, Math.ceil(provider.models.length / MODELS_PER_PAGE));
   const page = clampPage(requestedPage, pages);
   const visible = provider.models.slice(page * MODELS_PER_PAGE, (page + 1) * MODELS_PER_PAGE);
-  const icon = icons[provider.id];
   return {
     text: pickerTitle(data),
     replyMarkup: {
       inline_keyboard: [
-        ...visible.map((model) => [{
-          text: model.value === data.currentValue ? `Current · ${modelLabel(model)}` : modelLabel(model),
-          callback_data: callback(data.interactionId, `s.${model.index}`),
-          ...(icon ? { icon_custom_emoji_id: icon } : {}),
-        }]),
+        ...visible.map((model) => {
+          const icon = icons[modelIconProvider(model, provider.id)];
+          return [{
+            text: model.value === data.currentValue ? `Current · ${modelLabel(model)}` : modelLabel(model),
+            callback_data: callback(data.interactionId, `s.${model.index}`),
+            ...(icon ? { icon_custom_emoji_id: icon } : {}),
+          }];
+        }),
         ...(pages > 1
           ? [navigation(data, page, pages, (target) => `v.${providerIndex}.${target}`)]
           : []),

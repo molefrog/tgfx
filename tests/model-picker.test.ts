@@ -82,6 +82,26 @@ describe("model picker", () => {
     expect(modelPicker(data, 999)).toBeUndefined();
   });
 
+  test("uses the Codex icon for Codex models inside the OpenAI provider", () => {
+    const icons = providerIconsFromStickerSet(Array.from(
+      { length: 36 },
+      (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
+    ));
+    const mixed: ModelPickerData = {
+      interactionId: "mixed-openai",
+      currentValue: "openai/gpt-5.4",
+      options: [
+        { value: "openai/gpt-5.3-codex", name: "openai/gpt-5.3-codex" },
+        { value: "openai/gpt-5.4", name: "openai/gpt-5.4" },
+      ],
+    };
+    const buttons = modelPicker(mixed, 0, 0, icons)?.replyMarkup.inline_keyboard.flat();
+    expect(buttons?.find((button) => button.text === "gpt-5.3-codex"))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-36" });
+    expect(buttons?.find((button) => button.text === "Current · gpt-5.4"))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-7" });
+  });
+
   test("uses readable names for providers in the current FX catalog", () => {
     const icons = providerIconsFromStickerSet(Array.from(
       { length: 35 },
