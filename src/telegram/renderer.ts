@@ -151,7 +151,7 @@ export class TurnRenderer {
     return this.deliver(outboxId, rich, plain);
   }
 
-  private register(messageId: string): void {
+  private register(messageId: string, excerpt?: string): void {
     this.state.registerBotMessage({
       ref: `msg_${crypto.randomUUID().replaceAll("-", "")}`,
       botId: this.route.botId,
@@ -159,6 +159,7 @@ export class TurnRenderer {
       chatId: this.route.chatId,
       topicId: this.route.topicId,
       messageId,
+      ...(excerpt ? { excerpt } : {}),
     });
   }
 
@@ -171,7 +172,7 @@ export class TurnRenderer {
         this.signal,
       );
       const id = String(message.message_id);
-      this.register(id);
+      this.register(id, plain);
       this.state.markOutbox(outboxId, "sent", id);
       return [id];
     } catch (richError) {
@@ -184,7 +185,7 @@ export class TurnRenderer {
             this.route.chatId, part, this.route.topicId, {}, this.signal,
           ), undefined, this.signal);
           const id = String(message.message_id);
-          this.register(id);
+          this.register(id, part);
           ids.push(id);
         }
         this.state.markOutbox(outboxId, "sent", ids.at(-1));
@@ -210,7 +211,7 @@ export async function recoverOutbox(
       chatId: string; topicId: string; rich?: InputRichMessageWithoutUpload; plain?: string; text?: string;
     };
     const route = state.route(row.route_key);
-    const register = (messageId: string) => {
+    const register = (messageId: string, excerpt?: string) => {
       if (!route) return;
       state.registerBotMessage({
         ref: `msg_${crypto.randomUUID().replaceAll("-", "")}`,
@@ -219,6 +220,7 @@ export async function recoverOutbox(
         chatId: payload.chatId,
         topicId: payload.topicId,
         messageId,
+        ...(excerpt ? { excerpt } : {}),
       });
     };
     try {
@@ -227,7 +229,7 @@ export async function recoverOutbox(
         try {
           const message = await retryTelegram(() => api.sendRich(payload.chatId, payload.rich!, payload.topicId));
           const id = String(message.message_id);
-          register(id);
+          register(id, payload.plain ?? payload.text);
           state.markOutbox(row.id, "sent", id);
           sent++;
           continue;
@@ -239,7 +241,7 @@ export async function recoverOutbox(
       for (const part of splitTelegramText(payload.plain ?? payload.text ?? "Done.")) {
         const message = await retryTelegram(() => api.sendText(payload.chatId, part, payload.topicId));
         const id = String(message.message_id);
-        register(id);
+        register(id, part);
         ids.push(id);
       }
       state.markOutbox(row.id, "sent", ids.at(-1));
