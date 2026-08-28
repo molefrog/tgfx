@@ -169,6 +169,7 @@ export class TgfxApp {
     fxBinary: string;
     model?: string;
     permissionMode?: FxPermissionMode;
+    mcpLaunch?: { command: string; args: string[] };
     renderer?: Partial<TgfxConfig["renderer"]>;
     log?: (event: TgfxLogEvent) => void;
   }) {
@@ -1283,7 +1284,10 @@ export class TgfxApp {
     const existing = this.sessions.get(route.key);
     if (existing) return existing;
     const row = this.state.ensureRoute(route);
-    const entrypoint = fileURLToPath(new URL("./index.ts", import.meta.url));
+    const mcpLaunch = this.options.mcpLaunch ?? {
+      command: process.execPath,
+      args: [fileURLToPath(new URL("./index.ts", import.meta.url)), "mcp"],
+    };
     const session = new FxRouteSession({
       workspace: this.options.paths.workspace,
       binary: this.options.fxBinary,
@@ -1291,8 +1295,8 @@ export class TgfxApp {
       permissionMode: this.options.permissionMode,
       previousSessionId: row.session_id ?? undefined,
       mcp: {
-        command: process.execPath,
-        args: [entrypoint, "mcp"],
+        command: mcpLaunch.command,
+        args: mcpLaunch.args,
         env: {
           TGFX_MCP_TOKEN: this.options.token,
           TGFX_MCP_BOT_ID: this.options.bot.id,

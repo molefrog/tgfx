@@ -10,5 +10,6 @@ logs/
 prototypes/
 .DS_Store
 coverage/
+dist/
 *.tgz
 /telegram-provider-emoji/

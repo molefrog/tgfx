@@ -1,0 +1,22 @@
+#!/bin/sh
+
+if ! command -v bun >/dev/null 2>&1; then
+  printf '%s\n' \
+    'tgfx requires Bun 1.4 or newer.' \
+    'Install Bun: https://bun.com/docs/installation' \
+    'Standalone releases: https://github.com/molefrog/telegram-fx/releases' >&2
+  exit 127
+fi
+
+launcher=$0
+while [ -L "$launcher" ]; do
+  launcher_dir=$(CDPATH= cd -P "$(dirname "$launcher")" && pwd)
+  link_target=$(readlink "$launcher")
+  case $link_target in
+    /*) launcher=$link_target ;;
+    *) launcher=$launcher_dir/$link_target ;;
+  esac
+done
+launcher_dir=$(CDPATH= cd -P "$(dirname "$launcher")" && pwd)
+
+exec bun "$launcher_dir/../dist/tgfx.js" "$@"

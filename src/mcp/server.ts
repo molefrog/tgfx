@@ -7,6 +7,7 @@ import * as z from "zod/v4";
 import { StateStore } from "../state";
 import { adminCapabilitiesForMember, TelegramApi } from "../telegram/api";
 import type { AdminCapability, AttachmentRef } from "../types";
+import { VERSION } from "../version";
 import { safeDownloadPath, safeName, writeResponseLimited } from "./files";
 
 type McpEnvironment = {
@@ -133,7 +134,7 @@ export async function runTelegramMcpServer(): Promise<void> {
   }
   const adminEnabled = (capability: AdminCapability) => grantedAdminCapabilities.has(capability);
   const server = new McpServer(
-    { name: "tgfx-telegram", version: "0.1.0" },
+    { name: "tgfx-telegram", version: VERSION },
     { instructions: [
       "The user's Telegram message is supplied separately in a telegram_message JSON envelope.",
       "Your normal assistant response is automatically sent as the reply to that message.",

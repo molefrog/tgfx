@@ -2,6 +2,7 @@
 import { confirm, isCancel, note, password, select, spinner, text } from "@clack/prompts";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { TgfxApp, type TgfxLogEvent } from "./app";
 import {
   findBotIndex,
@@ -356,6 +357,9 @@ async function runCommand(tokens: string[]): Promise<void> {
   try {
     app = new TgfxApp({
       ...appRuntime,
+      mcpLaunch: Bun.isStandaloneExecutable
+        ? { command: process.execPath, args: ["mcp"] }
+        : { command: process.execPath, args: [fileURLToPath(import.meta.url), "mcp"] },
       ...(typeof flags.model === "string" ? { model: flags.model } : {}),
       permissionMode: flags.yolo ? "yolo" : "auto",
       renderer: {

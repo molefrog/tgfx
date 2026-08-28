@@ -1,6 +1,7 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import { VERSION } from "../version";
 
 export type FxSessionInfo = {
   sessionId: string;
@@ -208,7 +209,7 @@ export class FxRouteSession {
       const initialized = await ctx.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: { session: { configOptions: { boolean: {} } } },
-        clientInfo: { name: "tgfx", title: "𝒕𝒈(𝒇x)", version: "0.1.0" },
+        clientInfo: { name: "tgfx", title: "𝒕𝒈(𝒇x)", version: VERSION },
       });
       const mcpServers: acp.McpServer[] = this.options.mcp ? [{
         name: "telegram",

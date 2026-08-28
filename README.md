@@ -9,14 +9,27 @@ and delivers a permanent rich response when the turn finishes.
 actions, rendering, approvals, and the small recovery journal needed between
 processes.
 
-## Run from source
+## Install with Bun
 
-Requirements: macOS or Linux, [Bun](https://bun.sh), an authenticated `fx 0.0.6`
+Requirements: macOS or Linux, [Bun 1.4](https://bun.sh) or newer, an authenticated `fx 0.0.6`
 or newer, and a Telegram bot token from BotFather.
 
 ```bash
+# Run from Bun's package cache
+bunx --package @molefrog/tgfx tgfx
+
+# Or install the command globally
+bun add --global @molefrog/tgfx
+tgfx
+```
+
+For development from source:
+
+```bash
 bun install
-bun link
+
+# Point the terminal command at live source; an agent can do this when setting up the checkout.
+ln -sfn "$PWD/src/index.ts" "$(bun pm bin --global)/tgfx"
 
 cd /path/to/your/project
 tgfx
