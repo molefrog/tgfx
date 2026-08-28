@@ -27,6 +27,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   azure: "Azure",
   bedrock: "Bedrock",
   bytedance: "ByteDance",
+  codex: "Codex",
   cohere: "Cohere",
   deepinfra: "DeepInfra",
   deepseek: "DeepSeek",
@@ -97,6 +98,7 @@ const PROVIDER_ICON_ALIASES: readonly (readonly string[])[] = [
   ["thinkingmachines"],
   ["inclusionai"],
   ["interfaze"],
+  ["codex"],
 ];
 
 // Stable IDs published by the tgfx pack utility. Telegram may return a stale
@@ -138,6 +140,7 @@ const PROVIDER_ICON_FALLBACK_IDS: readonly string[] = [
   "5226528183330838677",
   "5229191144658739880",
   "5229187485346606266",
+  "5229233944007844947",
 ];
 
 export function providerIconsFromStickerSet(
@@ -160,11 +163,11 @@ type ProviderGroup = {
 
 const UNQUALIFIED_MODEL_PROVIDERS: readonly [prefix: string, provider: string][] = [
   ["grok-", "spacexai"],
-  ["gpt-", "openai"],
-  ["chatgpt-", "openai"],
-  ["o1", "openai"],
-  ["o3", "openai"],
-  ["o4", "openai"],
+  ["gpt-", "codex"],
+  ["chatgpt-", "codex"],
+  ["o1", "codex"],
+  ["o3", "codex"],
+  ["o4", "codex"],
   ["claude-", "anthropic"],
   ["deepseek-", "deepseek"],
   ["gemini-", "google"],

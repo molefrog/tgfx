@@ -114,7 +114,7 @@ describe("model picker", () => {
 
   test("infers providers when FX returns narrowed unqualified model values", () => {
     const icons = providerIconsFromStickerSet(Array.from(
-      { length: 31 },
+      { length: 36 },
       (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
     ));
     const narrowed: ModelPickerData = {
@@ -130,8 +130,8 @@ describe("model picker", () => {
     const buttons = providerPicker(narrowed, 0, icons).replyMarkup.inline_keyboard.flat();
     expect(buttons.find((button) => button.text === "xAI · 2"))
       .toMatchObject({ icon_custom_emoji_id: "emoji-8" });
-    expect(buttons.find((button) => button.text === "OpenAI · 1"))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-7" });
+    expect(buttons.find((button) => button.text === "Codex · 1"))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-36" });
     expect(buttons.find((button) => button.text === "DeepSeek · 1"))
       .toMatchObject({ icon_custom_emoji_id: "emoji-3" });
   });
@@ -146,5 +146,6 @@ describe("model picker", () => {
     expect(stale.thinkingmachines).toBe("5226528183330838677");
     expect(stale.inclusionai).toBe("5229191144658739880");
     expect(stale.interfaze).toBe("5229187485346606266");
+    expect(stale.codex).toBe("5229233944007844947");
   });
 });
