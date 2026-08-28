@@ -113,6 +113,31 @@ type ProviderGroup = {
   models: Array<FxModelOption & { index: number }>;
 };
 
+const UNQUALIFIED_MODEL_PROVIDERS: readonly [prefix: string, provider: string][] = [
+  ["grok-", "spacexai"],
+  ["gpt-", "openai"],
+  ["chatgpt-", "openai"],
+  ["o1", "openai"],
+  ["o3", "openai"],
+  ["o4", "openai"],
+  ["claude-", "anthropic"],
+  ["deepseek-", "deepseek"],
+  ["gemini-", "google"],
+  ["gemma-", "google"],
+  ["kimi-", "moonshotai"],
+  ["nemotron-", "nvidia"],
+  ["qwen", "alibaba"],
+  ["glm-", "zai"],
+  ["minimax-", "minimax"],
+];
+
+function providerId(model: FxModelOption): string {
+  const slash = model.value.indexOf("/");
+  if (slash > 0) return model.value.slice(0, slash);
+  const value = model.value.toLowerCase();
+  return UNQUALIFIED_MODEL_PROVIDERS.find(([prefix]) => value.startsWith(prefix))?.[1] ?? "other";
+}
+
 function callback(interactionId: string, action: string): string {
   return `model:${interactionId}:${action}`;
 }
@@ -130,8 +155,7 @@ function rowsOfTwo(buttons: ModelPickerButton[]): ModelPickerButton[][] {
 function providers(models: FxModelOption[]): ProviderGroup[] {
   const grouped = new Map<string, ProviderGroup>();
   for (const [index, model] of models.entries()) {
-    const slash = model.value.indexOf("/");
-    const id = slash > 0 ? model.value.slice(0, slash) : "other";
+    const id = providerId(model);
     let provider = grouped.get(id);
     if (!provider) {
       provider = { id, name: PROVIDER_NAMES[id] ?? (id === "other" ? "Other" : id), models: [] };

@@ -111,4 +111,28 @@ describe("model picker", () => {
     expect(buttons.find((button) => button.text.startsWith("Thinking Machines")))
       .not.toHaveProperty("icon_custom_emoji_id");
   });
+
+  test("infers providers when FX returns narrowed unqualified model values", () => {
+    const icons = providerIconsFromStickerSet(Array.from(
+      { length: 31 },
+      (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
+    ));
+    const narrowed: ModelPickerData = {
+      interactionId: "narrowed",
+      currentValue: "deepseek/deepseek-v3.2",
+      options: [
+        { value: "grok-4.6", name: "grok-4.6" },
+        { value: "grok-4.5", name: "grok-4.5" },
+        { value: "gpt-5.6-sol", name: "gpt-5.6-sol" },
+        { value: "deepseek/deepseek-v3.2", name: "deepseek/deepseek-v3.2" },
+      ],
+    };
+    const buttons = providerPicker(narrowed, 0, icons).replyMarkup.inline_keyboard.flat();
+    expect(buttons.find((button) => button.text === "xAI · 2"))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-8" });
+    expect(buttons.find((button) => button.text === "OpenAI · 1"))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-7" });
+    expect(buttons.find((button) => button.text === "DeepSeek · 1"))
+      .toMatchObject({ icon_custom_emoji_id: "emoji-3" });
+  });
 });
