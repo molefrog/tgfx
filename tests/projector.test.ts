@@ -532,6 +532,36 @@ describe("ordered ACP projector", () => {
     expect(details(final(projector)[0]).summary).toBe("Read 1 file, used external tools");
   });
 
+  test("adds server custom emoji to MCP tool rows only when icons are supplied", () => {
+    const projector = new AcpProjector({
+      github: "github-emoji",
+      mcp: "mcp-emoji",
+      telegram: "telegram-emoji",
+    });
+    for (const [id, name, title] of [
+      ["github", "mcp_github_search_code", "Searching GitHub"],
+      ["telegram", "mcp_telegram_send_file", "Sending Telegram file"],
+      ["unknown", "mcp_new_service_call", "Calling new service"],
+    ] as const) {
+      projector.apply(update({
+        sessionUpdate: "tool_call", toolCallId: id, name, title,
+        kind: "other", status: "completed", content: [],
+      }));
+    }
+
+    const rows = details(final(projector)[0]).blocks;
+    expect(rendered(rows[0])).toContain('"custom_emoji_id":"github-emoji"');
+    expect(rendered(rows[1])).toContain('"custom_emoji_id":"telegram-emoji"');
+    expect(rendered(rows[2])).toContain('"custom_emoji_id":"mcp-emoji"');
+
+    const plain = new AcpProjector();
+    plain.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "github", name: "mcp_github_search_code",
+      title: "Searching GitHub", kind: "other", status: "completed", content: [],
+    }));
+    expect(rendered(details(final(plain)[0]).blocks)).not.toContain("custom_emoji");
+  });
+
   test("uses only the initial thinking block before real output", () => {
     const projector = new AcpProjector();
     expect(draft(projector)).toEqual([{

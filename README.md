@@ -82,7 +82,8 @@ model catalog from the route's FX session and switches that session through a
 provider-first, paginated button picker. Provider and model buttons use the
 public `tgfx icons` custom emoji pack by default and retry as
 plain buttons when Telegram does not permit the bot to use custom emoji. Set
-`modelPicker.customIcons` to `false` to disable the pack lookup and custom icons.
+`modelPicker.customIcons` to `false` to disable the pack lookup and custom icons
+in both `/model` buttons and rendered MCP tool-call rows.
 `/cost` renders FX's local usage and
 spend for the last 24 hours, 7 days, or 30 days as a rich report with period
 buttons. Other ACP-advertised commands are not projected into Telegram yet.

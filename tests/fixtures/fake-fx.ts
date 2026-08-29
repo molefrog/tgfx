@@ -159,6 +159,20 @@ const app = acp.agent({ name: "fake-fx" })
         },
       } as unknown as acp.SessionNotification);
     }
+    if (text.includes("MCP_TOOL")) {
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId: context.params.sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "github-mcp",
+          name: "mcp_github_search_code",
+          title: "Searching GitHub",
+          kind: "other",
+          status: "completed",
+          content: [],
+        },
+      });
+    }
     if (text.includes("PERMISSION")) {
       const decision = await context.client.request(acp.methods.client.session.requestPermission, {
         sessionId: context.params.sessionId,

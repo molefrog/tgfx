@@ -12,6 +12,7 @@ import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegr
 import { costReport, type CostReportView } from "./telegram/cost-report";
 import { TGFX_CUSTOM_ICON_SET } from "./telegram/custom-icon-set";
 import { PeerDraftLimiter } from "./telegram/draft-scheduler";
+import { mcpIconsFromStickerSet, type McpIconMap } from "./telegram/mcp-icons";
 import {
   closedModelPicker,
   failedModelSelection,
@@ -151,8 +152,8 @@ export class TgfxApp {
   private readonly stickerTemporaryDirectories = new Set<string>();
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
-  private customModelIconsEnabled: boolean;
-  private providerIcons?: Promise<ProviderIconMap>;
+  private customIconsEnabled: boolean;
+  private iconStickers?: Promise<ReadonlyArray<{ custom_emoji_id?: string }> | undefined>;
   private pollTask?: Promise<void>;
   private stopping = false;
   private stopTask?: Promise<void>;
@@ -173,7 +174,7 @@ export class TgfxApp {
     log?: (event: TgfxLogEvent) => void;
   }) {
     this.config = options.config;
-    this.customModelIconsEnabled = options.config.modelPicker?.customIcons ?? true;
+    this.customIconsEnabled = options.config.modelPicker?.customIcons ?? true;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
   }
@@ -694,16 +695,28 @@ export class TgfxApp {
   }
 
   private async modelProviderIcons(refresh = false): Promise<ProviderIconMap> {
-    if (!this.customModelIconsEnabled) return {};
-    if (refresh) this.providerIcons = undefined;
-    this.providerIcons ??= Promise.resolve()
+    const stickers = await this.customIconStickers(refresh);
+    return stickers ? providerIconsFromStickerSet(stickers) : {};
+  }
+
+  private async mcpToolIcons(): Promise<McpIconMap> {
+    const stickers = await this.customIconStickers();
+    return stickers ? mcpIconsFromStickerSet(stickers) : {};
+  }
+
+  private async customIconStickers(
+    refresh = false,
+  ): Promise<ReadonlyArray<{ custom_emoji_id?: string }> | undefined> {
+    if (!this.customIconsEnabled) return undefined;
+    if (refresh) this.iconStickers = undefined;
+    this.iconStickers ??= Promise.resolve()
       .then(() => this.options.telegram.getStickerSet(TGFX_CUSTOM_ICON_SET.name))
-      .then((set) => providerIconsFromStickerSet(set.stickers))
+      .then((set) => set.stickers)
       .catch((error) => {
-        this.log(`Could not load ${TGFX_CUSTOM_ICON_SET.name}; using plain model buttons: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
-        return {};
+        this.log(`Could not load ${TGFX_CUSTOM_ICON_SET.name}; using plain rendering: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
+        return undefined;
       });
-    return this.providerIcons;
+    return this.iconStickers;
   }
 
   private hasCustomModelIcons(view: ModelPickerView): boolean {
@@ -713,7 +726,8 @@ export class TgfxApp {
   }
 
   private disableCustomModelIcons(error: unknown): void {
-    this.customModelIconsEnabled = false;
+    this.customIconsEnabled = false;
+    this.iconStickers = undefined;
     this.log(`Telegram rejected model picker custom icons; using plain buttons: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
   }
 
@@ -1215,7 +1229,7 @@ export class TgfxApp {
     const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
     const session = await this.session(message.route);
-    const projector = new AcpProjector();
+    const projector = new AcpProjector(await this.mcpToolIcons());
     const controller = new AbortController();
     const renderer = new TurnRenderer(
       this.options.telegram,

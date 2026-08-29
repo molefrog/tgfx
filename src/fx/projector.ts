@@ -5,6 +5,7 @@ import {
   type TelegramMcpToolName,
 } from "../mcp/tool-labels";
 import { redactSecrets } from "../secrets";
+import { mcpIconForTool, type McpIconMap } from "../telegram/mcp-icons";
 import { markdownToRichBlocks, type RichBlock } from "../telegram/rich-markdown";
 
 type AssistantEntry = { type: "assistant"; messageId?: string; markdown: string };
@@ -478,6 +479,8 @@ export class AcpProjector {
   private commands: TimelineSnapshot["commands"] = [];
   private changedAt = Date.now();
 
+  constructor(private readonly mcpIcons: McpIconMap = {}) {}
+
   apply(update: acp.SessionUpdate): ProjectorChange {
     this.changedAt = Date.now();
     switch (update.sessionUpdate) {
@@ -655,12 +658,26 @@ export class AcpProjector {
   private toolRow(tool: ToolState, last: boolean): RichBlock {
     const argument = toolArgumentPreview(tool);
     const branch = last ? "┗" : "┣";
-    const title = `${branch} ${failed(tool.status) ? "× " : ""}${redactSecrets(displayToolTitle(tool))}`;
+    const prefix = `${branch} ${failed(tool.status) ? "× " : ""}`;
+    const displayTitle = redactSecrets(displayToolTitle(tool));
+    const iconId = mcpIconForTool(this.mcpIcons, tool.name ?? "")
+      ?? mcpIconForTool(this.mcpIcons, tool.title);
+    const title = iconId
+      ? [
+          prefix,
+          {
+            type: "custom_emoji" as const,
+            custom_emoji_id: iconId,
+            alternative_text: "🧩",
+          },
+          ` ${displayTitle}`,
+        ]
+      : [`${prefix}${displayTitle}`];
     return {
       type: "paragraph",
       text: argument
-        ? [title, " ", { type: "code", text: argument }]
-        : title,
+        ? [...title, " ", { type: "code", text: argument }]
+        : iconId ? title : title[0]!,
     };
   }
 

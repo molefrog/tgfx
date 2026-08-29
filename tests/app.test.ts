@@ -114,6 +114,65 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
+  test("uses the model-picker custom icon flag for MCP tool rows", async () => {
+    const run = async (customIcons: boolean) => {
+      const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-mcp-icons-"));
+      temporary.push(workspace);
+      const paths = workspacePaths(workspace);
+      const fxBinary = await fakeFx(workspace);
+      const config: TgfxConfig = {
+        version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+        approvals: { chatId: "42", topicId: "0" },
+        renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 10 },
+        modelPicker: { customIcons },
+      };
+      let firstPoll = true;
+      let packLookups = 0;
+      let final: InputRichMessageWithoutUpload | undefined;
+      let delivered!: () => void;
+      const permanent = new Promise<void>((resolve) => { delivered = resolve; });
+      const telegram = {
+        getWebhookInfo: async () => ({ url: "" }),
+        getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+          if (firstPoll) { firstPoll = false; return [update(1, 42, "MCP_TOOL")]; }
+          return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+        },
+        setCommands: async () => true as const,
+        deleteCommands: async () => true as const,
+        getStickerSet: async () => {
+          packLookups++;
+          return {
+            name: "tgfx", title: "tgfx icons", sticker_type: "custom_emoji",
+            stickers: Array.from({ length: 139 }, (_, index) => ({ custom_emoji_id: `emoji-${index}` })),
+          };
+        },
+        sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
+          final = rich;
+          delivered();
+          return { message_id: 510 } as Message.TextMessage;
+        },
+        sendText: async () => ({ message_id: 511 }) as Message.TextMessage,
+      } as unknown as TelegramApi;
+      const app = new TgfxApp({
+        config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+        telegram, fxBinary, log: () => undefined,
+      });
+      const running = app.run();
+      await Promise.race([permanent, Bun.sleep(5_000).then(() => { throw new Error("MCP icon delivery timed out"); })]);
+      await app.stop();
+      await running;
+      return { final, packLookups };
+    };
+
+    const enabled = await run(true);
+    expect(enabled.packLookups).toBe(1);
+    expect(JSON.stringify(enabled.final)).toContain('"custom_emoji_id":"emoji-53"');
+
+    const disabled = await run(false);
+    expect(disabled.packLookups).toBe(0);
+    expect(JSON.stringify(disabled.final)).not.toContain("custom_emoji");
+  });
+
   test("downloads sticker images before teaching the agent their name and file ID", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-sticker-"));
     temporary.push(workspace);
