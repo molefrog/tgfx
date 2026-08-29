@@ -10,6 +10,7 @@ import { isFxUsagePeriod, readFxUsage, type FxUsagePeriod } from "./fx/usage";
 import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
 import { costReport, type CostReportView } from "./telegram/cost-report";
+import { TGFX_CUSTOM_ICON_SET } from "./telegram/custom-icon-set";
 import { PeerDraftLimiter } from "./telegram/draft-scheduler";
 import {
   closedModelPicker,
@@ -77,8 +78,6 @@ const COMPACTING_MESSAGE: InputRichMessageWithoutUpload = {
 const COMPACTED_MESSAGE: InputRichMessageWithoutUpload = {
   blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
 };
-const PROVIDER_ICON_PACK = "ai_provider_labs_by_fxharness_bot";
-
 type StopCapableUpdate = Update & {
   stopped_message_generation?: {
     chat: { id: number };
@@ -692,10 +691,10 @@ export class TgfxApp {
     if (!this.customModelIconsEnabled) return {};
     if (refresh) this.providerIcons = undefined;
     this.providerIcons ??= Promise.resolve()
-      .then(() => this.options.telegram.getStickerSet(PROVIDER_ICON_PACK))
+      .then(() => this.options.telegram.getStickerSet(TGFX_CUSTOM_ICON_SET.name))
       .then((set) => providerIconsFromStickerSet(set.stickers))
       .catch((error) => {
-        this.log(`Could not load ${PROVIDER_ICON_PACK}; using plain model buttons: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
+        this.log(`Could not load ${TGFX_CUSTOM_ICON_SET.name}; using plain model buttons: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
         return {};
       });
     return this.providerIcons;

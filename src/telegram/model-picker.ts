@@ -1,4 +1,5 @@
 import type { FxModelConfig, FxModelOption } from "../fx/acp";
+import { customIcons } from "./custom-icon-set";
 
 export type ModelPickerButton = {
   text: string;
@@ -18,143 +19,23 @@ export type ModelPickerData = FxModelConfig & {
 const PROVIDERS_PER_PAGE = 6;
 const MODELS_PER_PAGE = 6;
 
-const PROVIDER_NAMES: Record<string, string> = {
-  alibaba: "Alibaba",
-  amazon: "AWS",
-  "arcee-ai": "Arcee AI",
-  anthropic: "Anthropic",
-  aws: "AWS",
-  azure: "Azure",
-  bedrock: "Bedrock",
-  bytedance: "ByteDance",
-  codex: "Codex",
-  cohere: "Cohere",
-  deepinfra: "DeepInfra",
-  deepseek: "DeepSeek",
-  google: "Google",
-  inception: "Inception Labs",
-  inclusionai: "InclusionAI",
-  interfaze: "Interfaze",
-  kwaipilot: "KwaiPilot",
-  meta: "Meta",
-  minimax: "MiniMax",
-  mistral: "Mistral",
-  morph: "Morph",
-  moonshotai: "Moonshot",
-  nvidia: "NVIDIA",
-  novita: "Novita AI",
-  openai: "OpenAI",
-  perplexity: "Perplexity",
-  poolside: "Poolside",
-  recraft: "Recraft",
-  sakana: "Sakana AI",
-  spacexai: "xAI",
-  stepfun: "StepFun",
-  tencent: "Tencent",
-  thinkingmachines: "Thinking Machines",
-  vertex: "Vertex AI",
-  vertexai: "Vertex AI",
-  voyage: "Voyage AI",
-  xiaomi: "Xiaomi",
-  zai: "Z.ai",
-};
-
 export type ProviderIconMap = Readonly<Record<string, string>>;
 
-// This order mirrors manifest.json in the public tgfx custom emoji pack.
-const PROVIDER_ICON_ALIASES: readonly (readonly string[])[] = [
-  ["alibaba"],
-  ["anthropic"],
-  ["deepseek"],
-  ["google"],
-  ["mistral"],
-  ["moonshot", "moonshotai"],
-  ["openai"],
-  ["spacexai", "xai"],
-  ["zai"],
-  ["amazon", "aws"],
-  ["azure"],
-  ["bedrock"],
-  ["deepinfra"],
-  ["meta"],
-  ["novita"],
-  ["recraft"],
-  ["vertex", "vertexai"],
-  ["voyage", "voyageai"],
-  ["kwaipilot"],
-  ["xiaomi"],
-  ["nvidia"],
-  ["poolside"],
-  ["tencent"],
-  ["arcee-ai"],
-  ["inception"],
-  ["bytedance"],
-  ["cohere"],
-  ["stepfun"],
-  ["minimax"],
-  ["perplexity"],
-  ["morph"],
-  ["sakana"],
-  ["thinkingmachines"],
-  ["inclusionai"],
-  ["interfaze"],
-  ["codex"],
-];
-
-// Stable IDs published by the tgfx pack utility. Telegram may return a stale
-// getStickerSet snapshot to bots other than the pack creator, so these fill any
-// positions that have not propagated yet.
-const PROVIDER_ICON_FALLBACK_IDS: readonly string[] = [
-  "5226565966158144571",
-  "5226488832840474998",
-  "5226984789894014413",
-  "5226904869142567791",
-  "5226434089187320556",
-  "5226762555401217428",
-  "5226629089292491967",
-  "5224341327717642946",
-  "5226834062311726876",
-  "5226958749507298137",
-  "5224543027971796744",
-  "5226880808735773428",
-  "5226716096739974456",
-  "5226852204253583714",
-  "5224650058556813870",
-  "5226541828441940973",
-  "5226655189808751631",
-  "5226697516711456599",
-  "5226475028815584417",
-  "5226788058917022841",
-  "5226571815903601186",
-  "5229060186810918066",
-  "5226925270237225889",
-  "5226676338227719016",
-  "5226767528973349304",
-  "5228907608097728333",
-  "5229062493208355899",
-  "5226869366942900093",
-  "5226782990855612215",
-  "5229029198621878533",
-  "5226920017492223412",
-  "5226456375772618542",
-  "5226528183330838677",
-  "5229191144658739880",
-  "5229187485346606266",
-  "5229233944007844947",
-];
+const PROVIDER_ICONS = customIcons("provider");
+const PROVIDER_NAMES: Record<string, string> = Object.fromEntries(
+  PROVIDER_ICONS.flatMap((icon) => icon.aliases.map((alias) => [alias, icon.label])),
+);
 
 export function providerIconsFromStickerSet(
   stickers: ReadonlyArray<{ custom_emoji_id?: string }>,
 ): ProviderIconMap {
   const icons: Record<string, string> = {};
-  for (const [index, aliases] of PROVIDER_ICON_ALIASES.entries()) {
-    const customEmojiId = stickers[index]?.custom_emoji_id ?? PROVIDER_ICON_FALLBACK_IDS[index];
-    if (!customEmojiId) continue;
-    for (const alias of aliases) icons[alias] = customEmojiId;
+  for (const icon of PROVIDER_ICONS) {
+    const customEmojiId = stickers[icon.position]?.custom_emoji_id ?? icon.customEmojiId;
+    for (const alias of icon.aliases) icons[alias] = customEmojiId;
   }
   return icons;
 }
-
 type ProviderGroup = {
   id: string;
   name: string;
