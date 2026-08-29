@@ -5,7 +5,7 @@ export const TGFX_CUSTOM_ICON_SET = {
   ownerBot: "fxharness_bot",
 } as const;
 
-export type CustomIconKind = "provider" | "mcp";
+export type CustomIconKind = "provider" | "mcp" | "tool";
 
 export type CustomIconDefinition = {
   id: string;
@@ -160,6 +160,26 @@ export const TGFX_CUSTOM_ICONS: readonly CustomIconDefinition[] = [
   { id: "wix", label: "wix", kind: "mcp", image: "mcp/wix.webp", position: 136, customEmojiId: "5231308666614883435", emoji: "🧩", aliases: ["wix"] },
   { id: "x", label: "x", kind: "mcp", image: "mcp/x.webp", position: 137, customEmojiId: "5231369603610882272", emoji: "🧩", aliases: ["x"] },
   { id: "youtube", label: "youtube", kind: "mcp", image: "mcp/youtube.webp", position: 138, customEmojiId: "5231031989116643047", emoji: "🧩", aliases: ["youtube"] },
+  { id: "glob_files", label: "glob_files", kind: "tool", image: "tools/glob_files.webp", position: 139, customEmojiId: "5230956174353933142", emoji: "🛠️", aliases: ["glob_files"] },
+  { id: "grep_files", label: "grep_files", kind: "tool", image: "tools/grep_files.webp", position: 140, customEmojiId: "5233326583984460886", emoji: "🛠️", aliases: ["grep_files"] },
+  { id: "read_file", label: "read_file", kind: "tool", image: "tools/read_file.webp", position: 141, customEmojiId: "5231428844094791423", emoji: "🛠️", aliases: ["read_file"] },
+  { id: "write_file", label: "write_file", kind: "tool", image: "tools/write_file.webp", position: 142, customEmojiId: "5231088652620179251", emoji: "🛠️", aliases: ["write_file"] },
+  { id: "edit_file", label: "edit_file", kind: "tool", image: "tools/edit_file.webp", position: 143, customEmojiId: "5233255111433695538", emoji: "🛠️", aliases: ["edit_file"] },
+  { id: "memory", label: "memory", kind: "tool", image: "tools/memory.webp", position: 144, customEmojiId: "5233704708610236161", emoji: "🛠️", aliases: ["memory"] },
+  { id: "web_fetch", label: "web_fetch", kind: "tool", image: "tools/web_fetch.webp", position: 145, customEmojiId: "5231123858467110056", emoji: "🛠️", aliases: ["web_fetch"] },
+  { id: "web_search", label: "web_search", kind: "tool", image: "tools/web_search.webp", position: 146, customEmojiId: "5233521133118072827", emoji: "🛠️", aliases: ["web_search"] },
+  { id: "terminal", label: "terminal", kind: "tool", image: "tools/terminal.webp", position: 147, customEmojiId: "5231454064142762787", emoji: "🛠️", aliases: ["terminal"] },
+  { id: "capability_search", label: "capability_search", kind: "tool", image: "tools/capability_search.webp", position: 148, customEmojiId: "5233500706253611774", emoji: "🛠️", aliases: ["capability_search"] },
+  { id: "skill_search", label: "skill_search", kind: "tool", image: "tools/skill_search.webp", position: 149, customEmojiId: "5233300835655526735", emoji: "🛠️", aliases: ["skill_search"] },
+  { id: "skill", label: "skill", kind: "tool", image: "tools/skill.webp", position: 150, customEmojiId: "5231309010212267182", emoji: "🛠️", aliases: ["skill"] },
+  { id: "install_skill", label: "install_skill", kind: "tool", image: "tools/install_skill.webp", position: 151, customEmojiId: "5233508308345724277", emoji: "🛠️", aliases: ["install_skill"] },
+  { id: "subagent", label: "subagent", kind: "tool", image: "tools/subagent.webp", position: 152, customEmojiId: "5231491073875946111", emoji: "🛠️", aliases: ["subagent"] },
+  { id: "mcp_search_tools", label: "mcp_search_tools", kind: "tool", image: "tools/mcp_search_tools.webp", position: 153, customEmojiId: "5231182596439845004", emoji: "🛠️", aliases: ["mcp_search_tools"] },
+  { id: "mcp_select_tool", label: "mcp_select_tool", kind: "tool", image: "tools/mcp_select_tool.webp", position: 154, customEmojiId: "5233332553989005004", emoji: "🛠️", aliases: ["mcp_select_tool"] },
+  { id: "mcp_features", label: "mcp_features", kind: "tool", image: "tools/mcp_features.webp", position: 155, customEmojiId: "5233518719346449988", emoji: "🛠️", aliases: ["mcp_features"] },
+  { id: "ask_user_question", label: "ask_user_question", kind: "tool", image: "tools/ask_user_question.webp", position: 156, customEmojiId: "5233210422298977631", emoji: "🛠️", aliases: ["ask_user_question"] },
+  { id: "vision", label: "vision", kind: "tool", image: "tools/vision.webp", position: 157, customEmojiId: "5231085921020979008", emoji: "🛠️", aliases: ["vision"] },
+  { id: "read_tool_result", label: "read_tool_result", kind: "tool", image: "tools/read_tool_result.webp", position: 158, customEmojiId: "5231474765885123571", emoji: "🛠️", aliases: ["read_tool_result"] },
 ] as const;
 
 export function customIcons(kind?: CustomIconKind): readonly CustomIconDefinition[] {

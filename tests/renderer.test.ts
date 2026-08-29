@@ -74,7 +74,7 @@ describe("Telegram renderer boundaries", () => {
     expect(sent[0]?.blocks).toEqual([{
       type: "details",
       summary: "Ran 1 command",
-      blocks: [{ type: "paragraph", text: "┗ Running tests" }],
+      blocks: [{ type: "paragraph", text: "Running command" }],
     }]);
   });
 

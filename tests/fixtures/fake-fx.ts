@@ -173,6 +173,20 @@ const app = acp.agent({ name: "fake-fx" })
         },
       });
     }
+    if (text.includes("FX_TOOL")) {
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId: context.params.sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "read-file",
+          name: "read_file",
+          title: "Reading file",
+          kind: "read",
+          status: "completed",
+          content: [],
+        },
+      });
+    }
     if (text.includes("PERMISSION")) {
       const decision = await context.client.request(acp.methods.client.session.requestPermission, {
         sessionId: context.params.sessionId,

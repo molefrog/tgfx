@@ -12,9 +12,16 @@ export function mcpIconsFromStickerSet(stickers: ReadonlyArray<Sticker>): McpIco
   const icons: Record<string, string> = {};
   for (const icon of TGFX_CUSTOM_ICONS) {
     const id = stickers[icon.position]?.custom_emoji_id ?? icon.customEmojiId;
-    for (const alias of icon.aliases) icons[normalize(alias)] = id;
+    for (const alias of icon.aliases) {
+      const key = normalize(alias);
+      icons[icon.kind === "tool" ? `tool:${key}` : key] = id;
+    }
   }
   return icons;
+}
+
+export function fxToolIconForTool(icons: McpIconMap, identity: string): string | undefined {
+  return icons[`tool:${normalize(identity)}`];
 }
 
 export function mcpIconForTool(icons: McpIconMap, identity: string): string | undefined {

@@ -114,7 +114,7 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
-  test("uses the model-picker custom icon flag for MCP tool rows", async () => {
+  test("uses the model-picker custom icon flag for MCP and FX tool rows", async () => {
     const run = async (customIcons: boolean) => {
       const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-mcp-icons-"));
       temporary.push(workspace);
@@ -134,7 +134,7 @@ describe("tgfx host pipeline", () => {
       const telegram = {
         getWebhookInfo: async () => ({ url: "" }),
         getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
-          if (firstPoll) { firstPoll = false; return [update(1, 42, "MCP_TOOL")]; }
+          if (firstPoll) { firstPoll = false; return [update(1, 42, "MCP_TOOL FX_TOOL")]; }
           return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
         },
         setCommands: async () => true as const,
@@ -143,7 +143,7 @@ describe("tgfx host pipeline", () => {
           packLookups++;
           return {
             name: "tgfx", title: "tgfx icons", sticker_type: "custom_emoji",
-            stickers: Array.from({ length: 139 }, (_, index) => ({ custom_emoji_id: `emoji-${index}` })),
+            stickers: Array.from({ length: 159 }, (_, index) => ({ custom_emoji_id: `emoji-${index}` })),
           };
         },
         sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
@@ -167,6 +167,7 @@ describe("tgfx host pipeline", () => {
     const enabled = await run(true);
     expect(enabled.packLookups).toBe(1);
     expect(JSON.stringify(enabled.final)).toContain('"custom_emoji_id":"emoji-53"');
+    expect(JSON.stringify(enabled.final)).toContain('"custom_emoji_id":"emoji-141"');
 
     const disabled = await run(false);
     expect(disabled.packLookups).toBe(0);

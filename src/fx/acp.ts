@@ -36,7 +36,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * FX 0.0.6 includes exact terminal metadata in `command_result`, an extension
+ * FX 0.0.7 includes exact terminal metadata in `command_result`, an extension
  * field that ACP's stable schema otherwise removes. Move it to standard
  * `rawOutput` before validation while leaving any native raw output untouched.
  */
@@ -252,7 +252,7 @@ export class FxRouteSession {
       const modes = "modes" in response ? response.modes : undefined;
       const model = selectValue(configOptions, "model") ?? this.options.model ?? "default";
       if (permissionMode === "auto") {
-        // Always select code explicitly. FX 0.0.6 can report its display mode
+        // Always select code explicitly. FX 0.0.7 can report its display mode
         // as ask while retaining the configured permission policy internally.
         const canSetMode = modes?.availableModes.some((candidate) => candidate.id === "code");
         if (canSetMode) {

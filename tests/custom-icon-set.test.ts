@@ -9,11 +9,12 @@ describe("tgfx custom icon catalog", () => {
       url: "https://t.me/addemoji/ai_provider_labs_by_fxharness_bot",
       ownerBot: "fxharness_bot",
     });
-    expect(TGFX_CUSTOM_ICONS).toHaveLength(139);
+    expect(TGFX_CUSTOM_ICONS).toHaveLength(159);
     expect(customIcons("provider")).toHaveLength(36);
     expect(customIcons("mcp")).toHaveLength(103);
+    expect(customIcons("tool")).toHaveLength(20);
     expect(TGFX_CUSTOM_ICONS.map((icon) => icon.position)).toEqual(
-      Array.from({ length: 139 }, (_, position) => position),
+      Array.from({ length: 159 }, (_, position) => position),
     );
   });
 

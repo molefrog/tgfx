@@ -11,7 +11,7 @@ processes.
 
 ## Install with Bun
 
-Requirements: macOS or Linux, [Bun 1.4](https://bun.sh) or newer, an authenticated `fx 0.0.6`
+Requirements: macOS or Linux, [Bun 1.4](https://bun.sh) or newer, an authenticated `fx 0.0.7`
 or newer, and a Telegram bot token from BotFather.
 
 ```bash
