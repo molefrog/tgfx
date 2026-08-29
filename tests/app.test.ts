@@ -247,6 +247,76 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
+  test("opens /model while a stopped turn is still winding down", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-cancel-model-"));
+    temporary.push(workspace);
+    const paths = workspacePaths(workspace);
+    const fxBinary = await fakeFx(workspace);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      modelPicker: { customIcons: false },
+    };
+    const sequence: string[] = [];
+    let phase = 0;
+    let activeDraftId = 0;
+    let draftReady!: () => void;
+    const draft = new Promise<void>((resolve) => { draftReady = resolve; });
+    let modelReady!: () => void;
+    const model = new Promise<void>((resolve) => { modelReady = resolve; });
+    let cancelled!: () => void;
+    const cancellation = new Promise<void>((resolve) => { cancelled = resolve; });
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        if (phase === 0) { phase = 1; return [update(1, 42, "WAIT")]; }
+        if (phase === 1) {
+          phase = 2;
+          await draft;
+          return [{
+            update_id: 2,
+            stopped_message_generation: {
+              chat: { id: 42, type: "private", first_name: "User 42" },
+              draft_id: activeDraftId,
+            },
+          } as unknown as Update];
+        }
+        if (phase === 2) { phase = 3; sequence.push("model-update"); return [update(3, 42, "/model")]; }
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => true as const,
+      deleteCommands: async () => true as const,
+      sendText: async (_chat: string, text: string) => {
+        if (text === "𝒇x turn cancelled.") {
+          await Bun.sleep(250);
+          sequence.push("cancelled");
+          cancelled();
+        }
+        if (text.startsWith("Choose model:")) { sequence.push("model"); modelReady(); }
+        return { message_id: 610 } as Message.TextMessage;
+      },
+      sendRichDraft: async (_chat: string, draftId: number) => {
+        activeDraftId = draftId;
+        draftReady();
+        return true as const;
+      },
+      sendRich: async () => { throw new Error("cancelled turn must not produce a final"); },
+    } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined,
+    });
+    const running = app.run();
+    await Promise.race([
+      Promise.all([model, cancellation]),
+      Bun.sleep(5_000).then(() => { throw new Error("stop/model sequence timed out"); }),
+    ]);
+    await app.stop();
+    await running;
+    expect(sequence).toEqual(["model-update", "model", "cancelled"]);
+  });
+
   test("exposes /clear, /compact, and /model and uses a Thinking draft while streaming", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-commands-"));
     temporary.push(workspace);

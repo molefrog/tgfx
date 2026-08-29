@@ -214,6 +214,53 @@ describe("Telegram renderer boundaries", () => {
     }
   });
 
+  test("stops the draft stream immediately when the turn is aborted", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tgfx-stopped-drafts-"));
+    const state = new StateStore(join(directory, "state.sqlite"));
+    const drafts: unknown[] = [];
+    let draftSignal: AbortSignal | undefined;
+    const api = {
+      sendRichDraft: async (
+        _chatId: string,
+        _draftId: number,
+        rich: unknown,
+        signal?: AbortSignal,
+      ) => {
+        drafts.push(rich);
+        draftSignal = signal;
+      },
+    } as unknown as TelegramApi;
+    const projector = new AcpProjector();
+    const turn = new AbortController();
+    const renderer = new TurnRenderer(
+      api,
+      state,
+      { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
+      { mode: "streaming", expandStreamingTools: true, updateEveryMs: 0 },
+      projector,
+      turn.signal,
+      new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
+    );
+    try {
+      renderer.start();
+      await waitFor(() => drafts.length === 1);
+
+      turn.abort(new Error("stopped by user"));
+      expect(draftSignal?.aborted).toBeTrue();
+
+      renderer.changed(projector.apply({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Late output after Stop." },
+      }));
+      await Bun.sleep(10);
+      expect(drafts).toHaveLength(1);
+    } finally {
+      await renderer.abort();
+      state.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("recovers a permanent rich-message rejection through the persisted plain fallback", async () => {
     const directory = await mkdtemp(join(tmpdir(), "tgfx-renderer-"));
     const state = new StateStore(join(directory, "state.sqlite"));

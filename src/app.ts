@@ -395,7 +395,13 @@ export class TgfxApp {
       if (id !== undefined) {
         const mediaGroupId = String(message.provenance?.media_group_id ?? "");
         if (mediaGroupId) this.scheduleAlbum(id, message.route.key, mediaGroupId);
-        else this.enqueue(id, message.route.key);
+        else {
+          const command = commandFromText(message.text, this.options.bot.username);
+          const immediateControl = command?.addressed
+            && (command.name === "model" || command.name === "cost");
+          if (immediateControl) await this.dispatch(id);
+          else this.enqueue(id, message.route.key);
+        }
       }
       return;
     }

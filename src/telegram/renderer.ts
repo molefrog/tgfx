@@ -67,6 +67,7 @@ export class TurnRenderer {
   readonly draftId = createDraftId();
   private readonly draftAbort = new AbortController();
   private readonly drafts: AdaptiveDraftScheduler<InputRichMessageWithoutUpload>;
+  private readonly stopOnTurnAbort = () => { void this.abort(); };
 
   constructor(
     private readonly api: TelegramApi,
@@ -92,6 +93,8 @@ export class TurnRenderer {
           : 1_000;
       },
     });
+    if (this.signal?.aborted) this.stopOnTurnAbort();
+    else this.signal?.addEventListener("abort", this.stopOnTurnAbort, { once: true });
   }
 
   start(): void {
@@ -115,6 +118,7 @@ export class TurnRenderer {
   }
 
   async abort(): Promise<void> {
+    this.signal?.removeEventListener("abort", this.stopOnTurnAbort);
     this.stopped = true;
     this.draftAbort.abort(new Error("draft stopped"));
     await this.drafts.stop();
