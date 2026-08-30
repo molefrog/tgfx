@@ -116,7 +116,7 @@ export function helpText(): string {
     line("tgfx auth [--remove]", "add, rotate, or remove the bot token"),
     line("tgfx doctor", "deep diagnostics: token, chats, rights, fx"),
     "",
-    `  ${dim("run flags:")}  --model <id> · --yolo · --streaming/--no-streaming`,
+    `  ${dim("run flags:")}  --model <id> · --yolo · --streaming/--no-streaming · --no-icons`,
     `  ${dim("global:")}     --json · --no-color · --debug · --help · --version`,
     "",
   ].join("\n");

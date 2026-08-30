@@ -1,117 +1,77 @@
 # 𝒕𝒈(𝒇x)
 
-Run a local [𝒇x](https://github.com/vercel-labs/fx) agent through one Telegram
-bot. `tgfx` lazily starts `fx acp` in the current folder, sends allowed Telegram
-messages into a route-specific 𝒇x session, streams rich drafts in private chats,
-and delivers a permanent rich response when the turn finishes.
+Chat with a Vercel [𝒇x](https://github.com/vercel-labs/fx) coding agent from
+Telegram. Works with your locally installed 𝒇x, and provides as much latest Telegram features as possible.
 
-𝒇x remains the agent. `tgfx` owns only Telegram transport, scoped Telegram MCP
-actions, rendering, approvals, and the small recovery journal needed between
-processes.
+## Features
 
-## Install with Bun
+- [x] Rich replies: markdown, tables, code blocks, spoilers, TeX math
+- [x] Live streaming while the agent works, renders tool calls nicely
+- [x] Can work in DMs and groups
+- [x] Can send stickers and send reactions
+- [x] Interactive model picker (`/model`)
+- [x] Conversation compaction (`/compact`) and fresh starts (`/clear`)
+- [x] Cost reports (`/cost`)
+- [x] Approval cards for destructive actions
+- [x] Bots can be group admins: pin messages, moderate, and more
+- [x] Custom emoji icons for tool calls and popular MCPs ([see below](#custom-icons))
 
-Requirements: macOS or Linux, [Bun 1.4](https://bun.sh) or newer, an authenticated `fx 0.0.7`
-or newer, and a Telegram bot token from BotFather.
+## Install
+
+You need [Bun 1.4+](https://bun.sh), an authenticated `fx 0.0.7+`, and a bot
+token from [@BotFather](https://t.me/BotFather).
+
+Why we depend on Bun? We use it to keep everything minimal and fast,
+reusing as much of Bun's built-ins as possible (SQLite, image compression etc.).
+
+Pre-built binaries are coming soon: a self-contained executable that runs
+without Bun, in case you don't want to install it.
 
 ```bash
-# Run from Bun's package cache
-bunx --package @molefrog/tgfx tgfx
-
-# Or install the command globally
+# 1. Install the package
 bun add --global @molefrog/tgfx
+
+# 2. Grab a bot token from @BotFather, then run tgfx in your project folder.
+#    It walks you through authorization on the first run.
+cd my-project
 tgfx
 ```
 
-For development from source:
+## How it works
 
-```bash
-bun install
+That's it. `tgfx` starts an `fx acp` process in that folder, with your current
+𝒇x provider and model, and bridges it to your Telegram bot. Pass `--yolo` to
+skip 𝒇x's permission checks.
 
-# Point the terminal command at live source; an agent can do this when setting up the checkout.
-ln -sfn "$PWD/src/index.ts" "$(bun pm bin --global)/tgfx"
+On the first run it asks for your bot token and pairs you as the owner: scan a
+QR code or tap a link. To change or remove the token later, run `tgfx auth`.
 
-cd /path/to/your/project
-tgfx
-```
+## MCP
 
-The first run validates the token, then either shows a scannable QR code and
-private Telegram deep link for one-tap owner pairing or accepts one numeric
-user/chat ID for an advanced setup. It verifies the approvals chat by sending a
-setup message and writes non-secret settings to `.tgfx/config.json`. Allow more people later
-with `tgfx allow`. The token goes to the operating-system credential store under
-the bot's numeric ID. `TELEGRAM_BOT_TOKEN` may be used instead and is never
-saved by `tgfx`.
+𝒇x doesn't inherit MCP servers from your config automatically in ACP mode that Telegram channel uses.
+We're working on adding this soon! 
 
-One process owns one bot and one current folder. A machine-wide lock prevents the
-same bot from polling in two workspaces at once. Messages outside the required
-numeric allowlist are discarded without retaining their content.
+## Custom icons
+
+The bot renders tool calls with the
+[tgfx icons](https://t.me/addemoji/ai_provider_labs_by_fxharness_bot) custom
+emoji pack: every 𝒇x tool gets its own icon, and so do 100+ popular MCP
+servers (GitHub, Notion, Slack, Figma, and friends). The model picker uses
+provider logos from the same pack. When Telegram doesn't let the bot use
+custom emoji, everything falls back to plain rows.
+
+To turn it off for a run, start with `tgfx --no-icons`. To turn it off for
+good, set `modelPicker.customIcons` to `false` in `.tgfx/config.json`.
 
 ## Commands
 
 ```text
-tgfx                           run fx in this folder (sets up on first run)
-tgfx access                    who can talk to fx, who approves, saved sessions
-tgfx allow <id…>               add users or chats to the allowlist
-tgfx deny <id…>                remove them
-tgfx approvals <chat>[/topic]  route approval cards to a chat
-tgfx auth [--remove]           add, rotate, or remove the bot token
-tgfx doctor                    deep diagnostics: token, chats, rights, fx
+tgfx           run fx in this folder (sets up on first run)
+tgfx --yolo    same, without fx permission checks
+tgfx allow     let more users or chats talk to the bot
+tgfx auth      add, rotate, or remove the bot token
+tgfx doctor    diagnostics: token, chats, rights, fx
 ```
 
-`tgfx allow` infers users from positive IDs and chats from negative ones
-(`--chat` overrides). Configuration edits are saved immediately and apply the
-next time `tgfx` starts. Run flags: `--model <id>`, `--yolo`, and
-`--no-streaming`; global: `--json`, `--no-color`, `--debug`.
-
-FX starts in its automatic-review permission mode. `tgfx --yolo` disables FX's
-permission checks for that process. It does not bypass tgfx's separate approval
-cards for destructive Telegram administration.
-
-Group administration needs no tgfx-side configuration: for an allowlisted group
-the admin tools are exactly the bot's live Telegram admin rights. Promote the
-bot in Telegram to enable them, demote it to revoke; destructive actions still
-require a one-tap approval card in the approvals chat. `tgfx doctor` reports
-the bot's current rights in every allowlisted group.
-
-Telegram exposes `/clear`, `/compact`, `/model`, and `/cost`. `/clear` immediately
-starts a fresh route conversation and makes it current without prompting the agent.
-`/compact` compacts the active 𝒇x conversation and shows a purpose-built progress
-state. `/model` reads the live
-model catalog from the route's FX session and switches that session through a
-provider-first, paginated button picker. Provider and model buttons use the
-public `tgfx icons` custom emoji pack by default and retry as
-plain buttons when Telegram does not permit the bot to use custom emoji. Set
-`modelPicker.customIcons` to `false` to disable the pack lookup and custom icons
-in both `/model` buttons and rendered MCP tool-call rows.
-`/cost` renders FX's local usage and
-spend for the last 24 hours, 7 days, or 30 days as a rich report with period
-buttons. Other ACP-advertised commands are not projected into Telegram yet.
-
-Private chats stream complete Rich Message snapshots through Telegram's draft
-API. Each draft enables Telegram's Stop button, which cancels the matching active
-𝒇x turn. Groups and `--no-streaming` receive one final message. Tool groups
-always use compact rows and never include tool results. Every draft tool group
-keeps the `Working...` label and stays open while the draft streams. The final
-message replaces those headers with formatted activity labels and collapses the
-groups in both streaming and non-streaming modes. Set `renderer.expandStreamingTools`
-to `false` in `.tgfx/config.json` to keep draft groups collapsed. Pending tools and private thought events stay hidden and do not trigger
-draft requests. Visible frames stream optimistically, then adapt to Telegram's
-per-chat limits and any `retry_after` response.
-
-For `/compact`, streaming mode shows a draft-only Thinking block followed by
-`✓ Conversation compacted`. Without streaming, tgfx sends one regular progress
-message and edits it to that completed state.
-
-The local `.tgfx/state.sqlite` file is an operational journal, not a chat archive:
-accepted inbound and final-delivery bodies are scrubbed after success, drafts are
-not stored, raw ACP transcripts are off, and opaque references prevent the model
-from choosing raw Telegram IDs or Bot API file URLs.
-
-For development and tests, `TGFX_INTERNAL_TELEGRAM_API_ROOT` points every
-Telegram call (the poller and the MCP subprocess alike) at a local Bot API
-simulator; `tests/fixtures/fake-telegram.ts` ships one that speaks the real
-HTTP protocol, injects updates, and records outgoing calls.
-
-Read the full [specification](./doc/SPEC.md). Local whiteboards and experiments
-are intentionally excluded from the repository.
+Details, guarantees, and the rest of the commands live in the
+[specification](./doc/SPEC.md).

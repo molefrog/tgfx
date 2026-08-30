@@ -173,10 +173,11 @@ export class TgfxApp {
     permissionMode?: FxPermissionMode;
     mcpLaunch?: { command: string; args: string[] };
     renderer?: Partial<TgfxConfig["renderer"]>;
+    customIcons?: boolean;
     log?: (event: TgfxLogEvent) => void;
   }) {
     this.config = options.config;
-    this.customIconsEnabled = options.config.modelPicker?.customIcons ?? true;
+    this.customIconsEnabled = options.customIcons ?? options.config.modelPicker?.customIcons ?? true;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
   }

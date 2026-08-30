@@ -330,6 +330,7 @@ async function runCommand(tokens: string[]): Promise<void> {
       yolo: "boolean",
       streaming: "boolean",
       "no-streaming": "boolean",
+      "no-icons": "boolean",
       json: "boolean",
       "no-color": "boolean",
       debug: "boolean",
@@ -361,6 +362,7 @@ async function runCommand(tokens: string[]): Promise<void> {
         ? { command: process.execPath, args: ["mcp"] }
         : { command: process.execPath, args: [fileURLToPath(import.meta.url), "mcp"] },
       ...(typeof flags.model === "string" ? { model: flags.model } : {}),
+      ...(flags["no-icons"] ? { customIcons: false } : {}),
       permissionMode: flags.yolo ? "yolo" : "auto",
       renderer: {
         ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),

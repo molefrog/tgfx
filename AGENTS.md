@@ -8,6 +8,11 @@ Bun for everything: runtime, tests, builds, scripts, its built-in APIs
 before any package. Keep the project small and the dependency list short —
 but don't reinvent what a good, well-maintained lib already does.
 
+## Link locally
+
+`bun link` in the checkout puts `tgfx` on PATH. The bin runs `dist/`,
+so `bun run build` first — and again after changes.
+
 ## Tests
 
 `bun run check && bun test` (Bun ≥ 1.4). Keep the suite fast. Wait on
