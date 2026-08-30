@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import { FxRouteSession, preserveFxCommandResult, sanitizeFxEnvironment } from "../src/fx/acp";
-import { AcpProjector } from "../src/fx/projector";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -110,17 +109,13 @@ describe("FX ACP transport", () => {
     });
   });
 
-  test("preserves raw Markdown chunks through ACP and projects their rich structure", async () => {
+  test("preserves raw Markdown chunks through ACP untouched", async () => {
     const fake = await fakeBinary();
     const updates: acp.SessionUpdate[] = [];
-    const projector = new AcpProjector();
     const session = new FxRouteSession({
       workspace: fake.directory,
       binary: fake.binary,
-      onUpdate: (update) => {
-        updates.push(update);
-        projector.apply(update);
-      },
+      onUpdate: (update) => { updates.push(update); },
     });
     try {
       await session.start();
@@ -129,6 +124,7 @@ describe("FX ACP transport", () => {
       await session.dispose({ closeSession: true });
     }
 
+    // Projecting these chunks into rich blocks is covered by projector.test.ts.
     const chunks = updates.flatMap((update) =>
       update.sessionUpdate === "agent_message_chunk" && update.content.type === "text"
         ? [update.content.text]
@@ -137,19 +133,6 @@ describe("FX ACP transport", () => {
     expect(chunks).toEqual([
       "# Section heading\n\nParagraph with **bold",
       "** and *italic*.",
-    ]);
-    expect(projector.rich({ final: true, expandStreamingTools: true }).blocks).toEqual([
-      { type: "heading", size: 1, text: "Section heading" },
-      {
-        type: "paragraph",
-        text: [
-          "Paragraph with ",
-          { type: "bold", text: "bold" },
-          " and ",
-          { type: "italic", text: "italic" },
-          ".",
-        ],
-      },
     ]);
   });
 

@@ -28,6 +28,12 @@ describe("redactSecrets", () => {
     );
   });
 
+  test("redacts a token embedded in a Bot API file URL", () => {
+    const token = `123456789:${"A".repeat(30)}`;
+    expect(redactSecrets(`https://api.telegram.org/file/bot${token}/photo.jpg`))
+      .toBe("https://api.telegram.org/file/bot[redacted Telegram token]/photo.jpg");
+  });
+
   test("redacts multiple tokens in one string", () => {
     const input = "old=6143594:AAH-oldtokenhashxxxxxxxxxxxxxxxx new=9999999:BBH-newtokenhashyyyyyyyyyyyyyyyy";
     expect(redactSecrets(input)).toBe(

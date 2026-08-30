@@ -108,7 +108,7 @@ type CanonicalToolRule = ToolActivity | "omit" | "terminal" | "write_file";
  * This is the complete registered FX tool catalog. FX omits `name` over ACP, so
  * the title/kind/content fallback below mirrors its stable wire labels.
  */
-const CANONICAL_FX_TOOL_RULES = {
+export const CANONICAL_FX_TOOL_RULES = {
   glob_files: "searched_files",
   grep_files: "searched_code",
   read_file: "read_files",
