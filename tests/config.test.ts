@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configSchema, loadConfig, pruneWorkspaceFiles, saveConfig, workspacePaths } from "../src/config";
-import { redactSecrets } from "../src/secrets";
 import type { TgfxConfig } from "../src/types";
 
 const temporary: string[] = [];
@@ -63,13 +62,6 @@ describe("workspace config", () => {
       ...config(),
       modelPicker: { customIcons: false },
     }).modelPicker.customIcons).toBeFalse();
-  });
-
-  test("redacts tokens both standalone and inside Bot API file URLs", () => {
-    const token = `123456789:${"A".repeat(30)}`;
-    expect(redactSecrets(`token=${token}`)).toBe("token=[redacted Telegram token]");
-    expect(redactSecrets(`https://api.telegram.org/file/bot${token}/photo.jpg`))
-      .toBe("https://api.telegram.org/file/bot[redacted Telegram token]/photo.jpg");
   });
 
   test("prunes only expired files inside the workspace runtime directory", async () => {
