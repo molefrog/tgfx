@@ -35,7 +35,8 @@ async function makeWorkspace(
 }> {
   const workspace = await mkdtemp(join(tmpdir(), "tgfx-e2e-"));
   temporary.push(workspace);
-  const paths = workspacePaths(workspace);
+  process.env.TGFX_HOME = join(workspace, "tgfx-home");
+  const paths = workspacePaths(BOT.id, workspace);
   await saveConfig(paths, {
     version: 1,
     activeBotId: BOT.id,

@@ -23,7 +23,7 @@ export async function safeDownloadPath(root: string, contextRef: string, filenam
   }
   const actualDirectory = await realpath(expectedDirectory);
   if (actualDirectory !== join(actualRoot, contextRef) || !actualDirectory.startsWith(`${actualRoot}${sep}`)) {
-    throw new Error("The attachment context directory escaped .tgfx/files.");
+    throw new Error("The attachment context directory escaped the tgfx files directory.");
   }
   return join(actualDirectory, safeName(filename));
 }

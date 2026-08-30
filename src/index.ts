@@ -5,11 +5,13 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { TgfxApp, type TgfxLogEvent } from "./app";
 import {
-  findBotIndex,
+  botPaths,
   loadConfig,
+  migrateLegacyWorkspace,
+  projectPaths,
+  registerBot,
   saveConfig,
-  updateBotIndex,
-  workspacePaths,
+  type ProjectPaths,
   type WorkspacePaths,
 } from "./config";
 import { acquireRuntimeLock } from "./lock";
@@ -57,7 +59,14 @@ function requireInteractive(purpose: string): void {
   }
 }
 
-async function requireConfig(paths: WorkspacePaths): Promise<TgfxConfig> {
+async function openProject(): Promise<ProjectPaths> {
+  const paths = projectPaths();
+  const migrated = await migrateLegacyWorkspace(paths);
+  if (migrated) warn(migrated);
+  return paths;
+}
+
+async function requireConfig(paths: ProjectPaths): Promise<TgfxConfig> {
   const config = await loadConfig(paths);
   if (!config) throw new CliError("this folder isn't set up yet", "run tgfx once to connect a bot");
   return config;
@@ -148,7 +157,7 @@ async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promis
   throw new CliError("no matching /start message arrived within two minutes", "run tgfx again to retry");
 }
 
-async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: TelegramApi): Promise<TgfxConfig> {
+async function createConfig(paths: ProjectPaths, bot: BotIdentity, telegram: TelegramApi): Promise<TgfxConfig> {
   requireInteractive("first-run setup");
   const setup = await select({
     message: "Who may use this workspace bot?",
@@ -227,7 +236,7 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
   );
   await saveConfig(paths, config);
   if (pairedUpdateId !== undefined) {
-    const state = new StateStore(paths.database);
+    const state = new StateStore(botPaths(bot.id).database);
     try {
       state.ensurePollState(bot.id);
       state.advanceCursor(bot.id, pairedUpdateId + 1);
@@ -236,49 +245,15 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
   return config;
 }
 
-async function guardWorkspaceHandoff(
-  paths: WorkspacePaths,
-  bot: BotIdentity,
-  options: { json?: boolean } = {},
-): Promise<void> {
-  const previous = await findBotIndex(bot.id);
-  if (!previous || previous.workspace === paths.workspace) return;
-  const previousPaths = workspacePaths(previous.workspace);
-  if (!existsSync(previousPaths.database)) return;
-  const state = new StateStore(previousPaths.database);
-  try {
-    const unfinished = state.unfinished();
-    if (!unfinished.total) return;
-    const detail = `${unfinished.inbox} inbox · ${unfinished.outbox} outbox · ${unfinished.effects} effects · ${unfinished.approvals} approvals`;
-    if (options.json || !process.stdin.isTTY || !process.stderr.isTTY) {
-      throw new CliError(
-        `bot ${bot.id} has unfinished work in ${previous.workspace} (${detail})`,
-        "resume tgfx there, or run tgfx here interactively to abandon it",
-      );
-    }
-    note(`${previous.workspace}\n${detail}`, "Previous workspace has unfinished work", STDERR);
-    const abandon = await confirm({
-      message: "Abandon that recovery work and move this bot to the current folder?",
-      initialValue: false,
-      ...STDERR,
-    });
-    cancelled(abandon);
-    if (!abandon) {
-      throw new CliError(`resume tgfx in ${previous.workspace} before moving this bot`);
-    }
-    state.abandonUnfinished(`Explicitly abandoned when bot moved to ${paths.workspace}`);
-  } finally { state.close(); }
-}
-
-async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}): Promise<{
+async function runtime(project: ProjectPaths, options: { json?: boolean } = {}): Promise<{
   paths: WorkspacePaths; config: TgfxConfig; token: string; telegram: TelegramApi; bot: BotIdentity;
   fxBinary: string; release: () => Promise<void>;
 }> {
   if (!options.json) banner();
   const fxBinary = process.env.FX_BINARY ?? "fx";
-  const fx = await inspectFx(fxBinary, paths.workspace);
+  const fx = await inspectFx(fxBinary, project.workspace);
   if (!options.json) ok(`fx ${fx.version} · ${fx.report.model} · ${fx.report.auth}`);
-  let config = await loadConfig(paths);
+  let config = await loadConfig(project);
   let token = tokenFromEnvironment();
   let prompted = false;
   if (!token && config) token = await getBotToken(config.activeBotId);
@@ -296,10 +271,9 @@ async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}):
       "run tgfx auth to switch bots",
     );
   }
-  const release = await acquireRuntimeLock(paths, bot.id);
+  const release = await acquireRuntimeLock(bot.id, project.workspace);
   try {
-    await guardWorkspaceHandoff(paths, bot, options);
-    if (!config) config = await createConfig(paths, bot, telegram);
+    if (!config) config = await createConfig(project, bot, telegram);
     const webhook = await telegram.getWebhookInfo();
     if (webhook.url) {
       throw new CliError(
@@ -308,8 +282,8 @@ async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}):
       );
     }
     if (prompted) await setBotToken(bot.id, token);
-    await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
-    return { paths, config, token, telegram, bot, fxBinary, release };
+    await registerBot({ botId: bot.id, workspace: project.workspace });
+    return { paths: { ...project, ...botPaths(bot.id) }, config, token, telegram, bot, fxBinary, release };
   } catch (error) {
     await release();
     throw error;
@@ -343,7 +317,7 @@ async function runCommand(tokens: string[]): Promise<void> {
   if (flags.streaming && flags["no-streaming"]) throw new CliError("choose --streaming or --no-streaming, not both");
   const streaming = flags.streaming ? true : flags["no-streaming"] ? false : undefined;
   const json = Boolean(flags.json);
-  const resolved = await runtime(workspacePaths(), { json });
+  const resolved = await runtime(await openProject(), { json });
   const { release, ...appRuntime } = resolved;
   const log = createLogger(json);
   if (flags.yolo) {
@@ -402,7 +376,7 @@ async function allowCommand(tokens: string[]): Promise<void> {
     throw new CliError("give at least one Telegram user or chat ID", "example: tgfx allow 6143594");
   }
   const ids = positionals.map(canonicalId);
-  const paths = workspacePaths();
+  const paths = await openProject();
   const config = await requireConfig(paths);
   for (const id of ids) {
     const kind = flags.chat || Number(id) < 0 ? "chat" : "user";
@@ -428,7 +402,7 @@ async function denyCommand(tokens: string[]): Promise<void> {
     throw new CliError("give at least one Telegram user or chat ID", "example: tgfx deny 6143594");
   }
   const ids = positionals.map(canonicalId);
-  const paths = workspacePaths();
+  const paths = await openProject();
   const config = await requireConfig(paths);
   const notices: Array<{ warning?: boolean; message: string }> = [];
   let changed = false;
@@ -462,7 +436,7 @@ async function approvalsCommand(tokens: string[]): Promise<void> {
     flags: { json: "boolean" },
     positionals: true,
   });
-  const paths = workspacePaths();
+  const paths = await openProject();
   const config = await requireConfig(paths);
   if (!positionals.length) {
     if (flags.json) { console.log(JSON.stringify(config.approvals, null, 2)); return; }
@@ -493,9 +467,10 @@ function since(iso: string): string {
 
 async function accessCommand(tokens: string[]): Promise<void> {
   const { flags } = parseArgs(tokens, { flags: { json: "boolean" } });
-  const paths = workspacePaths();
+  const paths = await openProject();
   const config = await requireConfig(paths);
-  const state = existsSync(paths.database) ? new StateStore(paths.database) : undefined;
+  const database = botPaths(config.activeBotId).database;
+  const state = existsSync(database) ? new StateStore(database) : undefined;
   try {
     const principals = [
       ...config.access.userIds.map((id) => ({ id, kind: "user" as const })),
@@ -555,7 +530,7 @@ async function accessCommand(tokens: string[]): Promise<void> {
 
 async function authCommand(tokens: string[]): Promise<void> {
   const { flags } = parseArgs(tokens, { flags: { remove: "boolean" } });
-  const paths = workspacePaths();
+  const paths = await openProject();
   banner();
   if (flags.remove) {
     const config = await requireConfig(paths);
@@ -569,12 +544,9 @@ async function authCommand(tokens: string[]): Promise<void> {
   const environmentToken = tokenFromEnvironment();
   const token = environmentToken ?? await askForToken();
   const { bot, telegram } = await validateToken(token);
-  const release = await acquireRuntimeLock(paths, bot.id);
+  const release = await acquireRuntimeLock(bot.id, paths.workspace);
   try {
     let config = await loadConfig(paths);
-    // The switch is confirmed before anything destructive: abandoning a
-    // previous workspace's recovery work must not happen for an operation the
-    // operator then cancels.
     const previous = config?.activeBotId;
     if (config && previous !== bot.id) {
       requireInteractive("switching bots");
@@ -586,7 +558,6 @@ async function authCommand(tokens: string[]): Promise<void> {
       cancelled(replace);
       if (!replace) throw new CliError("bot switch cancelled; the existing workspace configuration was not changed");
     }
-    await guardWorkspaceHandoff(paths, bot);
     const webhook = await telegram.getWebhookInfo();
     if (webhook.url) {
       throw new CliError(
@@ -604,7 +575,7 @@ async function authCommand(tokens: string[]): Promise<void> {
     }
     if (environmentToken) warn("using TELEGRAM_BOT_TOKEN from the environment · not saved to the credential store");
     else await setBotToken(bot.id, token);
-    await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
+    await registerBot({ botId: bot.id, workspace: paths.workspace });
     ok(`connected @${bot.username ?? bot.id}`);
   } finally {
     await release();
@@ -613,7 +584,7 @@ async function authCommand(tokens: string[]): Promise<void> {
 
 async function doctorCommand(tokens: string[]): Promise<void> {
   const { flags } = parseArgs(tokens, { flags: { json: "boolean" } });
-  const paths = workspacePaths();
+  const paths = await openProject();
   const checks: Array<{ check: string; ok: boolean; detail: string }> = [];
   let config: TgfxConfig | undefined;
   try {
@@ -693,10 +664,11 @@ async function doctorCommand(tokens: string[]): Promise<void> {
     checks.push({ check: "fx", ok: false, detail: error instanceof Error ? error.message : String(error) });
   }
   if (config) {
+    const database = botPaths(config.activeBotId).database;
     try {
-      const state = new StateStore(paths.database);
+      const state = new StateStore(database);
       state.close();
-      checks.push({ check: "SQLite", ok: true, detail: paths.database });
+      checks.push({ check: "SQLite", ok: true, detail: database });
     } catch (error) {
       checks.push({ check: "SQLite", ok: false, detail: error instanceof Error ? error.message : String(error) });
     }

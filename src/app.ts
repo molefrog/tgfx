@@ -49,7 +49,7 @@ import type {
   TgfxConfig,
 } from "./types";
 import { routeKey } from "./types";
-import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
+import { pruneBotFiles, saveConfig, tgfxHome, type WorkspacePaths } from "./config";
 import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
@@ -194,9 +194,18 @@ export class TgfxApp {
   async run(): Promise<void> {
     const webhook = await this.options.telegram.getWebhookInfo();
     if (webhook.url) throw new Error("This bot has a webhook configured. Remove it before using tgfx long polling.");
+    const adoption = this.state.adoptWorkspace(this.options.paths.workspace);
+    if (adoption.changed) {
+      this.log({
+        event: "workspace.adopted",
+        message: `moved from ${adoption.previous} · sessions reset${adoption.discarded ? ` · ${adoption.discarded} queued message(s) discarded` : ""}`,
+        previous: adoption.previous,
+        discarded: adoption.discarded,
+      });
+    }
     await recoverOutbox(this.options.telegram, this.state);
     this.state.prune();
-    await pruneWorkspaceFiles(this.options.paths);
+    await pruneBotFiles(this.options.paths.files);
     await this.installInitialMenus();
     const recovery = this.state.recoverInbox();
     if (recovery.interrupted) {
@@ -1347,6 +1356,7 @@ export class TgfxApp {
           TGFX_MCP_BOT_ID: this.options.bot.id,
           TGFX_MCP_ROUTE_KEY: route.key,
           TGFX_MCP_WORKSPACE: this.options.paths.workspace,
+          TGFX_MCP_HOME: tgfxHome(),
           TGFX_MCP_DATABASE: this.options.paths.database,
           TGFX_MCP_FILES: this.options.paths.files,
           TGFX_MCP_APPROVALS_CHAT: this.config.approvals.chatId,

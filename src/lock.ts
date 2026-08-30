@@ -1,78 +1,64 @@
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { userStateDirectory, type WorkspacePaths } from "./config";
+import { Database } from "bun:sqlite";
+import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { botPaths } from "./config";
 
-type LockRecord = {
+type LockInfo = {
   pid: number;
   botId: string;
   workspace: string;
   startedAt: string;
-  lockId: string;
 };
 
-function processExists(pid: number): boolean {
+function busy(error: unknown): boolean {
+  const code = (error as { code?: string }).code;
+  const message = error instanceof Error ? error.message : String(error);
+  return code === "SQLITE_BUSY" || /database is locked/i.test(message);
+}
+
+async function holderHint(path: string): Promise<string> {
   try {
-    process.kill(pid, 0);
-    return true;
+    const info = JSON.parse(await readFile(path, "utf8")) as LockInfo;
+    return ` (pid ${info.pid}, workspace ${info.workspace})`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * One tgfx process per bot, machine-wide. The lock is a dedicated SQLite file
+ * held in exclusive locking mode: the kernel drops the underlying advisory
+ * lock the instant the process dies, so a crash can never leave a stale lock
+ * and no pid-liveness heuristics are needed. The state database itself stays
+ * unlocked because the per-route MCP servers are separate processes sharing it.
+ */
+export async function acquireRuntimeLock(botId: string, workspace: string): Promise<() => Promise<void>> {
+  const paths = botPaths(botId);
+  await mkdir(dirname(paths.lock), { recursive: true, mode: 0o700 });
+  await chmod(dirname(paths.lock), 0o700);
+  const db = new Database(paths.lock, { create: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 0");
+    db.exec("PRAGMA locking_mode = EXCLUSIVE");
+    // An INSERT always writes, so this both takes and keeps the exclusive lock;
+    // a no-op statement could skip the write and leave the file unlocked.
+    db.exec("CREATE TABLE IF NOT EXISTS holder (id INTEGER PRIMARY KEY, pid INTEGER)");
+    db.exec(`INSERT OR REPLACE INTO holder (id, pid) VALUES (1, ${process.pid})`);
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    db.close();
+    if (!busy(error)) throw error;
+    throw new Error(`tgfx is already running for bot ${botId}${await holderHint(paths.lockInfo)}`);
   }
-}
-
-async function acquireFile(path: string, record: LockRecord): Promise<() => Promise<void>> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const handle = await open(path, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify(record)}\n`);
-      await handle.close();
-      let released = false;
-      return async () => {
-        if (released) return;
-        released = true;
-        let current: LockRecord | undefined;
-        try { current = JSON.parse(await readFile(path, "utf8")); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-          throw error;
-        }
-        if (!current || current.lockId !== record.lockId) return;
-        await unlink(path).catch((error) => {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        });
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let current: LockRecord | undefined;
-      try { current = JSON.parse(await readFile(path, "utf8")); } catch { /* stale */ }
-      if (current && processExists(current.pid)) {
-        throw new Error(
-          `tgfx is already running for bot ${record.botId} (pid ${current.pid}, workspace ${current.workspace})`,
-        );
-      }
-      await unlink(path).catch(() => undefined);
-    }
-  }
-  throw new Error(`Unable to acquire ${path}`);
-}
-
-export async function acquireRuntimeLock(paths: WorkspacePaths, botId: string): Promise<() => Promise<void>> {
-  const record: LockRecord = {
-    pid: process.pid,
-    botId,
-    workspace: paths.workspace,
-    startedAt: new Date().toISOString(),
-    lockId: crypto.randomUUID(),
+  await chmod(paths.lock, 0o600).catch(() => undefined);
+  const info: LockInfo = { pid: process.pid, botId, workspace, startedAt: new Date().toISOString() };
+  // Diagnostics only: the locked database is unreadable to the loser, so the
+  // "already running" message reads this sidecar instead.
+  await writeFile(paths.lockInfo, `${JSON.stringify(info)}\n`, { mode: 0o600 }).catch(() => undefined);
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    db.close();
+    await unlink(paths.lockInfo).catch(() => undefined);
   };
-  const releaseBot = await acquireFile(join(userStateDirectory(), "locks", `${botId}.lock`), record);
-  try {
-    const releaseWorkspace = await acquireFile(join(paths.directory, "runtime.lock"), record);
-    return async () => {
-      await releaseWorkspace();
-      await releaseBot();
-    };
-  } catch (error) {
-    await releaseBot();
-    throw error;
-  }
 }

@@ -60,6 +60,8 @@ class McpClient {
 
 type CoreContext = {
   workspace: string;
+  home: string;
+  files: string;
   requests: Array<{ method: string; body: string }>;
   maxActiveGetFiles: () => number;
   call: (name: string, args: Json) => Promise<Json>;
@@ -69,8 +71,9 @@ type CoreContext = {
 async function coreContext(): Promise<CoreContext> {
   const workspace = await mkdtemp(join(tmpdir(), "tgfx-mcp-actions-"));
   temporary.push(workspace);
-  const database = join(workspace, ".tgfx", "state.sqlite");
-  const files = join(workspace, ".tgfx", "files");
+  const home = join(workspace, "tgfx-home");
+  const database = join(home, "state", "100.db");
+  const files = join(home, "files", "100");
   const state = new StateStore(database);
   state.ensurePollState("100");
   const inbound: InboundMessage = {
@@ -155,6 +158,7 @@ async function coreContext(): Promise<CoreContext> {
       TGFX_MCP_BOT_ID: "100",
       TGFX_MCP_ROUTE_KEY: "100:42:0",
       TGFX_MCP_WORKSPACE: workspace,
+      TGFX_MCP_HOME: home,
       TGFX_MCP_DATABASE: database,
       TGFX_MCP_FILES: files,
       TGFX_MCP_APPROVALS_CHAT: "42",
@@ -173,6 +177,8 @@ async function coreContext(): Promise<CoreContext> {
   client.notify("notifications/initialized");
   return {
     workspace,
+    home,
+    files,
     requests,
     maxActiveGetFiles: () => maxActiveGetFiles,
     call: (name, args) => client.request("tools/call", { name, arguments: args }),
@@ -244,6 +250,25 @@ describe("Telegram MCP actions", () => {
     }
   });
 
+  test("sends workspace and downloads-directory files but refuses private tgfx state", async () => {
+    const context = await coreContext();
+    try {
+      const download = await context.call("download_attachment", { attachment_ref: "att_current" });
+      const downloadedPath = download.structuredContent.path as string;
+      expect(downloadedPath.startsWith(context.files)).toBeTrue();
+      const fromDownloads = await context.call("send_file", { path: downloadedPath });
+      expect(fromDownloads.structuredContent).toMatchObject({ sent: true });
+      const refused = await context.call("send_file", { path: join(context.home, "state", "100.db") });
+      expect(refused.isError).toBeTrue();
+      expect(JSON.stringify(refused.content)).toContain("Private");
+      const outside = await context.call("send_file", { path: join(context.workspace, "..") });
+      expect(outside.isError).toBeTrue();
+      expect(JSON.stringify(outside.content)).toContain("workspace");
+    } finally {
+      await context.close();
+    }
+  });
+
   test("converts a raster image to a webp upload for send_sticker_file", async () => {
     const context = await coreContext();
     try {
@@ -259,8 +284,9 @@ describe("Telegram MCP actions", () => {
   test("executes every enabled admin tool only after its required approval", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-mcp-admin-"));
     temporary.push(workspace);
-    const database = join(workspace, ".tgfx", "state.sqlite");
-    const files = join(workspace, ".tgfx", "files");
+    const home = join(workspace, "tgfx-home");
+    const database = join(home, "state", "100.db");
+    const files = join(home, "files", "100");
     const routeKey = "100:-9:0";
     const state = new StateStore(database);
     state.ensurePollState("100");
@@ -313,6 +339,7 @@ describe("Telegram MCP actions", () => {
         TGFX_MCP_BOT_ID: "100",
         TGFX_MCP_ROUTE_KEY: routeKey,
         TGFX_MCP_WORKSPACE: workspace,
+        TGFX_MCP_HOME: home,
         TGFX_MCP_DATABASE: database,
         TGFX_MCP_FILES: files,
         TGFX_MCP_APPROVALS_CHAT: "42",
