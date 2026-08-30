@@ -15,6 +15,7 @@ Telegram. Works with your locally installed 𝒇x, and provides as much latest T
 - [x] Approval cards for destructive actions
 - [x] Bots can be group admins: pin messages, moderate, and more
 - [x] Custom emoji icons for tool calls and popular MCPs ([see below](#custom-icons))
+- [ ] Agent can see attached file, images and **voice messages**!
 
 ## Install
 
