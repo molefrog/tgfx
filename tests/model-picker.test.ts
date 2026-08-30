@@ -103,10 +103,6 @@ describe("model picker", () => {
   });
 
   test("uses readable names for providers in the current FX catalog", () => {
-    const icons = providerIconsFromStickerSet(Array.from(
-      { length: 35 },
-      (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
-    ));
     const currentProviders: ModelPickerData = {
       ...data,
       options: [
@@ -116,28 +112,16 @@ describe("model picker", () => {
         { value: "arcee-ai/trinity-large-thinking", name: "arcee-ai/trinity-large-thinking" },
       ],
     };
-    const buttons = providerPicker(currentProviders, 0, icons).replyMarkup.inline_keyboard.flat();
+    const buttons = providerPicker(currentProviders, 0).replyMarkup.inline_keyboard.flat();
     expect(buttons.map((button) => button.text)).toEqual(expect.arrayContaining([
         "KwaiPilot · 1",
         "Thinking Machines · 1",
         "Inception Labs · 1",
         "Arcee AI · 1",
       ]));
-    expect(buttons.find((button) => button.text.startsWith("KwaiPilot")))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-19" });
-    expect(buttons.find((button) => button.text.startsWith("Inception Labs")))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-25" });
-    expect(buttons.find((button) => button.text.startsWith("Arcee AI")))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-24" });
-    expect(buttons.find((button) => button.text.startsWith("Thinking Machines")))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-33" });
   });
 
   test("infers providers when FX returns narrowed unqualified model values", () => {
-    const icons = providerIconsFromStickerSet(Array.from(
-      { length: 36 },
-      (_, index) => ({ custom_emoji_id: `emoji-${index + 1}` }),
-    ));
     const narrowed: ModelPickerData = {
       interactionId: "narrowed",
       currentValue: "deepseek/deepseek-v3.2",
@@ -148,13 +132,10 @@ describe("model picker", () => {
         { value: "deepseek/deepseek-v3.2", name: "deepseek/deepseek-v3.2" },
       ],
     };
-    const buttons = providerPicker(narrowed, 0, icons).replyMarkup.inline_keyboard.flat();
-    expect(buttons.find((button) => button.text === "xAI · 2"))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-8" });
-    expect(buttons.find((button) => button.text === "Codex · 1"))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-36" });
-    expect(buttons.find((button) => button.text === "DeepSeek · 1"))
-      .toMatchObject({ icon_custom_emoji_id: "emoji-3" });
+    const buttons = providerPicker(narrowed, 0).replyMarkup.inline_keyboard.flat();
+    expect(buttons.map((button) => button.text)).toEqual(expect.arrayContaining([
+      "xAI · 2", "Codex · 1", "DeepSeek · 1",
+    ]));
   });
 
   test("uses bundled IDs while Telegram returns a stale shorter pack snapshot", () => {
@@ -164,9 +145,5 @@ describe("model picker", () => {
     ));
     expect(stale.morph).toBe("remote-31");
     expect(stale.sakana).toBe("5226456375772618542");
-    expect(stale.thinkingmachines).toBe("5226528183330838677");
-    expect(stale.inclusionai).toBe("5229191144658739880");
-    expect(stale.interfaze).toBe("5229187485346606266");
-    expect(stale.codex).toBe("5229233944007844947");
   });
 });

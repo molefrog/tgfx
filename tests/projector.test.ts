@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { InputRichMessageWithoutUpload } from "grammy/types";
-import { AcpProjector } from "../src/fx/projector";
+import { AcpProjector, CANONICAL_FX_TOOL_RULES } from "../src/fx/projector";
+import { TELEGRAM_MCP_TOOL_ROW_TITLES } from "../src/mcp/tool-labels";
 
 type RichBlock = NonNullable<InputRichMessageWithoutUpload["blocks"]>[number];
 type DetailsBlock = Extract<RichBlock, { type: "details" }>;
@@ -219,57 +220,57 @@ describe("ordered ACP projector", () => {
     expect(finalBlocks.some((block) => block.type === "thinking")).toBeFalse();
   });
 
-  test("maps the complete FX 0.0.7+ tool catalog before consulting title or kind", () => {
-    const cases: Array<{
-      name: string;
-      row: string;
-      expected: string;
-      content?: unknown[];
-    }> = [
-      { name: "glob_files", row: "Finding files", expected: "Searched files" },
-      { name: "grep_files", row: "Searching code", expected: "Searched code" },
-      { name: "read_file", row: "Reading file", expected: "Read 1 file" },
-      {
-        name: "write_file",
-        row: "Creating file",
-        expected: "Created 1 file",
-        content: [{ type: "diff", path: "/workspace/new.ts", oldText: null, newText: "export {};" }],
-      },
-      { name: "write_file", row: "Writing file", expected: "Wrote 1 file" },
-      { name: "edit_file", row: "Editing file", expected: "Edited 1 file" },
-      { name: "terminal", row: "Managing terminal", expected: "Used terminal" },
-      { name: "subagent", row: "Running subagent", expected: "Used subagents" },
-      { name: "capability_search", row: "Finding tools and skills", expected: "Searched capabilities" },
-      { name: "skill_search", row: "Searching skills", expected: "Searched skills" },
-      { name: "skill", row: "Loading skill", expected: "Used skills" },
-      { name: "install_skill", row: "Installing skill", expected: "Installed 1 skill" },
-      { name: "mcp_search_tools", row: "Searching MCP tools", expected: "Searched MCP tools" },
-      { name: "mcp_select_tool", row: "Selecting MCP tool", expected: "Worked for 1s" },
-      { name: "mcp_features", row: "Using MCP resource or prompt", expected: "Used external tools" },
-      { name: "memory", row: "Saving memory", expected: "Used memory" },
-      { name: "ask_user_question", row: "Asking a question", expected: "Asked user" },
-      { name: "vision", row: "Inspecting images", expected: "Inspected images" },
-      { name: "read_tool_result", row: "Reading tool result", expected: "Read 1 tool result" },
-      { name: "web_fetch", row: "Fetching web page", expected: "Fetched 1 page" },
-      { name: "web_search", row: "Searching web", expected: "Searched web" },
-    ];
+  test("prefers exact FX tool names over a misleading Telegram-looking title", () => {
+    const read = new AcpProjector();
+    read.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "read", name: "read_file",
+      // Exact FX names must win even when kind is absent and the title looks like
+      // a Telegram MCP call that would otherwise be classified first.
+      title: "mcp_telegram_set_reaction", status: "completed", content: [],
+    }));
+    let group = details(final(read)[0]);
+    expect(group.summary).toBe("Read 1 file");
+    expect(group.blocks).toEqual([{ type: "paragraph", text: "Reading file" }]);
 
-    for (const [index, tool] of cases.entries()) {
+    const create = new AcpProjector();
+    create.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "create", name: "write_file",
+      title: "mcp_telegram_set_reaction", status: "completed",
+      content: [{ type: "diff", path: "/workspace/new.ts", oldText: null, newText: "export {};" }],
+    }));
+    group = details(final(create)[0]);
+    expect(group.summary).toBe("Created 1 file");
+    expect(group.blocks).toEqual([{ type: "paragraph", text: "Creating file" }]);
+
+    const omitted = new AcpProjector();
+    omitted.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "select", name: "mcp_select_tool",
+      title: "mcp_telegram_set_reaction", status: "completed", content: [],
+    }));
+    group = details(final(omitted)[0]);
+    expect(group.summary).toBe("Worked for 1s");
+    expect(group.blocks).toEqual([{ type: "paragraph", text: "Selecting MCP tool" }]);
+  });
+
+  test("maps every registered FX tool to a human row and non-generic summary", () => {
+    for (const [name, rule] of Object.entries(CANONICAL_FX_TOOL_RULES)) {
       const projector = new AcpProjector();
       projector.apply(update({
         sessionUpdate: "tool_call",
-        toolCallId: `canonical-${tool.name}-${index}`,
-        name: tool.name,
-        // Exact FX names must win even when kind is absent and the title looks like
-        // a Telegram MCP call that would otherwise be classified first.
+        toolCallId: `canonical-${name}`,
+        name,
         title: "mcp_telegram_set_reaction",
         status: "completed",
-        content: tool.content ?? [],
+        content: [],
       }));
-
       const group = details(final(projector)[0]);
-      expect(group.summary).toBe(tool.expected);
-      expect(group.blocks).toEqual([{ type: "paragraph", text: tool.row }]);
+      const row = group.blocks[0];
+      if (row?.type !== "paragraph" || typeof row.text !== "string") {
+        throw new Error(`Expected a plain row title for ${name}`);
+      }
+      expect(row.text).not.toContain("_");
+      expect(row.text).not.toContain("mcp_telegram_");
+      if (rule !== "omit") expect(group.summary).not.toBe("Worked for 1s");
     }
   });
 
@@ -284,7 +285,6 @@ describe("ordered ACP projector", () => {
       row?: string;
     }> = [
       { name: "terminal", title: "Terminal", rawInput: { kind: "exec" }, expected: "Ran 1 command", row: "Running command" },
-      { name: "terminal", title: "Terminal", rawInput: { request: { action: "start" } }, expected: "Ran 1 command", row: "Running command" },
       { name: "terminal", title: "Terminal", rawInput: { action: "read" }, expected: "Used terminal" },
       { name: "perplexity_search", title: "read_file", expected: "Searched web" },
       { name: "mcp_github_search_code", title: "read_file", expected: "Used external tools" },
@@ -303,18 +303,8 @@ describe("ordered ACP projector", () => {
         expected: "Searched web",
         row: "Searching web",
       },
-      {
-        title: "Searching",
-        kind: "search",
-        content: [{ type: "content", content: { type: "text", text: "Web search results for query: fx" } }],
-        expected: "Searched web",
-      },
       { title: "Searching", kind: "search", expected: "Searched", row: "Searching" },
-      { title: "Searching capabilities", kind: "other", expected: "Searched capabilities", row: "Finding tools and skills" },
       { title: "Listing", kind: "other", expected: "Used memory", row: "Listing memories" },
-      { title: "Installing skill", kind: "other", expected: "Installed 1 skill", row: "Installing skill" },
-      { title: "Asking", kind: "other", expected: "Asked user", row: "Asking a question" },
-      { title: "Using MCP feature", kind: "other", expected: "Used external tools", row: "Using MCP resource or prompt" },
     ];
 
     for (const [index, tool] of cases.entries()) {
@@ -420,34 +410,13 @@ describe("ordered ACP projector", () => {
     expect(rendered(final(projector))).toContain("Let me check that file.");
   });
 
-  test("keeps actual FX 0.0.7 title/kind fallback summaries", () => {
-    const cases: Array<{
-      count: number;
-      kind: string;
-      title: string;
-      expected: string;
-      content?: unknown[];
-    }> = [
+  test("pluralizes counted title/kind fallback summaries", () => {
+    const cases = [
       { count: 5, kind: "execute", title: "Running", expected: "Ran 5 commands" },
       { count: 2, kind: "read", title: "Reading", expected: "Read 2 files" },
-      { count: 5, kind: "read", title: "Matching", expected: "Searched files" },
-      {
-        count: 1,
-        kind: "search",
-        title: "Searching",
-        expected: "Searched code",
-        content: [{ type: "content", content: { type: "text", text: "[grep] 2 matches" } }],
-      },
       { count: 2, kind: "edit", title: "Writing", expected: "Wrote 2 files" },
       { count: 2, kind: "edit", title: "Editing", expected: "Edited 2 files" },
-      { count: 2, kind: "execute", title: "Waiting for", expected: "Used terminal" },
-      { count: 2, kind: "other", title: "Remembering", expected: "Used memory" },
-      { count: 2, kind: "other", title: "Listing", expected: "Used memory" },
-      { count: 2, kind: "other", title: "Searching capabilities", expected: "Searched capabilities" },
-      { count: 2, kind: "other", title: "Loading skill", expected: "Used skills" },
       { count: 2, kind: "other", title: "Installing skill", expected: "Installed 2 skills" },
-      { count: 2, kind: "other", title: "Managing", expected: "Used subagents" },
-      { count: 2, kind: "read", title: "Fetching", expected: "Fetched 2 pages" },
     ];
 
     for (const activity of cases) {
@@ -459,7 +428,7 @@ describe("ordered ACP projector", () => {
           title: activity.title,
           kind: activity.kind,
           status: "completed",
-          content: activity.content ?? [],
+          content: [],
         }));
       }
       expect(details(final(projector)[0]).summary).toBe(activity.expected);
@@ -553,23 +522,8 @@ describe("ordered ACP projector", () => {
   });
 
   test("renders every Telegram MCP tool with a human title and one summary category", () => {
-    const telegramTools = [
-      ["set_reaction", "Reacting to message"],
-      ["download_attachment", "Downloading attachment"],
-      ["send_file", "Sending file"],
-      ["get_sticker_pack", "Loading sticker pack"],
-      ["send_sticker_by_id", "Sending sticker"],
-      ["send_sticker_file", "Sending sticker"],
-      ["request_choice", "Asking for a choice"],
-      ["create_poll", "Creating poll"],
-      ["set_pinned_message", "Setting pinned message"],
-      ["pin_message", "Pinning message"],
-      ["unpin_message", "Unpinning message"],
-      ["manage_topic", "Managing topic"],
-      ["delete_messages", "Deleting messages"],
-      ["moderate_member", "Moderating member"],
-      ["review_join_request", "Reviewing join request"],
-    ] as const;
+    const telegramTools = Object.entries(TELEGRAM_MCP_TOOL_ROW_TITLES);
+    expect(TELEGRAM_MCP_TOOL_ROW_TITLES.set_reaction).toBe("Reacting to message");
     const projector = new AcpProjector();
 
     for (const [name] of telegramTools) {

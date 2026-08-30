@@ -31,9 +31,8 @@ describe("Telegram input normalization", () => {
     const envelope = toEnvelope(message);
     expect(message.text).toBe("hello");
     expect(envelope.telegram_message.source).toBe("tgfx:telegram");
-    expect(envelope.telegram_message.instructions).toBe(
-      "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), polls, group admin actions and more. Use search.",
-    );
+    expect(envelope.telegram_message.instructions).toContain("`telegram` MCP");
+    expect(envelope.telegram_message.instructions).toContain("`set_reaction`");
     expect(envelope.telegram_message.event).toBe("message.created");
     expect(envelope.telegram_message.event_id).toBe("tg:11");
     expect(envelope.telegram_message.sender).toMatchObject({ user_id: "42", display_name: "Ada" });

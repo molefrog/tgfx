@@ -166,8 +166,9 @@ describe("tgfx host pipeline", () => {
 
     const enabled = await run(true);
     expect(enabled.packLookups).toBe(1);
-    expect(JSON.stringify(enabled.final)).toContain('"custom_emoji_id":"emoji-53"');
-    expect(JSON.stringify(enabled.final)).toContain('"custom_emoji_id":"emoji-141"');
+    // Exact pack positions are covered by mcp-icons.test.ts; here only the
+    // config flag wiring matters: icons from the looked-up pack reach the rows.
+    expect(JSON.stringify(enabled.final)).toContain('"custom_emoji_id":"emoji-');
 
     const disabled = await run(false);
     expect(disabled.packLookups).toBe(0);
