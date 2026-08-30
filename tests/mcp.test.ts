@@ -64,6 +64,55 @@ async function listTools(options: { chatId?: string; allowed?: string[]; apiRoot
   }
 }
 
+async function resourceExchange(): Promise<{ listed: any; read: any }> {
+  const root = mkdtempSync(join(tmpdir(), "tgfx-mcp-res-"));
+  temporary.push(root);
+  const child = Bun.spawn([process.execPath, resolve("src/index.ts"), "mcp"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      TGFX_MCP_TOKEN: `100000:${"x".repeat(24)}`,
+      TGFX_MCP_BOT_ID: "100",
+      TGFX_MCP_ROUTE_KEY: "100:42:0",
+      TGFX_MCP_WORKSPACE: root,
+      TGFX_MCP_DATABASE: join(root, ".tgfx", "state.sqlite"),
+      TGFX_MCP_FILES: join(root, ".tgfx", "files"),
+      TGFX_MCP_APPROVALS_CHAT: "42",
+      TGFX_MCP_APPROVALS_TOPIC: "0",
+      TGFX_MCP_ALLOWED_CHATS: JSON.stringify([]),
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const messages = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" },
+    } },
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    { jsonrpc: "2.0", id: 2, method: "resources/list", params: {} },
+    { jsonrpc: "2.0", id: 3, method: "resources/read", params: { uri: "telegram://guidelines" } },
+  ];
+  for (const message of messages) child.stdin.write(`${JSON.stringify(message)}\n`);
+  const reader = child.stdout.getReader();
+  const responses = new Map<number, any>();
+  let buffered = "";
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) throw new Error("MCP server closed before resources/read");
+    buffered += new TextDecoder().decode(next.value);
+    for (const line of buffered.split("\n").filter(Boolean)) {
+      const response = JSON.parse(line);
+      if (typeof response.id === "number") responses.set(response.id, response);
+    }
+    if (responses.has(2) && responses.has(3)) {
+      child.kill();
+      await child.exited;
+      return { listed: responses.get(2).result, read: responses.get(3).result };
+    }
+  }
+}
+
 describe("Telegram MCP catalog", () => {
   test("fails closed when internal capability environment is malformed", async () => {
     const root = mkdtempSync(join(tmpdir(), "tgfx-mcp-invalid-"));
@@ -110,6 +159,14 @@ describe("Telegram MCP catalog", () => {
     expect(schemas.create_poll.required).toEqual(["question", "options"]);
     expect(schemas.create_poll.properties?.anonymous.default).toBeFalse();
     expect(schemas.create_poll.properties?.multiple.default).toBeFalse();
+  });
+
+  test("serves the guidelines resource without an active turn", async () => {
+    const { listed, read } = await resourceExchange();
+    expect(listed.resources.map((resource: { uri: string }) => resource.uri)).toContain("telegram://guidelines");
+    expect(read.contents[0].uri).toBe("telegram://guidelines");
+    expect(read.contents[0].text).toContain("sticker");
+    expect(read.contents[0].text).toContain("send_sticker_by_id");
   });
 
   test("derives admin tools from the bot's live Telegram rights", async () => {

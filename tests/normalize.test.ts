@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Update } from "grammy/types";
-import { commandFromText, groupMigrationFromUpdate, isAuthorized, normalizeMessageUpdate, shouldInvokeAgent, toEnvelope } from "../src/telegram/normalize";
+import { commandFromText, groupMigrationFromUpdate, isAuthorized, normalizeMessageUpdate, SESSION_BOOTSTRAP_INSTRUCTIONS, shouldInvokeAgent, toEnvelope } from "../src/telegram/normalize";
 import type { BotIdentity, TgfxConfig } from "../src/types";
 
 const bot: BotIdentity = { id: "100", username: "tgfx_test_bot", displayName: "tgfx" };
@@ -41,6 +41,18 @@ describe("Telegram input normalization", () => {
     expect(envelope.telegram_message.response_target).toEqual({ kind: "automatic_reply" });
     expect(envelope.telegram_message.scope).toEqual({ chat_id: "42", kind: "private", topic_id: "0" });
     expect(isAuthorized(config, message)).toBeTrue();
+    expect(envelope.telegram_message).not.toContainKey("session_bootstrap");
+  });
+
+  test("injects the session bootstrap directive only when requested", () => {
+    const message = normalizeMessageUpdate(bot, update())!;
+    const envelope = toEnvelope(message, { sessionBootstrap: true });
+    expect(envelope.telegram_message.session_bootstrap).toBe(SESSION_BOOTSTRAP_INSTRUCTIONS);
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("mcp_features");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("resource_read");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("telegram://guidelines");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("capability_search");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("no text before this call");
   });
 
   test("exposes opaque attachment metadata but never the Bot API file_id", () => {

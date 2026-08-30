@@ -1,5 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import type { InputRichMessageWithoutUpload } from "grammy/types";
+import { TELEGRAM_GUIDELINES_URI } from "../mcp/guidelines";
 import {
   TELEGRAM_MCP_TOOL_ROW_TITLES,
   type TelegramMcpToolName,
@@ -206,6 +207,13 @@ function exactArgumentFromContent(content: unknown[]): string {
   return "";
 }
 
+function readsTelegramGuidelines(tool: ToolState): boolean {
+  if (tool.title.includes(TELEGRAM_GUIDELINES_URI)) return true;
+  if (stringify(tool.input, 4_000, false).includes(TELEGRAM_GUIDELINES_URI)) return true;
+  if (stringify(tool.output, 4_000, false).includes(TELEGRAM_GUIDELINES_URI)) return true;
+  return contentText(tool.content).some((text) => text.includes(TELEGRAM_GUIDELINES_URI));
+}
+
 function toolArgument(tool: ToolState): string {
   if (tool.input !== undefined) return stringify(tool.input, 800, false);
 
@@ -328,7 +336,7 @@ function canonicalToolRowTitle(tool: ToolState, name: CanonicalFxToolName): stri
     case "install_skill": return "Installing skill";
     case "mcp_search_tools": return "Searching MCP tools";
     case "mcp_select_tool": return "Selecting MCP tool";
-    case "mcp_features": return "Using MCP resource or prompt";
+    case "mcp_features": return readsTelegramGuidelines(tool) ? "Reading guidelines" : "Using MCP resource or prompt";
     case "memory": return titleStartsWith(tool, /^listing\b/iu) ? "Listing memories" : "Saving memory";
     case "ask_user_question": return "Asking a question";
     case "vision": return "Inspecting images";
@@ -360,7 +368,9 @@ function fxWireToolRowTitle(tool: ToolState): string | undefined {
   if (titleStartsWith(tool, /^installing skill\b/iu)) return "Installing skill";
   if (titleStartsWith(tool, /^managing\b/iu)) return "Running subagent";
   if (titleStartsWith(tool, /^selecting MCP tool\b/iu)) return "Selecting MCP tool";
-  if (titleStartsWith(tool, /^using MCP feature\b/iu)) return "Using MCP resource or prompt";
+  if (titleStartsWith(tool, /^using MCP feature\b/iu)) {
+    return readsTelegramGuidelines(tool) ? "Reading guidelines" : "Using MCP resource or prompt";
+  }
   if (titleStartsWith(tool, /^listing\b/iu)) return "Listing memories";
   if (titleStartsWith(tool, /^remembering\b/iu)) return "Saving memory";
   if (titleStartsWith(tool, /^asking\b/iu)) return "Asking a question";
@@ -439,6 +449,7 @@ function canonicalActivity(tool: ToolState, name: CanonicalFxToolName): ToolActi
   if (rule === "omit") return undefined;
   if (rule === "terminal") return terminalActivity(tool);
   if (rule === "write_file") return hasNewFileDiff(tool) ? "created_files" : "wrote_files";
+  if (name === "mcp_features" && readsTelegramGuidelines(tool)) return "used_chat_tools";
   return rule;
 }
 
@@ -490,7 +501,9 @@ function toolActivity(tool: ToolState): ToolActivity | undefined {
       if (titleStartsWith(tool, /^inspect(?:ing|ed)\b/iu)) return "inspected_images";
       if (titleStartsWith(tool, /^read(?:ing)?\s+tool result\b/iu)) return "read_tool_results";
       if (titleStartsWith(tool, /^selecting MCP tool/iu)) return undefined;
-      if (titleStartsWith(tool, /^using MCP feature/iu)) return "used_external_tools";
+      if (titleStartsWith(tool, /^using MCP feature/iu)) {
+        return readsTelegramGuidelines(tool) ? "used_chat_tools" : "used_external_tools";
+      }
       if (dynamicMcpTool(title)) return "used_external_tools";
       return undefined;
   }
@@ -682,12 +695,16 @@ export class AcpProjector {
       return hidden;
     };
 
-    for (const entry of this.timeline) {
+    const suppressBefore = this.guidelinesBootstrapIndex();
+    for (const [index, entry] of this.timeline.entries()) {
       if (entry.type === "tool") {
         const tool = this.tools.get(entry.toolCallId);
         if (tool) group.push(tool);
         continue;
       }
+      // The bootstrap directive forbids announcing the guidelines read; when the
+      // model narrates anyway, drop that preamble instead of relaying it.
+      if (index < suppressBefore) continue;
 
       const markdown = redactSecrets(entry.markdown);
       const blocks = markdownToRichBlocks(markdown);
@@ -704,6 +721,18 @@ export class AcpProjector {
     }
     flushTools();
     return items;
+  }
+
+  // Timeline index of the guidelines resource read, but only when it is the
+  // turn's first tool call (a bootstrap turn); -1 otherwise. Assistant text
+  // before that index is a forbidden announcement and is not rendered.
+  private guidelinesBootstrapIndex(): number {
+    for (const [index, entry] of this.timeline.entries()) {
+      if (entry.type !== "tool") continue;
+      const tool = this.tools.get(entry.toolCallId);
+      return tool && readsTelegramGuidelines(tool) ? index : -1;
+    }
+    return -1;
   }
 
   rich(options: {
@@ -743,9 +772,21 @@ export class AcpProjector {
   }
 
   private toolRow(tool: ToolState): RichBlock {
+    const canonicalName = inferredCanonicalFxToolName(tool);
+    if (canonicalName === "mcp_features" && readsTelegramGuidelines(tool)) {
+      const iconId = this.mcpIcons.telegram;
+      return {
+        type: "paragraph",
+        text: iconId
+          ? [
+              { type: "custom_emoji" as const, custom_emoji_id: iconId, alternative_text: "🧩" },
+              " Reading guidelines",
+            ]
+          : "Reading guidelines",
+      };
+    }
     const argument = toolArgumentPreview(tool);
     const displayTitle = redactSecrets(displayToolTitle(tool));
-    const canonicalName = inferredCanonicalFxToolName(tool);
     const fxIconId = canonicalName
       ? fxToolIconForTool(this.mcpIcons, canonicalName)
       : undefined;
@@ -774,7 +815,8 @@ export class AcpProjector {
     const parts = this.projected(includeTools).map((item) => {
       if (item.type === "assistant") return item.markdown.trim();
       const rows = item.tools.map((tool) => {
-        const argument = toolArgumentPreview(tool);
+        const guidelines = inferredCanonicalFxToolName(tool) === "mcp_features" && readsTelegramGuidelines(tool);
+        const argument = guidelines ? "" : toolArgumentPreview(tool);
         return `${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
       });
       return [completedToolSummary(item.tools, this.changedAt), ...rows].join("\n");

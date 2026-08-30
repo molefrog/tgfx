@@ -236,6 +236,57 @@ describe("tgfx host pipeline", () => {
     await expect(readFile(imagePath)).rejects.toThrow();
   });
 
+  test("injects the session bootstrap directive on the first turn of a new session only", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-bootstrap-"));
+    temporary.push(workspace);
+    const paths = workspacePaths(workspace);
+    const logPath = join(workspace, "fx-events.jsonl");
+    const fxBinary = await fakeFx(workspace, logPath);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+    };
+    let poll = 0;
+    let deliveries = 0;
+    let delivered!: () => void;
+    const permanent = new Promise<void>((resolve) => { delivered = resolve; });
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        poll += 1;
+        if (poll === 1) return [update(1, 42, "first message")];
+        if (poll === 2) return [update(2, 42, "second message")];
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => true as const,
+      deleteCommands: async () => true as const,
+      sendRichDraft: async () => true as const,
+      sendRich: async () => {
+        deliveries += 1;
+        if (deliveries === 2) delivered();
+        return { message_id: 700 + deliveries } as Message.TextMessage;
+      },
+      sendText: async () => ({ message_id: 799 }) as Message.TextMessage,
+    } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined,
+    });
+    const running = app.run();
+    await Promise.race([permanent, Bun.sleep(5_000).then(() => { throw new Error("bootstrap turns timed out"); })]);
+    await app.stop();
+    await running;
+    const events = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const prompts = events.filter((event) => event.event === "prompt").map((event) => event.value.prompt);
+    expect(prompts.length).toBe(2);
+    const first = JSON.parse(prompts[0][0].text).telegram_message;
+    const second = JSON.parse(prompts[1][0].text).telegram_message;
+    expect(first.session_bootstrap).toContain("mcp_features");
+    expect(first.session_bootstrap).toContain("telegram://guidelines");
+    expect(second.session_bootstrap).toBeUndefined();
+  });
+
   test("cancels the matching turn when Telegram reports draft generation stopped", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-cancel-"));
     temporary.push(workspace);

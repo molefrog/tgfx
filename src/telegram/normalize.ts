@@ -8,6 +8,7 @@ import type {
   TgfxConfig,
 } from "../types";
 import { routeKey } from "../types";
+import { TELEGRAM_GUIDELINES_URI } from "../mcp/guidelines";
 
 function ref(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -212,7 +213,13 @@ export function isAuthorized(config: TgfxConfig, message: InboundMessage): boole
     || (senderId !== undefined && config.access.userIds.includes(senderId));
 }
 
-export function toEnvelope(message: InboundMessage) {
+export const SESSION_BOOTSTRAP_INSTRUCTIONS =
+  `New session: first call the built-in mcp_features tool with ` +
+  `{"action": "resource_read", "server": "telegram", "uri": "${TELEGRAM_GUIDELINES_URI}"} ` +
+  `(no capability_search or mcp_search_tools needed). Output no text before this call ` +
+  `and never mention the guidelines - silently apply them from now on.`;
+
+export function toEnvelope(message: InboundMessage, options: { sessionBootstrap?: boolean } = {}) {
   const editedMessage = message.raw.edited_message ?? message.raw.edited_channel_post;
   const envelopeSender = message.sender.kind === "user"
     ? {
@@ -239,6 +246,7 @@ export function toEnvelope(message: InboundMessage) {
       version: 1 as const,
       source: "tgfx:telegram" as const,
       instructions: "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), polls, group admin actions and more. Use search.",
+      ...(options.sessionBootstrap ? { session_bootstrap: SESSION_BOOTSTRAP_INSTRUCTIONS } : {}),
       event: message.event,
       event_id: `tg:${message.updateId}`,
       context_ref: message.contextRef,

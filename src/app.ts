@@ -126,8 +126,9 @@ function makePrompt(
   message: InboundMessage,
   textOverride?: string,
   adminContext?: Record<string, unknown>,
+  sessionBootstrap?: boolean,
 ): acp.ContentBlock[] {
-  const envelope = toEnvelope(message) as { telegram_message: Record<string, unknown> };
+  const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
   if (adminContext) envelope.telegram_message.admin_context = adminContext;
   const blocks: acp.ContentBlock[] = [{
     type: "text",
@@ -148,6 +149,7 @@ export class TgfxApp {
   private readonly activeDraftIds = new Map<string, number>();
   private readonly draftLimiters = new Map<string, PeerDraftLimiter>();
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
+  private readonly pendingSessionBootstrap = new Set<string>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
   private readonly stickerTemporaryDirectories = new Set<string>();
   private readonly pollAbort = new AbortController();
@@ -608,7 +610,13 @@ export class TgfxApp {
       return;
     }
 
-    await this.runTurn(row, message, makePrompt(message, undefined, await this.adminContext(message.route)));
+    const sessionBootstrap = this.sessionBootstrapPending(message.route);
+    await this.runTurn(
+      row,
+      message,
+      makePrompt(message, undefined, await this.adminContext(message.route), sessionBootstrap),
+      { sessionBootstrap },
+    );
   }
 
   private async prepareStickerImages(message: InboundMessage): Promise<void> {
@@ -877,9 +885,10 @@ export class TgfxApp {
       },
     };
     this.state.registerInbound(message);
-    const envelope = toEnvelope(message) as { telegram_message: Record<string, unknown> };
+    const sessionBootstrap = this.sessionBootstrapPending(message.route);
+    const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
     envelope.telegram_message.poll = message.provenance;
-    await this.runTurn(row, message, [{ type: "text", text: JSON.stringify(envelope, null, 2) }]);
+    await this.runTurn(row, message, [{ type: "text", text: JSON.stringify(envelope, null, 2) }], { sessionBootstrap });
   }
 
   private async dispatchCallback(row: InboxRow, update: Update, route: Route): Promise<void> {
@@ -1100,12 +1109,13 @@ export class TgfxApp {
         raw: update,
       };
       this.state.registerInbound(message);
-      const envelope = toEnvelope(message) as { telegram_message: Record<string, unknown> };
+      const sessionBootstrap = this.sessionBootstrapPending(message.route);
+      const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
       envelope.telegram_message.interaction = { ref: `interaction_${id}`, choice_index: index, label };
       await this.runTurn(row, message, [
         { type: "text", text: JSON.stringify(envelope, null, 2) },
         { type: "text", text: message.text! },
-      ]);
+      ], { sessionBootstrap });
       return;
     }
     await this.options.telegram.answerCallback(callback.id, "This action is no longer active");
@@ -1225,10 +1235,24 @@ export class TgfxApp {
     }
   }
 
-  private async runTurn(row: InboxRow, message: InboundMessage, blocks: acp.ContentBlock[]): Promise<void> {
+  // True when the next prompt will be the first turn of a brand-new fx session,
+  // so its envelope should carry the session_bootstrap directive. Peek only —
+  // runTurn clears the flag once the directive-bearing prompt is on its way.
+  private sessionBootstrapPending(route: Route): boolean {
+    return this.pendingSessionBootstrap.has(route.key)
+      || (!this.sessions.has(route.key) && !this.state.route(route.key)?.session_id);
+  }
+
+  private async runTurn(
+    row: InboxRow,
+    message: InboundMessage,
+    blocks: acp.ContentBlock[],
+    options?: { sessionBootstrap?: boolean },
+  ): Promise<void> {
     const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
     const session = await this.session(message.route);
+    if (options?.sessionBootstrap) this.pendingSessionBootstrap.delete(message.route.key);
     const projector = new AcpProjector(await this.mcpToolIcons());
     const controller = new AbortController();
     const renderer = new TurnRenderer(
@@ -1303,6 +1327,7 @@ export class TgfxApp {
     const existing = this.sessions.get(route.key);
     if (existing) return existing;
     const row = this.state.ensureRoute(route);
+    const hadNoSession = !row.session_id;
     const mcpLaunch = this.options.mcpLaunch ?? {
       command: process.execPath,
       args: [fileURLToPath(new URL("./index.ts", import.meta.url)), "mcp"],
@@ -1347,6 +1372,7 @@ export class TgfxApp {
     try {
       const info = await session.start();
       this.state.setRouteSession(route.key, info.sessionId, info.replacedPrevious);
+      if (hadNoSession || info.replacedPrevious) this.pendingSessionBootstrap.add(route.key);
       if (info.replacedPrevious) {
         await this.options.telegram.sendText(
           route.chatId,

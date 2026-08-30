@@ -9,6 +9,7 @@ import { adminCapabilitiesForMember, TelegramApi } from "../telegram/api";
 import type { AdminCapability, AttachmentRef } from "../types";
 import { VERSION } from "../version";
 import { safeDownloadPath, safeName, writeResponseLimited } from "./files";
+import { TELEGRAM_GUIDELINES_TEXT, TELEGRAM_GUIDELINES_URI } from "./guidelines";
 
 type McpEnvironment = {
   token: string;
@@ -141,7 +142,21 @@ export async function runTelegramMcpServer(): Promise<void> {
       "References are scoped capabilities. Never invent Telegram IDs, file URLs, or local paths.",
       "Download a remote attachment before claiming to inspect or modify it. Sticker images are downloaded automatically and include a local path.",
       "Use admin tools only when the user's current message explicitly asks for that action.",
+      `Read the ${TELEGRAM_GUIDELINES_URI} resource (mcp_features resource_read) for channel guidelines.`,
     ].join(" ") },
+  );
+
+  server.registerResource(
+    "guidelines",
+    TELEGRAM_GUIDELINES_URI,
+    {
+      title: "Telegram channel guidelines",
+      description: "How to use this Telegram channel; read at the start of every session.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => ({
+      contents: [{ uri: uri.href, mimeType: "text/markdown", text: TELEGRAM_GUIDELINES_TEXT }],
+    }),
   );
 
   const context = () => {

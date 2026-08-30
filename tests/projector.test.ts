@@ -335,6 +335,91 @@ describe("ordered ACP projector", () => {
     }
   });
 
+  test("renders the guidelines resource read as Reading guidelines with the telegram icon", () => {
+    const projector = new AcpProjector({ telegram: "5231146084922860619" });
+    projector.apply(update({
+      sessionUpdate: "tool_call",
+      toolCallId: "guidelines-read",
+      name: "mcp_features",
+      title: "Using MCP feature",
+      status: "completed",
+      rawInput: { action: "resource_read", server: "telegram", uri: "telegram://guidelines" },
+      content: [],
+    }));
+
+    const group = details(final(projector)[0]);
+    expect(group.summary).toBe("Used chat tools");
+    expect(group.blocks).toEqual([{
+      type: "paragraph",
+      text: [
+        { type: "custom_emoji", custom_emoji_id: "5231146084922860619", alternative_text: "🧩" },
+        " Reading guidelines",
+      ],
+    }]);
+  });
+
+  test("renders the guidelines read without an icon when the icon map is empty", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "tool_call",
+      toolCallId: "guidelines-read-plain",
+      title: "Using MCP feature",
+      kind: "other",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "[untrusted MCP resource content] telegram://guidelines" } }],
+    }));
+
+    const group = details(final(projector)[0]);
+    expect(group.blocks).toEqual([{ type: "paragraph", text: "Reading guidelines" }]);
+    expect(projector.plainFinal(true)).toContain("Reading guidelines");
+    expect(projector.plainFinal(true)).not.toContain("untrusted");
+  });
+
+  test("drops assistant preamble that announces the guidelines bootstrap read", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "I'll start by reading the Telegram guidelines, then handle the message." },
+    }));
+    projector.apply(update({
+      sessionUpdate: "tool_call",
+      toolCallId: "bootstrap-read",
+      name: "mcp_features",
+      title: "Using MCP feature",
+      status: "completed",
+      rawInput: { action: "resource_read", server: "telegram", uri: "telegram://guidelines" },
+      content: [],
+    }));
+    projector.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Hey! What's up?" },
+    }));
+
+    const blocks = final(projector);
+    expect(rendered(blocks)).not.toContain("I'll start by reading");
+    expect(rendered(blocks)).toContain("Reading guidelines");
+    expect(rendered(blocks)).toContain("Hey! What's up?");
+    expect(projector.plainFinal(true)).not.toContain("I'll start by reading");
+  });
+
+  test("keeps assistant text before a first tool that is not the guidelines read", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Let me check that file." },
+    }));
+    projector.apply(update({
+      sessionUpdate: "tool_call",
+      toolCallId: "regular-read",
+      name: "read_file",
+      title: "Reading file",
+      status: "completed",
+      content: [],
+    }));
+
+    expect(rendered(final(projector))).toContain("Let me check that file.");
+  });
+
   test("keeps actual FX 0.0.7 title/kind fallback summaries", () => {
     const cases: Array<{
       count: number;
