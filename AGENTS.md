@@ -2,6 +2,12 @@
 
 Small project, small rules. When in doubt, write less.
 
+## Toolkit
+
+Bun for everything: runtime, tests, builds, scripts, its built-in APIs
+before any package. Keep the project small and the dependency list short —
+but don't reinvent what a good, well-maintained lib already does.
+
 ## Tests
 
 `bun run check && bun test` (Bun ≥ 1.4). Keep the suite fast. Wait on
