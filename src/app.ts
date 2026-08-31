@@ -44,12 +44,13 @@ import type {
   AdminCapability,
   BotIdentity,
   InboundMessage,
+  RendererConfig,
   Route,
   SenderIdentity,
   TgfxConfig,
 } from "./types";
 import { routeKey } from "./types";
-import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
+import { pruneBotFiles, saveConfig, tgfxHome, type WorkspacePaths } from "./config";
 import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
@@ -172,12 +173,12 @@ export class TgfxApp {
     model?: string;
     permissionMode?: FxPermissionMode;
     mcpLaunch?: { command: string; args: string[] };
-    renderer?: Partial<TgfxConfig["renderer"]>;
+    renderer?: Partial<RendererConfig>;
     customIcons?: boolean;
     log?: (event: TgfxLogEvent) => void;
   }) {
     this.config = options.config;
-    this.customIconsEnabled = options.customIcons ?? options.config.modelPicker?.customIcons ?? true;
+    this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
   }
@@ -194,9 +195,18 @@ export class TgfxApp {
   async run(): Promise<void> {
     const webhook = await this.options.telegram.getWebhookInfo();
     if (webhook.url) throw new Error("This bot has a webhook configured. Remove it before using tgfx long polling.");
+    const adoption = this.state.adoptWorkspace(this.options.paths.workspace);
+    if (adoption.changed) {
+      this.log({
+        event: "workspace.adopted",
+        message: `moved from ${adoption.previous} · sessions reset${adoption.discarded ? ` · ${adoption.discarded} queued message(s) discarded` : ""}`,
+        previous: adoption.previous,
+        discarded: adoption.discarded,
+      });
+    }
     await recoverOutbox(this.options.telegram, this.state);
     this.state.prune();
-    await pruneWorkspaceFiles(this.options.paths);
+    await pruneBotFiles(this.options.paths.files);
     await this.installInitialMenus();
     const recovery = this.state.recoverInbox();
     if (recovery.interrupted) {
@@ -225,8 +235,13 @@ export class TgfxApp {
     await Promise.race([this.pollTask, this.stopped]);
   }
 
-  private get rendererConfig(): TgfxConfig["renderer"] {
-    return { ...this.config.renderer, ...this.options.renderer };
+  private get rendererConfig(): RendererConfig {
+    return {
+      mode: this.config.streaming ? "streaming" : "final",
+      expandStreamingTools: this.config.expandStreamingTools,
+      updateEveryMs: this.config.updateEveryMs,
+      ...this.options.renderer,
+    };
   }
 
   private draftLimiter(chatId: string): PeerDraftLimiter {
@@ -809,7 +824,7 @@ export class TgfxApp {
     this.config.access.chatIds = replaceId(this.config.access.chatIds);
     if (this.config.approvals.chatId === oldChatId) this.config.approvals.chatId = newChatId;
     try {
-      await saveConfig(this.options.paths, this.config);
+      await saveConfig(this.options.paths, this.config, { preserveInheritedSettings: true });
     } catch (error) {
       this.log({
         event: "config.invalid",
@@ -1347,6 +1362,7 @@ export class TgfxApp {
           TGFX_MCP_BOT_ID: this.options.bot.id,
           TGFX_MCP_ROUTE_KEY: route.key,
           TGFX_MCP_WORKSPACE: this.options.paths.workspace,
+          TGFX_MCP_HOME: tgfxHome(),
           TGFX_MCP_DATABASE: this.options.paths.database,
           TGFX_MCP_FILES: this.options.paths.files,
           TGFX_MCP_APPROVALS_CHAT: this.config.approvals.chatId,

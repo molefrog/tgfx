@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { loadConfig, saveConfig, workspacePaths, type WorkspacePaths } from "../src/config";
+import { loadConfig, projectPaths, saveConfig, type ProjectPaths } from "../src/config";
 import { FakeTelegram } from "./fixtures/fake-telegram";
 
 const temporary: string[] = [];
@@ -20,8 +20,7 @@ async function tgfx(args: string[], options: { cwd: string; env?: Record<string,
     env: {
       ...process.env,
       NO_COLOR: "1",
-      TGFX_STATE_DIR: join(isolated, "state"),
-      TGFX_CONFIG_DIR: join(isolated, "config"),
+      TGFX_HOME: join(isolated, "home"),
       TELEGRAM_BOT_TOKEN: "",
       ...options.env,
     },
@@ -37,16 +36,17 @@ async function tgfx(args: string[], options: { cwd: string; env?: Record<string,
   return { exitCode, stdout, stderr };
 }
 
-async function workspace(): Promise<WorkspacePaths> {
+async function workspace(): Promise<ProjectPaths> {
   const root = await mkdtemp(join(tmpdir(), "tgfx-cli-ws-"));
   temporary.push(root);
-  const paths = workspacePaths(root);
+  process.env.TGFX_HOME = join(root, "tgfx-home");
+  const paths = projectPaths(root);
   await saveConfig(paths, {
     version: 1,
     activeBotId: "100",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 800 },
+    streaming: true, expandStreamingTools: true, updateEveryMs: 800, customIcons: true,
   });
   return paths;
 }

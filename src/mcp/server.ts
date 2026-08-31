@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
 import * as z from "zod/v4";
@@ -16,6 +16,7 @@ type McpEnvironment = {
   botId: string;
   routeKey: string;
   workspace: string;
+  home: string;
   database: string;
   files: string;
   approvalsChat: string;
@@ -54,6 +55,7 @@ function environment(): McpEnvironment {
     botId,
     routeKey,
     workspace: resolve(required("TGFX_MCP_WORKSPACE")),
+    home: resolve(required("TGFX_MCP_HOME")),
     database: resolve(required("TGFX_MCP_DATABASE")),
     files: resolve(required("TGFX_MCP_FILES")),
     approvalsChat: decimalId.parse(required("TGFX_MCP_APPROVALS_CHAT")),
@@ -98,6 +100,25 @@ async function stickerWebp(path: string): Promise<Uint8Array> {
 export async function runTelegramMcpServer(): Promise<void> {
   const env = environment();
   const workspaceRoot = await realpath(env.workspace);
+  await mkdir(env.files, { recursive: true, mode: 0o700 });
+  const filesRoot = await realpath(env.files);
+  const homeRoot = await realpath(env.home).catch(() => env.home);
+  const projectRuntimeRoot = resolve(workspaceRoot, ".fx", "telegram");
+  const inside = (path: string, root: string) => path === root || path.startsWith(`${root}${sep}`);
+  // Sendable files come from the workspace or from this bot's downloads
+  // directory under the tgfx home; everything else under the home (state
+  // databases, locks, configs) and the project override directory is private.
+  const sendablePath = async (raw: string): Promise<string> => {
+    const resolvedPath = await realpath(resolve(workspaceRoot, raw));
+    if (inside(resolvedPath, filesRoot)) return resolvedPath;
+    if (inside(resolvedPath, homeRoot) || inside(resolvedPath, projectRuntimeRoot)) {
+      throw new Error("Private tgfx runtime files cannot be sent.");
+    }
+    if (!inside(resolvedPath, workspaceRoot)) {
+      throw new Error("Only files inside the current workspace or its Telegram downloads may be sent.");
+    }
+    return resolvedPath;
+  };
   const state = new StateStore(env.database);
   const telegram = new TelegramApi(env.token, env.apiRoot, env.fileRoot);
   const stickerTemporaryDirectories = new Set<string>();
@@ -248,7 +269,7 @@ export async function runTelegramMcpServer(): Promise<void> {
 
   server.registerTool("download_attachment", {
     title: "Download Telegram attachment",
-    description: "Download an attachment_ref from the current Telegram turn into this workspace. Use this before claiming to inspect or modify a file.",
+    description: "Download an attachment_ref from the current Telegram turn into the bot's downloads directory. Use this before claiming to inspect or modify a file.",
     inputSchema: { attachment_ref: z.string(), filename: z.string().optional() },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   }, async (args) => result(await perform("telegram_download_attachment", args, async () => {
@@ -269,7 +290,7 @@ export async function runTelegramMcpServer(): Promise<void> {
 
   server.registerTool("send_file", {
     title: "Send workspace file",
-    description: "Upload a file located inside the current workspace to the current Telegram chat.",
+    description: "Upload a file from the current workspace or the bot's downloads directory to the current Telegram chat.",
     inputSchema: {
       path: z.string().describe("Absolute path or workspace-relative path"),
       caption: z.string().max(1024).optional(),
@@ -278,16 +299,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   }, async (args) => result(await perform("telegram_send_file", args, async () => {
     const current = context();
-    const candidate = resolve(workspaceRoot, args.path);
-    const resolvedPath = await realpath(candidate);
-    if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(`${workspaceRoot}${sep}`)) {
-      throw new Error("Only files inside the current workspace may be sent.");
-    }
-    const runtimeDirectory = resolve(workspaceRoot, ".tgfx");
-    const filesDirectory = resolve(runtimeDirectory, "files");
-    const insideRuntime = resolvedPath === runtimeDirectory || resolvedPath.startsWith(`${runtimeDirectory}${sep}`);
-    const insideFiles = resolvedPath === filesDirectory || resolvedPath.startsWith(`${filesDirectory}${sep}`);
-    if (insideRuntime && !insideFiles) throw new Error("Private .tgfx runtime files cannot be sent.");
+    const resolvedPath = await sendablePath(args.path);
     const info = await stat(resolvedPath);
     if (!info.isFile()) throw new Error("Only a regular workspace file may be sent.");
     if (info.size > 50 * 1024 * 1024) throw new Error("This file exceeds Telegram's 50 MB cloud upload limit.");
@@ -400,16 +412,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   }, async (args) => result(await perform("telegram_send_sticker_file", args, async () => {
     const current = context();
-    const candidate = resolve(workspaceRoot, args.path);
-    const resolvedPath = await realpath(candidate);
-    if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(`${workspaceRoot}${sep}`)) {
-      throw new Error("Only custom images or sticker files inside the current workspace may be sent.");
-    }
-    const runtimeDirectory = resolve(workspaceRoot, ".tgfx");
-    const filesDirectory = resolve(runtimeDirectory, "files");
-    const insideRuntime = resolvedPath === runtimeDirectory || resolvedPath.startsWith(`${runtimeDirectory}${sep}`);
-    const insideFiles = resolvedPath === filesDirectory || resolvedPath.startsWith(`${filesDirectory}${sep}`);
-    if (insideRuntime && !insideFiles) throw new Error("Private .tgfx runtime files cannot be sent.");
+    const resolvedPath = await sendablePath(args.path);
     const info = await stat(resolvedPath);
     if (!info.isFile()) throw new Error("Only a regular workspace file may be sent as a sticker.");
     if (info.size > 20 * 1024 * 1024) throw new Error("This sticker file exceeds Telegram's upload limit.");

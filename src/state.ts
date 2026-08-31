@@ -60,6 +60,11 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 
+CREATE TABLE IF NOT EXISTS runtime_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS telegram_poll_state (
   bot_id TEXT PRIMARY KEY,
   next_offset INTEGER NOT NULL DEFAULT 0,
@@ -228,41 +233,41 @@ export class StateStore {
     `).run({ bot: botId, next: nextOffset, now: now() });
   }
 
-  unfinished(): { inbox: number; outbox: number; effects: number; approvals: number; total: number } {
-    const count = (table: string, where: string): number => this.db.query<{ count: number }, []>(
-      `SELECT count(*) AS count FROM ${table} WHERE ${where}`,
-    ).get()!.count;
-    const result = {
-      inbox: count("telegram_inbox", "status IN ('received','dispatching','running','interrupted','failed')"),
-      outbox: count("telegram_outbox", "status IN ('pending','sending','failed')"),
-      effects: count("effect_ledger", "state IN ('running','unknown')"),
-      approvals: count(
-        "telegram_interactions",
-        "state='pending' AND (kind='fx_permission' OR kind LIKE 'telegram_admin:%')",
-      ),
-    };
-    return { ...result, total: result.inbox + result.outbox + result.effects + result.approvals };
-  }
-
-  abandonUnfinished(reason: string): void {
-    this.db.transaction(() => {
+  /**
+   * The journal follows the bot, not the folder, but fx sessions are bound to
+   * the folder they were launched in. Stamp the owning workspace; when it
+   * changes, start a new generation on every route and discard prompts that
+   * were queued for the previous folder. Telegram-side facts — poll cursor,
+   * update dedup, undelivered outbox, effect ledger — survive the move.
+   */
+  adoptWorkspace(workspace: string): { previous?: string; changed: boolean; discarded: number } {
+    return this.db.transaction(() => {
+      const previous = this.db.query<{ value: string }, []>(
+        "SELECT value FROM runtime_meta WHERE key='workspace'",
+      ).get()?.value;
+      this.db.query(`
+        INSERT INTO runtime_meta(key,value) VALUES ('workspace',$workspace)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      `).run({ workspace });
+      if (!previous || previous === workspace) {
+        return { ...(previous ? { previous } : {}), changed: false, discarded: 0 };
+      }
       const timestamp = now();
       this.db.query(`
-        UPDATE telegram_inbox SET status='discarded',payload_json=NULL,error=?,updated_at=?
+        UPDATE routes SET session_id=NULL, generation=generation+1,
+          dynamic_commands_json='[]', last_prompt_json=NULL, updated_at=?
+      `).run(timestamp);
+      const discarded = this.db.query(`
+        UPDATE telegram_inbox SET status='discarded', payload_json=NULL,
+          error='workspace changed', updated_at=?
         WHERE status IN ('received','dispatching','running','interrupted','failed')
-      `).run(reason, timestamp);
-      this.db.query(`
-        UPDATE telegram_outbox SET status='abandoned',payload_json='{}',error=?,updated_at=?
-        WHERE status IN ('pending','sending','failed')
-      `).run(reason, timestamp);
-      this.db.query("UPDATE telegram_interactions SET state='expired',updated_at=? WHERE state='pending'")
+      `).run(timestamp).changes;
+      this.db.query("UPDATE context_capabilities SET active=0, expires_at=?").run(timestamp);
+      this.db.query("UPDATE telegram_messages SET expires_at=?").run(timestamp);
+      this.db.query("UPDATE telegram_principals SET expires_at=?").run(timestamp);
+      this.db.query("UPDATE telegram_interactions SET state='expired', updated_at=? WHERE state='pending'")
         .run(timestamp);
-      this.db.query(`
-        UPDATE effect_ledger SET state='abandoned',error=?,updated_at=?
-        WHERE state IN ('running','unknown')
-      `).run(reason, timestamp);
-      // `beginEffect` treats every existing non-complete state as unknown, so an
-      // abandoned external effect can never become implicitly retryable.
+      return { previous, changed: true, discarded };
     })();
   }
 

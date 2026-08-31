@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { InputRichMessageWithoutUpload, Message, Update } from "grammy/types";
 import { TgfxApp } from "../src/app";
-import { workspacePaths } from "../src/config";
+import { workspacePaths, type WorkspacePaths } from "../src/config";
 import { StateStore } from "../src/state";
 import type { TelegramApi } from "../src/telegram/api";
 import type { TgfxConfig } from "../src/types";
@@ -13,6 +13,12 @@ const temporary: string[] = [];
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
+
+/** Bot state lives under TGFX_HOME now; point it inside the test workspace. */
+function testPaths(workspace: string, botId = "100"): WorkspacePaths {
+  process.env.TGFX_HOME = join(workspace, "tgfx-home");
+  return workspacePaths(botId, workspace);
+}
 
 async function fakeFx(directory: string, log?: string): Promise<string> {
   const binary = join(directory, "fx");
@@ -44,14 +50,14 @@ describe("tgfx host pipeline", () => {
   test("accepts only an allowed update and delivers its streamed FX result durably", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const fxBinary = await fakeFx(workspace);
     const config: TgfxConfig = {
       version: 1,
       activeBotId: "100",
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
@@ -118,13 +124,13 @@ describe("tgfx host pipeline", () => {
     const run = async (customIcons: boolean) => {
       const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-mcp-icons-"));
       temporary.push(workspace);
-      const paths = workspacePaths(workspace);
+      const paths = testPaths(workspace);
       const fxBinary = await fakeFx(workspace);
       const config: TgfxConfig = {
         version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
         approvals: { chatId: "42", topicId: "0" },
-        renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 10 },
-        modelPicker: { customIcons },
+        streaming: false, expandStreamingTools: true, updateEveryMs: 10,
+        customIcons,
       };
       let firstPoll = true;
       let packLookups = 0;
@@ -178,13 +184,13 @@ describe("tgfx host pipeline", () => {
   test("downloads sticker images before teaching the agent their name and file ID", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-sticker-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const logPath = join(workspace, "fx-events.jsonl");
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const stickerUpdate = update(1, 42, "") as any;
     delete stickerUpdate.message.text;
@@ -240,13 +246,13 @@ describe("tgfx host pipeline", () => {
   test("injects the session bootstrap directive on the first turn of a new session only", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-bootstrap-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const logPath = join(workspace, "fx-events.jsonl");
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     let poll = 0;
     let deliveries = 0;
@@ -291,12 +297,12 @@ describe("tgfx host pipeline", () => {
   test("cancels the matching turn when Telegram reports draft generation stopped", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-cancel-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const fxBinary = await fakeFx(workspace);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const texts: string[] = [];
     let phase = 0;
@@ -362,13 +368,13 @@ describe("tgfx host pipeline", () => {
   test("opens /model while a stopped turn is still winding down", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-cancel-model-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const fxBinary = await fakeFx(workspace);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
-      modelPicker: { customIcons: false },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      customIcons: false,
     };
     const sequence: string[] = [];
     let phase = 0;
@@ -432,13 +438,13 @@ describe("tgfx host pipeline", () => {
   test("exposes /clear, /compact, and /model and uses a Thinking draft while streaming", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-commands-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const logPath = join(workspace, "fx-events.jsonl");
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const texts: string[] = [];
     const menus: Array<Array<{ command: string }>> = [];
@@ -516,14 +522,14 @@ describe("tgfx host pipeline", () => {
   test("switches the route model through the live /model button flow with custom icons disabled", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-model-picker-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const logPath = join(workspace, "fx-events.jsonl");
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
-      modelPicker: { customIcons: false },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      customIcons: false,
     };
     let phase = 0;
     let packLookups = 0;
@@ -626,13 +632,13 @@ describe("tgfx host pipeline", () => {
   test("renders /cost and switches its reporting period with buttons", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-cost-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const logPath = join(workspace, "fx-events.jsonl");
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     let phase = 0;
     let sevenDayCallback = "";
@@ -710,12 +716,12 @@ describe("tgfx host pipeline", () => {
   test("edits one regular progress message for /compact when streaming is disabled", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-compact-final-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const fxBinary = await fakeFx(workspace);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: false, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const sent: InputRichMessageWithoutUpload[] = [];
     const edits: Array<{ messageId: number; rich: InputRichMessageWithoutUpload }> = [];
@@ -773,13 +779,13 @@ describe("tgfx host pipeline", () => {
   test("resolves an FX permission callback immediately when the control chat is the active route", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-permission-"));
     temporary.push(workspace);
-    const paths = workspacePaths(workspace);
+    const paths = testPaths(workspace);
     const logPath = join(workspace, "fx-events.jsonl");
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     let phase = 0;
     let approvalData!: string;
