@@ -824,7 +824,7 @@ export class TgfxApp {
     this.config.access.chatIds = replaceId(this.config.access.chatIds);
     if (this.config.approvals.chatId === oldChatId) this.config.approvals.chatId = newChatId;
     try {
-      await saveConfig(this.options.paths, this.config);
+      await saveConfig(this.options.paths, this.config, { preserveInheritedSettings: true });
     } catch (error) {
       this.log({
         event: "config.invalid",

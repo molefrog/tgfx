@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
@@ -255,7 +255,7 @@ describe("Telegram MCP actions", () => {
     try {
       const download = await context.call("download_attachment", { attachment_ref: "att_current" });
       const downloadedPath = download.structuredContent.path as string;
-      expect(downloadedPath.startsWith(context.files)).toBeTrue();
+      expect(downloadedPath.startsWith(await realpath(context.files))).toBeTrue();
       const fromDownloads = await context.call("send_file", { path: downloadedPath });
       expect(fromDownloads.structuredContent).toMatchObject({ sent: true });
       const refused = await context.call("send_file", { path: join(context.home, "state", "100.db") });

@@ -1,5 +1,3 @@
-import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -7,28 +5,8 @@ import { z } from "zod";
 import type { TgfxConfig } from "./types";
 
 const decimalId = z.string().regex(/^-?\d+$/, "must be a decimal Telegram ID");
-const draftInterval = z.number().int().min(200).max(10_000).default(250)
-  // 800ms was the fixed-loop default before draft commits became adaptive.
-  .transform((value) => value === 800 ? 250 : value);
-
-/** Older configs nested these under renderer/modelPicker; lift them, flat keys win. */
-function flattenLegacy(raw: unknown): unknown {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
-  const { renderer, modelPicker, ...value } = raw as Record<string, unknown>;
-  if (renderer && typeof renderer === "object") {
-    const legacy = renderer as Record<string, unknown>;
-    if (legacy.mode !== undefined) value.streaming ??= legacy.mode !== "final";
-    if (legacy.expandStreamingTools !== undefined) value.expandStreamingTools ??= legacy.expandStreamingTools;
-    if (legacy.updateEveryMs !== undefined) value.updateEveryMs ??= legacy.updateEveryMs;
-  }
-  if (modelPicker && typeof modelPicker === "object") {
-    const legacy = modelPicker as Record<string, unknown>;
-    if (legacy.customIcons !== undefined) value.customIcons ??= legacy.customIcons;
-  }
-  return value;
-}
-
-export const configSchema = z.preprocess(flattenLegacy, z.object({
+const draftInterval = z.number().int().min(200).max(10_000);
+const coreConfigSchema = z.object({
   version: z.literal(1),
   activeBotId: decimalId,
   access: z.object({
@@ -38,16 +16,25 @@ export const configSchema = z.preprocess(flattenLegacy, z.object({
     message: "at least one allowed user or chat is required",
   }),
   approvals: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
+});
+const storedConfigSchema = coreConfigSchema.extend({
+  streaming: z.boolean().optional(),
+  expandStreamingTools: z.boolean().optional(),
+  updateEveryMs: draftInterval.optional(),
+  customIcons: z.boolean().optional(),
+});
+
+export const configSchema = coreConfigSchema.extend({
   streaming: z.boolean().default(true),
   expandStreamingTools: z.boolean().default(true),
-  updateEveryMs: draftInterval,
+  updateEveryMs: draftInterval.default(250),
   customIcons: z.boolean().default(true),
-})) satisfies z.ZodType<TgfxConfig>;
+}) satisfies z.ZodType<TgfxConfig>;
 
 /**
  * Everything shared across projects lives under one fx-convention directory:
  *
- *   ~/.fx/telegram/config.json       defaults + bot registry
+ *   ~/.fx/telegram/config.json       machine-wide defaults
  *   ~/.fx/telegram/state/<bot>.db    per-bot journal (one writer, held by the lock)
  *   ~/.fx/telegram/state/<bot>.lock  SQLite exclusive-mode process lock
  *   ~/.fx/telegram/files/<bot>/      attachment downloads
@@ -103,11 +90,9 @@ const globalSchema = z.object({
     updateEveryMs: z.number().int().min(200).max(10_000).optional(),
     customIcons: z.boolean().optional(),
   }).default({}),
-  bots: z.array(z.object({ botId: decimalId, workspace: z.string() })).default([]),
 });
 
 export type GlobalConfig = z.infer<typeof globalSchema>;
-export type BotRecord = GlobalConfig["bots"][number];
 
 async function writePrivateJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -115,13 +100,6 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, path);
-}
-
-function legacyBotIndexPath(): string {
-  const base = process.env.TGFX_CONFIG_DIR
-    ? resolve(process.env.TGFX_CONFIG_DIR)
-    : join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "tgfx");
-  return join(base, "bots.json");
 }
 
 export async function loadGlobalConfig(): Promise<GlobalConfig> {
@@ -136,13 +114,6 @@ export async function loadGlobalConfig(): Promise<GlobalConfig> {
       throw error;
     }
   }
-  // First run on this layout: fold the legacy bots.json index into the registry.
-  try {
-    const parsed = JSON.parse(await readFile(legacyBotIndexPath(), "utf8"));
-    if (Array.isArray(parsed)) return globalSchema.parse({ bots: parsed });
-  } catch {
-    // The legacy index is best-effort input; a missing or malformed file starts fresh.
-  }
   return globalSchema.parse({});
 }
 
@@ -150,13 +121,7 @@ export async function saveGlobalConfig(config: GlobalConfig): Promise<void> {
   await writePrivateJson(join(tgfxHome(), "config.json"), globalSchema.parse(config));
 }
 
-export async function registerBot(record: BotRecord): Promise<void> {
-  const config = await loadGlobalConfig();
-  config.bots = [...config.bots.filter((entry) => entry.botId !== record.botId), record];
-  await saveGlobalConfig(config);
-}
-
-export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | undefined> {
+async function loadStoredConfig(paths: ProjectPaths): Promise<z.infer<typeof storedConfigSchema> | undefined> {
   let raw: string;
   try {
     raw = await readFile(paths.config, "utf8");
@@ -165,12 +130,7 @@ export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | unde
     throw error;
   }
   try {
-    const parsed = JSON.parse(raw);
-    const { defaults } = await loadGlobalConfig();
-    const merged = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? { ...defaults, ...(flattenLegacy(parsed) as Record<string, unknown>) }
-      : parsed;
-    return configSchema.parse(merged);
+    return storedConfigSchema.parse(JSON.parse(raw));
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new Error(`Invalid ${paths.config}: ${z.prettifyError(error)}`, { cause: error });
@@ -179,8 +139,33 @@ export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | unde
   }
 }
 
-export async function saveConfig(paths: ProjectPaths, config: TgfxConfig): Promise<void> {
-  await writePrivateJson(paths.config, configSchema.parse(config));
+export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | undefined> {
+  const stored = await loadStoredConfig(paths);
+  if (!stored) return undefined;
+  const { defaults } = await loadGlobalConfig();
+  return configSchema.parse({ ...defaults, ...stored });
+}
+
+const SETTING_KEYS = ["streaming", "expandStreamingTools", "updateEveryMs", "customIcons"] as const;
+
+export async function saveConfig(
+  paths: ProjectPaths,
+  config: TgfxConfig,
+  options: { preserveInheritedSettings?: boolean } = {},
+): Promise<void> {
+  const validated = configSchema.parse(config);
+  if (!options.preserveInheritedSettings) {
+    await writePrivateJson(paths.config, validated);
+    return;
+  }
+  const current = await loadStoredConfig(paths);
+  const { streaming, expandStreamingTools, updateEveryMs, customIcons, ...core } = validated;
+  const settings = { streaming, expandStreamingTools, updateEveryMs, customIcons };
+  const persisted: Record<string, unknown> = { ...core };
+  for (const key of SETTING_KEYS) {
+    if (current && Object.hasOwn(current, key)) persisted[key] = settings[key];
+  }
+  await writePrivateJson(paths.config, storedConfigSchema.parse(persisted));
 }
 
 export async function pruneBotFiles(files: string, maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<void> {
@@ -198,36 +183,4 @@ export async function pruneBotFiles(files: string, maxAgeMs = 7 * 24 * 60 * 60 *
     // `lstat` deliberately avoids following a malicious symlink outside the files directory.
     await rm(path, { recursive: info.isDirectory(), force: true });
   }
-}
-
-/**
- * One-shot move from the pre-0.2 layout (workspace-local `.tgfx/`) into the
- * shared `~/.fx/telegram` layout. Config and journal move; downloaded files are
- * transient (seven-day retention) and are dropped with the old directory.
- */
-export async function migrateLegacyWorkspace(paths: ProjectPaths): Promise<string | undefined> {
-  const legacyDirectory = join(paths.workspace, ".tgfx");
-  const legacyConfig = join(legacyDirectory, "config.json");
-  if (existsSync(paths.config) || !existsSync(legacyConfig)) return undefined;
-  const config = configSchema.parse(JSON.parse(await readFile(legacyConfig, "utf8")));
-  const bot = botPaths(config.activeBotId);
-  const legacyDatabase = join(legacyDirectory, "state.sqlite");
-  if (!existsSync(bot.database) && existsSync(legacyDatabase)) {
-    await mkdir(dirname(bot.database), { recursive: true, mode: 0o700 });
-    await chmod(dirname(bot.database), 0o700);
-    // VACUUM INTO folds the WAL in and leaves a single clean file at the new path.
-    const source = new Database(legacyDatabase, { readonly: true });
-    try {
-      source.exec(`VACUUM INTO '${bot.database.replaceAll("'", "''")}'`);
-    } finally {
-      source.close();
-    }
-    await chmod(bot.database, 0o600);
-  }
-  await mkdir(paths.directory, { recursive: true, mode: 0o700 });
-  await chmod(paths.directory, 0o700);
-  await rename(legacyConfig, paths.config);
-  await rm(legacyDirectory, { recursive: true, force: true });
-  await registerBot({ botId: config.activeBotId, workspace: paths.workspace });
-  return `moved bot ${config.activeBotId} state from .tgfx to ${tgfxHome()}`;
 }

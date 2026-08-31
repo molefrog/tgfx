@@ -437,8 +437,8 @@ for secrets and automation, not for a second large configuration system.
 ```
 
 Settings are flat keys; `access` and `approvals` stay structured because they
-are. Configs from before the flattening (nested `renderer`/`modelPicker`
-objects) still parse and are lifted into the flat keys.
+are. Omitted settings inherit the machine-wide defaults, and commands that
+change access or approvals keep those settings omitted.
 
 The token does not belong in this file. Allowlist and approvals-target IDs do:
 they are explicit workspace configuration, not model context or transient
@@ -1028,7 +1028,7 @@ tgfx uses a few small storage locations:
 | Location | Contents | Lifetime |
 | --- | --- | --- |
 | OS credential store through `Bun.secrets` | Telegram bot token, keyed by actual bot ID | Until the user removes or rotates it. Bun uses macOS Keychain, Linux Secret Service/libsecret, or Windows Credential Manager. |
-| `~/.fx/telegram/config.json` | Machine-wide renderer/model-picker defaults and the non-secret registry of bot ID → last workspace | Until removed. |
+| `~/.fx/telegram/config.json` | Machine-wide renderer/model-picker defaults | Until removed. |
 | `~/.fx/telegram/state/<bot_id>.db` | The bot's journal: poll cursor, routes, FX session references, owning workspace, and temporary inbox/outbox/effect/approval recovery rows | Operational; completed payloads expire. |
 | `~/.fx/telegram/state/<bot_id>.lock` | Machine-wide process lock, held in SQLite exclusive locking mode | Held while that bot is active; released by the kernel on process death. |
 | `~/.fx/telegram/state/<bot_id>.info.json` | Diagnostic workspace/PID metadata for the lock holder | While that bot is active. |
@@ -1058,9 +1058,8 @@ capabilities, and message payloads by default.
 
 The credential key is stable and inspectable in code: `service = "dev.tgfx"`
 and `name = "telegram:<bot_id>"`. Token rotation for the same bot overwrites that
-one secret. The registry in the global config maps that validated ID to its
-last workspace for diagnostics; the journal's own workspace stamp is what
-triggers the generation reset when the bot starts in a different folder.
+one secret. The journal's workspace stamp triggers the generation reset when
+the bot starts in a different folder.
 
 ### What SQLite is for
 
