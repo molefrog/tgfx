@@ -354,7 +354,7 @@ The Telegram command surface is explicit rather than a generic ACP projection.
    every following route message.
 4. `/compact` invokes the corresponding FX session command. `/model` uses ACP's
    live model configuration. Its provider and model buttons use the public
-   `tgfx icons` custom emoji set when `modelPicker.customIcons` is true, then retry without
+   `tgfx icons` custom emoji set when `customIcons` is true, then retry without
    icons if Telegram rejects them. `/cost` invokes `fx usage --json` on the host and
    renders the result as Telegram rich text, including a structured model table.
 5. `/cost` defaults to 24 hours. Its only buttons select 24 hours, 7 days, or
@@ -429,16 +429,16 @@ for secrets and automation, not for a second large configuration system.
     "chatId": "6143594",
     "topicId": "0"
   },
-  "renderer": {
-    "mode": "streaming",
-    "expandStreamingTools": true,
-    "updateEveryMs": 250
-  },
-  "modelPicker": {
-    "customIcons": true
-  }
+  "streaming": true,
+  "expandStreamingTools": true,
+  "updateEveryMs": 250,
+  "customIcons": true
 }
 ```
+
+Settings are flat keys; `access` and `approvals` stay structured because they
+are. Configs from before the flattening (nested `renderer`/`modelPicker`
+objects) still parse and are lifted into the flat keys.
 
 The token does not belong in this file. Allowlist and approvals-target IDs do:
 they are explicit workspace configuration, not model context or transient
@@ -964,7 +964,7 @@ The primary renderer maps the ACP timeline to Telegram Rich Messages:
 - only terminal tool calls are rendered, in their first-observed ACP order;
 - consecutive tools form a details block. Every draft group keeps the
   `Working...` label and stays open until finalization when
-  `renderer.expandStreamingTools` is true (the default). The final message uses
+  `expandStreamingTools` is true (the default). The final message uses
   formatted activity labels and collapses every group;
 - the final call uses `sendRichMessage`;
 - private streaming uses `sendRichMessageDraft` with one stable `draft_id`.

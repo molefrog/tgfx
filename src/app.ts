@@ -44,6 +44,7 @@ import type {
   AdminCapability,
   BotIdentity,
   InboundMessage,
+  RendererConfig,
   Route,
   SenderIdentity,
   TgfxConfig,
@@ -172,12 +173,12 @@ export class TgfxApp {
     model?: string;
     permissionMode?: FxPermissionMode;
     mcpLaunch?: { command: string; args: string[] };
-    renderer?: Partial<TgfxConfig["renderer"]>;
+    renderer?: Partial<RendererConfig>;
     customIcons?: boolean;
     log?: (event: TgfxLogEvent) => void;
   }) {
     this.config = options.config;
-    this.customIconsEnabled = options.customIcons ?? options.config.modelPicker?.customIcons ?? true;
+    this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
   }
@@ -234,8 +235,13 @@ export class TgfxApp {
     await Promise.race([this.pollTask, this.stopped]);
   }
 
-  private get rendererConfig(): TgfxConfig["renderer"] {
-    return { ...this.config.renderer, ...this.options.renderer };
+  private get rendererConfig(): RendererConfig {
+    return {
+      mode: this.config.streaming ? "streaming" : "final",
+      expandStreamingTools: this.config.expandStreamingTools,
+      updateEveryMs: this.config.updateEveryMs,
+      ...this.options.renderer,
+    };
   }
 
   private draftLimiter(chatId: string): PeerDraftLimiter {

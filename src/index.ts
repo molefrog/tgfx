@@ -227,8 +227,10 @@ async function createConfig(paths: ProjectPaths, bot: BotIdentity, telegram: Tel
       chatIds: principalKind === "chat" ? [identifier] : [],
     },
     approvals: { chatId: approvalsChatId, topicId: "0" },
-    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 250 },
-    modelPicker: { customIcons: true },
+    streaming: true,
+    expandStreamingTools: true,
+    updateEveryMs: 250,
+    customIcons: true,
   };
   await telegram.sendText(
     config.approvals.chatId,
@@ -483,7 +485,12 @@ async function accessCommand(tokens: string[]): Promise<void> {
         workspace: paths.workspace,
         access: principals,
         approvals: config.approvals,
-        renderer: config.renderer,
+        settings: {
+          streaming: config.streaming,
+          expandStreamingTools: config.expandStreamingTools,
+          updateEveryMs: config.updateEveryMs,
+          customIcons: config.customIcons,
+        },
         sessions: routes.map((route) => ({
           chat: route.chat_id,
           topic: route.topic_id,

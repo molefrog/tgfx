@@ -37,8 +37,10 @@ function config(): TgfxConfig {
     activeBotId: "123456",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 250 },
-    modelPicker: { customIcons: true },
+    streaming: true,
+    expandStreamingTools: true,
+    updateEveryMs: 250,
+    customIcons: true,
   };
 }
 
@@ -58,52 +60,57 @@ describe("workspace config", () => {
   });
 
   test("migrates the old fixed-loop interval to the optimistic adaptive default", () => {
-    expect(configSchema.parse({
-      ...config(),
-      renderer: { ...config().renderer, updateEveryMs: 800 },
-    }).renderer.updateEveryMs).toBe(250);
-    expect(configSchema.parse({
-      ...config(),
-      renderer: { ...config().renderer, updateEveryMs: 1_000 },
-    }).renderer.updateEveryMs).toBe(1_000);
+    expect(configSchema.parse({ ...config(), updateEveryMs: 800 }).updateEveryMs).toBe(250);
+    expect(configSchema.parse({ ...config(), updateEveryMs: 1_000 }).updateEveryMs).toBe(1_000);
   });
 
-  test("keeps streaming tool groups expanded by default", () => {
-    const renderer = configSchema.parse({
-      ...config(),
-      renderer: { mode: "streaming", updateEveryMs: 250 },
-    }).renderer;
-    expect(renderer.expandStreamingTools).toBeTrue();
+  test("defaults omitted settings: streaming on, tools expanded, icons on", () => {
+    const {
+      streaming: _streaming, expandStreamingTools: _expand, customIcons: _icons, ...bare
+    } = config();
+    const parsed = configSchema.parse(bare);
+    expect(parsed.streaming).toBeTrue();
+    expect(parsed.expandStreamingTools).toBeTrue();
+    expect(parsed.customIcons).toBeTrue();
+    expect(configSchema.parse({ ...config(), customIcons: false }).customIcons).toBeFalse();
   });
 
-  test("enables model picker icons by default and allows disabling them", () => {
-    const { modelPicker: _modelPicker, ...legacy } = config();
-    expect(configSchema.parse(legacy).modelPicker.customIcons).toBeTrue();
+  test("lifts a legacy nested renderer/modelPicker config into flat settings", () => {
+    const { streaming, expandStreamingTools, updateEveryMs, customIcons, ...base } = config();
     expect(configSchema.parse({
-      ...config(),
+      ...base,
+      renderer: { mode: "final", expandStreamingTools: false, updateEveryMs: 500 },
       modelPicker: { customIcons: false },
-    }).modelPicker.customIcons).toBeFalse();
+    })).toEqual({
+      ...base,
+      streaming: false,
+      expandStreamingTools: false,
+      updateEveryMs: 500,
+      customIcons: false,
+    });
   });
 
-  test("fills missing project sections from global defaults, but the project wins", async () => {
+  test("fills missing project settings from global defaults, but the project wins", async () => {
     const root = isolate("tgfx-defaults-");
     await saveGlobalConfig({
       version: 1,
-      defaults: {
-        renderer: { mode: "final", expandStreamingTools: false, updateEveryMs: 500 },
-        modelPicker: { customIcons: false },
-      },
+      defaults: { streaming: false, customIcons: false, updateEveryMs: 500 },
       bots: [],
     });
     const paths = projectPaths(root);
-    const { renderer: _renderer, modelPicker: _modelPicker, ...bare } = config();
+    const {
+      streaming: _streaming, expandStreamingTools: _expand,
+      updateEveryMs: _interval, customIcons: _icons, ...bare
+    } = config();
     mkdirSync(paths.directory, { recursive: true });
     writeFileSync(paths.config, JSON.stringify(bare));
     const inherited = await loadConfig(paths);
-    expect(inherited?.renderer.mode).toBe("final");
-    expect(inherited?.modelPicker?.customIcons).toBeFalse();
-    writeFileSync(paths.config, JSON.stringify({ ...bare, renderer: { mode: "streaming" } }));
-    expect((await loadConfig(paths))?.renderer.mode).toBe("streaming");
+    expect(inherited?.streaming).toBeFalse();
+    expect(inherited?.customIcons).toBeFalse();
+    expect(inherited?.updateEveryMs).toBe(500);
+    expect(inherited?.expandStreamingTools).toBeTrue();
+    writeFileSync(paths.config, JSON.stringify({ ...bare, streaming: true }));
+    expect((await loadConfig(paths))?.streaming).toBeTrue();
   });
 
   test("prunes only expired entries inside the bot files directory", async () => {
@@ -126,7 +133,12 @@ describe("workspace config", () => {
     const root = isolate("tgfx-migrate-");
     const legacy = join(root, ".tgfx");
     mkdirSync(legacy, { recursive: true });
-    writeFileSync(join(legacy, "config.json"), JSON.stringify(config()));
+    const { streaming, expandStreamingTools, updateEveryMs, customIcons, ...base } = config();
+    writeFileSync(join(legacy, "config.json"), JSON.stringify({
+      ...base,
+      renderer: { mode: "streaming", expandStreamingTools, updateEveryMs },
+      modelPicker: { customIcons },
+    }));
     const legacyState = new StateStore(join(legacy, "state.sqlite"));
     legacyState.ensurePollState("123456");
     legacyState.advanceCursor("123456", 9);

@@ -29,10 +29,10 @@ export type TgfxConfig = {
     chatId: DecimalId;
     topicId: DecimalId;
   };
-  renderer: RendererConfig;
-  modelPicker?: {
-    customIcons: boolean;
-  };
+  streaming: boolean;
+  expandStreamingTools: boolean;
+  updateEveryMs: number;
+  customIcons: boolean;
 };
 
 export type Route = {

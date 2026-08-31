@@ -62,7 +62,7 @@ provider logos from the same pack. When Telegram doesn't let the bot use
 custom emoji, everything falls back to plain rows.
 
 To turn it off for a run, start with `tgfx --no-icons`. To turn it off for
-good, set `modelPicker.customIcons` to `false` in `.fx/telegram/config.json`
+good, set `customIcons` to `false` in `.fx/telegram/config.json`
 (or once for every project in `~/.fx/telegram/config.json` under `defaults`).
 
 ## Commands

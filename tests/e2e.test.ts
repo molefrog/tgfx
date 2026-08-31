@@ -29,7 +29,7 @@ async function fakeFx(directory: string): Promise<string> {
 const BOT: BotIdentity = { id: "100", username: "fake_bot", displayName: "Fake Bot" };
 
 async function makeWorkspace(
-  config: Omit<TgfxConfig, "version" | "activeBotId" | "renderer"> & { renderer?: TgfxConfig["renderer"] },
+  config: Partial<TgfxConfig> & Pick<TgfxConfig, "access" | "approvals">,
 ): Promise<{
   paths: WorkspacePaths; fxBinary: string;
 }> {
@@ -40,7 +40,7 @@ async function makeWorkspace(
   await saveConfig(paths, {
     version: 1,
     activeBotId: BOT.id,
-    renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 500 },
+    streaming: true, expandStreamingTools: true, updateEveryMs: 500, customIcons: true,
     ...config,
   });
   return { paths, fxBinary: await fakeFx(workspace) };
@@ -99,7 +99,7 @@ describe("tgfx over the local Telegram simulator", () => {
     const { paths, fxBinary } = await makeWorkspace({
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 500 },
+      streaming: false,
     });
     const { app, running } = await startApp(paths, fxBinary, telegram);
     try {

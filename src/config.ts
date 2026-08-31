@@ -10,16 +10,25 @@ const decimalId = z.string().regex(/^-?\d+$/, "must be a decimal Telegram ID");
 const draftInterval = z.number().int().min(200).max(10_000).default(250)
   // 800ms was the fixed-loop default before draft commits became adaptive.
   .transform((value) => value === 800 ? 250 : value);
-const rendererSchema = z.object({
-  mode: z.enum(["streaming", "final"]).default("streaming"),
-  expandStreamingTools: z.boolean().default(true),
-  updateEveryMs: draftInterval,
-});
-const modelPickerSchema = z.object({
-  customIcons: z.boolean().default(true),
-});
 
-export const configSchema = z.object({
+/** Older configs nested these under renderer/modelPicker; lift them, flat keys win. */
+function flattenLegacy(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const { renderer, modelPicker, ...value } = raw as Record<string, unknown>;
+  if (renderer && typeof renderer === "object") {
+    const legacy = renderer as Record<string, unknown>;
+    if (legacy.mode !== undefined) value.streaming ??= legacy.mode !== "final";
+    if (legacy.expandStreamingTools !== undefined) value.expandStreamingTools ??= legacy.expandStreamingTools;
+    if (legacy.updateEveryMs !== undefined) value.updateEveryMs ??= legacy.updateEveryMs;
+  }
+  if (modelPicker && typeof modelPicker === "object") {
+    const legacy = modelPicker as Record<string, unknown>;
+    if (legacy.customIcons !== undefined) value.customIcons ??= legacy.customIcons;
+  }
+  return value;
+}
+
+export const configSchema = z.preprocess(flattenLegacy, z.object({
   version: z.literal(1),
   activeBotId: decimalId,
   access: z.object({
@@ -29,13 +38,11 @@ export const configSchema = z.object({
     message: "at least one allowed user or chat is required",
   }),
   approvals: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
-  renderer: rendererSchema.default({
-    mode: "streaming",
-    expandStreamingTools: true,
-    updateEveryMs: 250,
-  }),
-  modelPicker: modelPickerSchema.default({ customIcons: true }),
-}) satisfies z.ZodType<TgfxConfig>;
+  streaming: z.boolean().default(true),
+  expandStreamingTools: z.boolean().default(true),
+  updateEveryMs: draftInterval,
+  customIcons: z.boolean().default(true),
+})) satisfies z.ZodType<TgfxConfig>;
 
 /**
  * Everything shared across projects lives under one fx-convention directory:
@@ -91,8 +98,10 @@ export function workspacePaths(botId: string, workspace = process.cwd()): Worksp
 const globalSchema = z.object({
   version: z.literal(1).default(1),
   defaults: z.object({
-    renderer: rendererSchema.optional(),
-    modelPicker: modelPickerSchema.optional(),
+    streaming: z.boolean().optional(),
+    expandStreamingTools: z.boolean().optional(),
+    updateEveryMs: z.number().int().min(200).max(10_000).optional(),
+    customIcons: z.boolean().optional(),
   }).default({}),
   bots: z.array(z.object({ botId: decimalId, workspace: z.string() })).default([]),
 });
@@ -156,13 +165,12 @@ export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | unde
     throw error;
   }
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const parsed = JSON.parse(raw);
     const { defaults } = await loadGlobalConfig();
-    if (parsed && typeof parsed === "object") {
-      if (parsed.renderer === undefined && defaults.renderer) parsed.renderer = defaults.renderer;
-      if (parsed.modelPicker === undefined && defaults.modelPicker) parsed.modelPicker = defaults.modelPicker;
-    }
-    return configSchema.parse(parsed);
+    const merged = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { ...defaults, ...(flattenLegacy(parsed) as Record<string, unknown>) }
+      : parsed;
+    return configSchema.parse(merged);
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new Error(`Invalid ${paths.config}: ${z.prettifyError(error)}`, { cause: error });

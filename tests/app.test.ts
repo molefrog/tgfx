@@ -57,7 +57,7 @@ describe("tgfx host pipeline", () => {
       activeBotId: "100",
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
@@ -129,8 +129,8 @@ describe("tgfx host pipeline", () => {
       const config: TgfxConfig = {
         version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
         approvals: { chatId: "42", topicId: "0" },
-        renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 10 },
-        modelPicker: { customIcons },
+        streaming: false, expandStreamingTools: true, updateEveryMs: 10,
+        customIcons,
       };
       let firstPoll = true;
       let packLookups = 0;
@@ -190,7 +190,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const stickerUpdate = update(1, 42, "") as any;
     delete stickerUpdate.message.text;
@@ -252,7 +252,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     let poll = 0;
     let deliveries = 0;
@@ -302,7 +302,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const texts: string[] = [];
     let phase = 0;
@@ -373,8 +373,8 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
-      modelPicker: { customIcons: false },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      customIcons: false,
     };
     const sequence: string[] = [];
     let phase = 0;
@@ -444,7 +444,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const texts: string[] = [];
     const menus: Array<Array<{ command: string }>> = [];
@@ -528,8 +528,8 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
-      modelPicker: { customIcons: false },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      customIcons: false,
     };
     let phase = 0;
     let packLookups = 0;
@@ -638,7 +638,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     let phase = 0;
     let sevenDayCallback = "";
@@ -721,7 +721,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: false, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     const sent: InputRichMessageWithoutUpload[] = [];
     const edits: Array<{ messageId: number; rich: InputRichMessageWithoutUpload }> = [];
@@ -785,7 +785,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "streaming", expandStreamingTools: true, updateEveryMs: 10 },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
     };
     let phase = 0;
     let approvalData!: string;
