@@ -54,6 +54,15 @@ export type MessageReference = {
   owned_by_bot: number;
 };
 
+export type RecentMessage = {
+  ref: string;
+  sender_ref: string | null;
+  sender_display_name: string | null;
+  owned_by_bot: number;
+  created_at: string;
+  excerpt: string | null;
+};
+
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -104,6 +113,7 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
   message_id TEXT NOT NULL,
   sender_ref TEXT,
   owned_by_bot INTEGER NOT NULL DEFAULT 0,
+  excerpt TEXT,
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   UNIQUE(bot_id, chat_id, message_id)
@@ -197,6 +207,17 @@ CREATE INDEX IF NOT EXISTS context_route_active
 
 function now(): string { return new Date().toISOString(); }
 
+/** Message text is retained only as this bounded excerpt, never in full. */
+export const MESSAGE_EXCERPT_LIMIT = 200;
+
+export function messageExcerpt(text: string | undefined | null): string | null {
+  const trimmed = text?.trim();
+  if (!trimmed) return null;
+  const points = [...trimmed];
+  if (points.length <= MESSAGE_EXCERPT_LIMIT) return trimmed;
+  return `${points.slice(0, MESSAGE_EXCERPT_LIMIT).join("")}…`;
+}
+
 export class StateStore {
   readonly db: Database;
 
@@ -206,6 +227,12 @@ export class StateStore {
     this.db = new Database(path, { create: true, strict: true });
     chmodSync(path, 0o600);
     this.db.exec(SCHEMA);
+    const messageColumns = this.db.query<{ name: string }, []>(
+      "SELECT name FROM pragma_table_info('telegram_messages')",
+    ).all();
+    if (!messageColumns.some((column) => column.name === "excerpt")) {
+      this.db.exec("ALTER TABLE telegram_messages ADD COLUMN excerpt TEXT");
+    }
   }
 
   close(): void { this.db.close(); }
@@ -544,15 +571,17 @@ export class StateStore {
       this.db.query(`
         INSERT INTO telegram_messages(
           ref, bot_id, route_key, chat_id, topic_id, message_id, sender_ref,
-          owned_by_bot, created_at, expires_at
-        ) VALUES ($ref, $bot, $route, $chat, $topic, $message, $sender, 0, $now, $expires)
+          owned_by_bot, excerpt, created_at, expires_at
+        ) VALUES ($ref, $bot, $route, $chat, $topic, $message, $sender, 0, $excerpt, $now, $expires)
         ON CONFLICT(bot_id, chat_id, message_id) DO UPDATE SET
-          ref=excluded.ref, sender_ref=excluded.sender_ref, expires_at=excluded.expires_at
+          ref=excluded.ref, sender_ref=excluded.sender_ref,
+          excerpt=COALESCE(excluded.excerpt, telegram_messages.excerpt),
+          expires_at=excluded.expires_at
       `).run({
         ref: message.messageRef, bot: message.route.botId, route: message.route.key,
         chat: message.route.chatId, topic: message.route.topicId,
         message: message.messageId, sender: message.sender.ref,
-        now: now(), expires,
+        excerpt: messageExcerpt(message.text), now: now(), expires,
       });
       const rawMessage = message.raw.message ?? message.raw.edited_message
         ?? message.raw.channel_post ?? message.raw.edited_channel_post;
@@ -560,15 +589,17 @@ export class StateStore {
         this.db.query(`
           INSERT INTO telegram_messages(
             ref, bot_id, route_key, chat_id, topic_id, message_id, sender_ref,
-            owned_by_bot, created_at, expires_at
-          ) VALUES ($ref,$bot,$route,$chat,$topic,$message,NULL,$owned,$now,$expires)
-          ON CONFLICT(bot_id, chat_id, message_id) DO UPDATE SET expires_at=excluded.expires_at
+            owned_by_bot, excerpt, created_at, expires_at
+          ) VALUES ($ref,$bot,$route,$chat,$topic,$message,NULL,$owned,$excerpt,$now,$expires)
+          ON CONFLICT(bot_id, chat_id, message_id) DO UPDATE SET
+            excerpt=COALESCE(excluded.excerpt, telegram_messages.excerpt),
+            expires_at=excluded.expires_at
         `).run({
           ref: message.reply.message_ref, bot: message.route.botId, route: message.route.key,
           chat: message.route.chatId, topic: message.route.topicId,
           message: String(rawMessage.reply_to_message.message_id),
           owned: rawMessage.reply_to_message.from?.id === Number(message.route.botId) ? 1 : 0,
-          now: now(), expires,
+          excerpt: messageExcerpt(message.reply.text_excerpt), now: now(), expires,
         });
       }
       this.db.query("UPDATE context_capabilities SET active=0 WHERE route_key=?").run(message.route.key);
@@ -691,19 +722,38 @@ export class StateStore {
 
   registerBotMessage(input: {
     ref: string; botId: string; routeKey: string; chatId: string;
-    topicId: string; messageId: string;
+    topicId: string; messageId: string; excerpt?: string;
   }): void {
     const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     this.db.query(`
       INSERT INTO telegram_messages(
-        ref, bot_id, route_key, chat_id, topic_id, message_id, owned_by_bot, created_at, expires_at
-      ) VALUES ($ref,$bot,$route,$chat,$topic,$message,1,$now,$expires)
-      ON CONFLICT(bot_id, chat_id, message_id) DO UPDATE SET ref=excluded.ref, expires_at=excluded.expires_at
+        ref, bot_id, route_key, chat_id, topic_id, message_id, owned_by_bot, excerpt, created_at, expires_at
+      ) VALUES ($ref,$bot,$route,$chat,$topic,$message,1,$excerpt,$now,$expires)
+      ON CONFLICT(bot_id, chat_id, message_id) DO UPDATE SET ref=excluded.ref,
+        excerpt=COALESCE(excluded.excerpt, telegram_messages.excerpt),
+        expires_at=excluded.expires_at
     `).run({
       ref: input.ref, bot: input.botId, route: input.routeKey,
       chat: input.chatId, topic: input.topicId, message: input.messageId,
-      now: now(), expires,
+      excerpt: messageExcerpt(input.excerpt), now: now(), expires,
     });
+  }
+
+  updateMessageExcerpt(ref: string, routeKey: string, text: string): void {
+    this.db.query("UPDATE telegram_messages SET excerpt=? WHERE ref=? AND route_key=?")
+      .run(messageExcerpt(text), ref, routeKey);
+  }
+
+  /** Newest observed messages for one route, returned oldest first. */
+  recentMessages(routeKey: string, limit: number): RecentMessage[] {
+    return this.db.query<RecentMessage, [string, string, number]>(`
+      SELECT m.ref, m.sender_ref, p.display_name AS sender_display_name,
+        m.owned_by_bot, m.created_at, m.excerpt
+      FROM telegram_messages m
+      LEFT JOIN telegram_principals p ON p.ref = m.sender_ref AND p.route_key = m.route_key
+      WHERE m.route_key=? AND m.expires_at>?
+      ORDER BY CAST(m.message_id AS INTEGER) DESC LIMIT ?
+    `).all(routeKey, now(), limit).reverse();
   }
 
   createOutbox(input: {

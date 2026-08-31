@@ -163,6 +163,7 @@ export async function runTelegramMcpServer(): Promise<void> {
       "References are scoped capabilities. Never invent Telegram IDs, file URLs, or local paths.",
       "Download a remote attachment before claiming to inspect or modify it. Sticker images are downloaded automatically and include a local path.",
       "Use admin tools only when the user's current message explicitly asks for that action.",
+      "Read the telegram://chat/recent resource to recover message refs and bounded excerpts of recently observed messages in this chat.",
       `Read the ${TELEGRAM_GUIDELINES_URI} resource (mcp_features resource_read) for channel guidelines.`,
     ].join(" ") },
   );
@@ -179,6 +180,37 @@ export async function runTelegramMcpServer(): Promise<void> {
       contents: [{ uri: uri.href, mimeType: "text/markdown", text: TELEGRAM_GUIDELINES_TEXT }],
     }),
   );
+
+  const RECENT_MESSAGES_LIMIT = 25;
+  server.registerResource("recent_messages", "telegram://chat/recent", {
+    title: "Recent messages in this chat",
+    description: [
+      `The most recent messages tgfx observed in the current chat (up to ${RECENT_MESSAGES_LIMIT}, oldest first)`,
+      "with bounded text excerpts. Use each ref with the Telegram tools.",
+      "Messages that were never observed by tgfx are not listed, and long content is truncated.",
+    ].join(" "),
+    mimeType: "application/json",
+  }, async (uri) => {
+    const messages = state.recentMessages(env.routeKey, RECENT_MESSAGES_LIMIT).map((row) => ({
+      ref: row.ref,
+      at: row.created_at,
+      from: row.owned_by_bot
+        ? { kind: "bot" as const }
+        : row.sender_ref
+          ? {
+              kind: "member" as const,
+              ref: row.sender_ref,
+              ...(row.sender_display_name ? { display_name: row.sender_display_name } : {}),
+            }
+          : { kind: "unknown" as const },
+      ...(row.excerpt ? { text: row.excerpt } : {}),
+    }));
+    return { contents: [{
+      uri: uri.href,
+      mimeType: "application/json",
+      text: JSON.stringify({ chat_recent: { version: 1, count: messages.length, messages } }, null, 2),
+    }] };
+  });
 
   const context = () => {
     const value = state.activeContext(env.routeKey);
@@ -310,6 +342,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     state.registerBotMessage({
       ref: reference, botId: env.botId, routeKey: env.routeKey, chatId: current.chat_id,
       topicId: current.topic_id, messageId: String(sent.message_id),
+      ...(args.caption ? { excerpt: args.caption } : {}),
     });
     return { sent: true, message_ref: reference };
   })));
@@ -453,6 +486,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     state.registerBotMessage({
       ref: messageRef, botId: env.botId, routeKey: env.routeKey,
       chatId: current.chat_id, topicId: current.topic_id, messageId: String(sent.message_id),
+      excerpt: args.question,
     });
     return { sent: true, interaction_ref: `interaction_${id}`, message_ref: messageRef };
   })));
@@ -478,6 +512,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     state.registerBotMessage({
       ref: messageRef, botId: env.botId, routeKey: env.routeKey,
       chatId: current.chat_id, topicId: current.topic_id, messageId: String(sent.message_id),
+      excerpt: args.question,
     });
     state.createInteraction({
       id: interactionId, botId: env.botId, routeKey: env.routeKey, kind: "poll",
@@ -508,13 +543,14 @@ export async function runTelegramMcpServer(): Promise<void> {
       await telegram.api.editMessageText(current.chat_id, Number(reference.message_id), args.text);
       messageId = Number(reference.message_id);
       messageRef = reference.ref;
+      state.updateMessageExcerpt(messageRef, env.routeKey, args.text);
     } else {
       const sent = await telegram.sendText(current.chat_id, args.text, current.topic_id);
       messageId = sent.message_id;
       messageRef = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
       state.registerBotMessage({
         ref: messageRef, botId: env.botId, routeKey: env.routeKey, chatId: current.chat_id,
-        topicId: current.topic_id, messageId: String(messageId),
+        topicId: current.topic_id, messageId: String(messageId), excerpt: args.text,
       });
     }
     await telegram.api.pinChatMessage(current.chat_id, messageId, { disable_notification: true });

@@ -824,6 +824,8 @@ MCP tools:
 - `context_ref` selects the authorized route and current turn; a target reference
   can select only an object already observed or created inside that route;
 - an attachment must be downloaded before the agent claims to have inspected it;
+- a `message_ref` lost to context compaction can be recovered by reading the
+  `telegram://chat/recent` resource instead of asking for raw IDs;
 - a destructive administrator tool should be used only for an explicit user
   request, and may still pause for host approval;
 - the agent must not ask for or invent a `chat_id`, raw message ID, member ID,
@@ -862,9 +864,23 @@ The reaction target deliberately supports prior turns. Each incoming and outgoin
 message that may be referenced receives an opaque `message_ref`. The agent can
 reuse a reference retained in its FX context, including one found in `reply`
 metadata, but cannot supply an arbitrary Telegram message ID or cross into a
-different chat or topic. V1 does not expose `list_recent_messages`; a future
-bounded version may be added if FX context compaction makes retained references
-insufficient.
+different chat or topic. When FX context compaction loses retained references,
+the agent can recover them from the read-only `telegram://chat/recent` resource
+below instead of asking for raw IDs.
+
+### Chat read plane
+
+Alongside the action tools, the server publishes one MCP resource:
+
+| Resource | Contents |
+| --- | --- |
+| `telegram://chat/recent` | The most recent messages tgfx observed in the current chat — at most 25, oldest first. Each entry carries its opaque `ref`, a timestamp, the sender (`bot`, a `member` ref with display name, or `unknown`), and a bounded text excerpt of at most 200 characters when one was observed. |
+
+Reading the resource has no side effects and needs no active turn. It lists only
+messages tgfx actually observed or sent inside this route and session
+generation — it is ref recovery, not chat history lookup: excerpts are bounded,
+expire with their refs, and messages tgfx never saw are absent. Raw Telegram
+IDs never appear in the payload.
 
 Bot reactions are constrained by Telegram's available-reaction policy. tgfx
 validates the requested emoji and treats setting the same reaction, or clearing
@@ -1105,7 +1121,7 @@ telegram_principals
 
 telegram_messages
   ref PK, bot_id, route_key, chat_id, topic_id, message_id
-  sender_ref, owned_by_bot, created_at, expires_at
+  sender_ref, owned_by_bot, excerpt, created_at, expires_at
   UNIQUE(bot_id, chat_id, message_id)
 
 telegram_inbox
@@ -1157,7 +1173,10 @@ operation; a stable local ID alone does not make a Telegram send idempotent.
 
 `telegram_messages` and `telegram_principals` are reference indexes, not content
 archives. They retain the minimum Telegram IDs needed to resolve opaque refs for
-the active FX session generation and are pruned with that generation. Interaction
+the active FX session generation and are pruned with that generation. Each
+message row may additionally keep one bounded excerpt (at most 200 characters)
+of observed text so the `telegram://chat/recent` resource can label refs; the
+excerpt expires and is pruned with its row and is never a full message archive. Interaction
 payloads retain only bounded button, poll, join-request, or approval validation
 state until completion or expiry. Message bodies are still removed with
 completed inbox and outbox recovery payloads.
@@ -1515,8 +1534,9 @@ the current private-chat bridge:
   policy;
 - managed-pin recovery after each possible failure between create, edit, and pin,
   especially the irreducible unknown-create window;
-- whether retained `message_ref` values survive realistic long FX sessions and
-  context compaction, or justify a bounded `list_recent_messages` read tool;
+- whether the bounded `telegram://chat/recent` resource is enough for retained
+  `message_ref` values to survive realistic long FX sessions and context
+  compaction, or a larger read surface is justified;
 - callback and poll event UX when the originating FX session is busy, reset, or
   no longer resumable;
 - safe transcription as a separate MCP capability for voice/audio;
