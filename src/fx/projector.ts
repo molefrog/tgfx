@@ -1,10 +1,12 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import type { InputRichMessageWithoutUpload } from "grammy/types";
+import { TELEGRAM_GUIDELINES_URI } from "../mcp/guidelines";
 import {
   TELEGRAM_MCP_TOOL_ROW_TITLES,
   type TelegramMcpToolName,
 } from "../mcp/tool-labels";
 import { redactSecrets } from "../secrets";
+import { fxToolIconForTool, mcpIconForTool, type McpIconMap } from "../telegram/mcp-icons";
 import { markdownToRichBlocks, type RichBlock } from "../telegram/rich-markdown";
 
 type AssistantEntry = { type: "assistant"; messageId?: string; markdown: string };
@@ -50,7 +52,6 @@ const THINKING_CUSTOM_EMOJI = {
 type ToolActivity =
   | "commands"
   | "created_files"
-  | "created_folders"
   | "wrote_files"
   | "edited_files"
   | "read_files"
@@ -58,27 +59,24 @@ type ToolActivity =
   | "searched_files"
   | "searched_code"
   | "searched_web"
+  | "searched_capabilities"
+  | "searched_skills"
+  | "searched_mcp_tools"
   | "fetched_pages"
-  | "inspected_files"
-  | "opened_files"
-  | "inspected_media"
-  | "inspected_tool_results"
-  | "deleted_files"
-  | "copied_files"
-  | "renamed_files"
-  | "moved_files"
   | "used_terminal"
   | "used_memory"
   | "used_skills"
+  | "installed_skills"
   | "used_subagents"
+  | "inspected_images"
+  | "read_tool_results"
   | "asked_user"
-  | "used_telegram"
+  | "used_chat_tools"
   | "used_external_tools";
 
 const TOOL_ACTIVITY_ORDER: ToolActivity[] = [
   "commands",
   "created_files",
-  "created_folders",
   "wrote_files",
   "edited_files",
   "read_files",
@@ -86,21 +84,19 @@ const TOOL_ACTIVITY_ORDER: ToolActivity[] = [
   "searched_files",
   "searched_code",
   "searched_web",
+  "searched_capabilities",
+  "searched_skills",
+  "searched_mcp_tools",
   "fetched_pages",
-  "inspected_files",
-  "opened_files",
-  "inspected_media",
-  "inspected_tool_results",
-  "deleted_files",
-  "copied_files",
-  "renamed_files",
-  "moved_files",
   "used_terminal",
   "used_memory",
   "used_skills",
+  "installed_skills",
   "used_subagents",
+  "inspected_images",
+  "read_tool_results",
   "asked_user",
-  "used_telegram",
+  "used_chat_tools",
   "used_external_tools",
 ];
 
@@ -110,39 +106,30 @@ type CanonicalToolRule = ToolActivity | "omit" | "terminal" | "write_file";
 
 /**
  * FX owns one built-in tool catalog regardless of the selected model provider.
- * Keep this table keyed by that catalog instead of teaching the UI provider-
- * specific spellings. FX 0.0.6 omits `name` over ACP, so title/kind fallback
- * remains below for the wire format it emits today.
+ * This is the complete registered FX tool catalog. FX omits `name` over ACP, so
+ * the title/kind/content fallback below mirrors its stable wire labels.
  */
-const CANONICAL_FX_TOOL_RULES = {
-  list_files: "searched_files",
+export const CANONICAL_FX_TOOL_RULES = {
   glob_files: "searched_files",
   grep_files: "searched_code",
-  semantic_search: "searched_code",
   read_file: "read_files",
   write_file: "write_file",
   edit_file: "edited_files",
-  delete_file: "deleted_files",
-  rename_file: "renamed_files",
-  copy_file: "copied_files",
-  create_folder: "created_folders",
-  file_info: "inspected_files",
-  open_file: "opened_files",
   terminal: "terminal",
-  // Retained for FX releases that expose the documented legacy command name.
-  run_command: "commands",
-  web_search: "searched_web",
-  web_fetch: "fetched_pages",
-  vision: "inspected_media",
-  memory: "used_memory",
-  skill: "used_skills",
-  install_skill: "used_skills",
   subagent: "used_subagents",
-  ask_user_question: "asked_user",
-  read_tool_result: "inspected_tool_results",
-  mcp_search_tools: "omit",
+  capability_search: "searched_capabilities",
+  skill_search: "searched_skills",
+  skill: "used_skills",
+  install_skill: "installed_skills",
+  mcp_search_tools: "searched_mcp_tools",
   mcp_select_tool: "omit",
   mcp_features: "used_external_tools",
+  memory: "used_memory",
+  ask_user_question: "asked_user",
+  vision: "inspected_images",
+  read_tool_result: "read_tool_results",
+  web_search: "searched_web",
+  web_fetch: "fetched_pages",
 } as const satisfies Record<string, CanonicalToolRule>;
 
 type CanonicalFxToolName = keyof typeof CANONICAL_FX_TOOL_RULES;
@@ -220,6 +207,13 @@ function exactArgumentFromContent(content: unknown[]): string {
   return "";
 }
 
+function readsTelegramGuidelines(tool: ToolState): boolean {
+  if (tool.title.includes(TELEGRAM_GUIDELINES_URI)) return true;
+  if (stringify(tool.input, 4_000, false).includes(TELEGRAM_GUIDELINES_URI)) return true;
+  if (stringify(tool.output, 4_000, false).includes(TELEGRAM_GUIDELINES_URI)) return true;
+  return contentText(tool.content).some((text) => text.includes(TELEGRAM_GUIDELINES_URI));
+}
+
 function toolArgument(tool: ToolState): string {
   if (tool.input !== undefined) return stringify(tool.input, 800, false);
 
@@ -266,6 +260,38 @@ function canonicalFxToolName(identity: string): CanonicalFxToolName | undefined 
     : undefined;
 }
 
+function inferredCanonicalFxToolName(tool: ToolState): CanonicalFxToolName | undefined {
+  const named = canonicalFxToolName(toolName(tool));
+  if (named) return named;
+  const titled = canonicalFxToolName(toolTitle(tool));
+  if (titled) return titled;
+
+  if (tool.kind === "execute") return "terminal";
+  if (titleStartsWith(tool, /^search(?:ing|ed) MCP tools\b/iu)) return "mcp_search_tools";
+  if (titleStartsWith(tool, /^select(?:ing|ed) MCP tool\b/iu)) return "mcp_select_tool";
+  if (titleStartsWith(tool, /^using MCP feature\b/iu)) return "mcp_features";
+  if (titleStartsWith(tool, /^search(?:ing|ed) capabilities\b/iu)) return "capability_search";
+  if (titleStartsWith(tool, /^search(?:ing|ed) skills\b/iu)) return "skill_search";
+  if (titleStartsWith(tool, /^load(?:ing|ed) skill\b/iu)) return "skill";
+  if (titleStartsWith(tool, /^install(?:ing|ed) skill\b/iu)) return "install_skill";
+  if (titleStartsWith(tool, /^(?:remembering|remembered|listing|listed)\b/iu)) return "memory";
+  if (titleStartsWith(tool, /^ask(?:ing|ed)\b/iu)) return "ask_user_question";
+  if (titleStartsWith(tool, /^inspect(?:ing|ed)\b/iu)) return "vision";
+  if (titleStartsWith(tool, /^read(?:ing)?\s+tool result\b/iu)) return "read_tool_result";
+  if (titleStartsWith(tool, /^manag(?:ing|ed)\b/iu)) return "subagent";
+  if (tool.kind === "read" && titleStartsWith(tool, /^match(?:ing|ed)\b/iu)) return "glob_files";
+  if (tool.kind === "read" && titleStartsWith(tool, /^read(?:ing)?\b/iu)) return "read_file";
+  if (tool.kind === "read" && titleStartsWith(tool, /^fetch(?:ing|ed)\b/iu)) return "web_fetch";
+  if (tool.kind === "edit" && titleStartsWith(tool, /^writ(?:ing|ten)\b/iu)) return "write_file";
+  if (tool.kind === "edit") return "edit_file";
+  if (tool.kind === "search") {
+    const activity = searchActivity(tool);
+    if (activity === "searched_code") return "grep_files";
+    if (activity === "searched_web") return "web_search";
+  }
+  return undefined;
+}
+
 function telegramToolName(identity: string): TelegramMcpToolName | undefined {
   const unqualified = identity.replace(/^mcp_telegram_/, "");
   return Object.hasOwn(TELEGRAM_MCP_TOOL_ROW_TITLES, unqualified)
@@ -277,9 +303,86 @@ function dynamicMcpTool(identity: string): boolean {
   return /^mcp_[a-z0-9_-]+_/u.test(identity);
 }
 
+function terminalAction(tool: ToolState): string | undefined {
+  if (!tool.input || typeof tool.input !== "object") return undefined;
+  const input = tool.input as { action?: unknown; kind?: unknown; request?: unknown };
+  const request = input.request && typeof input.request === "object"
+    ? input.request as { action?: unknown; kind?: unknown }
+    : undefined;
+  const action = input.action ?? input.kind ?? request?.action ?? request?.kind;
+  return typeof action === "string" ? action : undefined;
+}
+
+function terminalRowTitle(tool: ToolState): string {
+  const action = terminalAction(tool);
+  return action === "exec" || action === "start"
+    || titleStartsWith(tool, /^(?:running|starting)\b/iu)
+    ? "Running command"
+    : "Managing terminal";
+}
+
+function canonicalToolRowTitle(tool: ToolState, name: CanonicalFxToolName): string {
+  switch (name) {
+    case "glob_files": return "Finding files";
+    case "grep_files": return "Searching code";
+    case "read_file": return "Reading file";
+    case "write_file": return hasNewFileDiff(tool) ? "Creating file" : "Writing file";
+    case "edit_file": return "Editing file";
+    case "terminal": return terminalRowTitle(tool);
+    case "subagent": return "Running subagent";
+    case "capability_search": return "Finding tools and skills";
+    case "skill_search": return "Searching skills";
+    case "skill": return "Loading skill";
+    case "install_skill": return "Installing skill";
+    case "mcp_search_tools": return "Searching MCP tools";
+    case "mcp_select_tool": return "Selecting MCP tool";
+    case "mcp_features": return readsTelegramGuidelines(tool) ? "Reading guidelines" : "Using MCP resource or prompt";
+    case "memory": return titleStartsWith(tool, /^listing\b/iu) ? "Listing memories" : "Saving memory";
+    case "ask_user_question": return "Asking a question";
+    case "vision": return "Inspecting images";
+    case "read_tool_result": return "Reading tool result";
+    case "web_fetch": return "Fetching web page";
+    case "web_search": return "Searching web";
+  }
+}
+
+function fxWireToolRowTitle(tool: ToolState): string | undefined {
+  if (tool.kind === "execute") return terminalRowTitle(tool);
+  if (tool.kind === "read" && titleStartsWith(tool, /^matching\b/iu)) return "Finding files";
+  if (tool.kind === "read" && titleStartsWith(tool, /^reading\b/iu)) return "Reading file";
+  if (tool.kind === "read" && titleStartsWith(tool, /^fetching\b/iu)) return "Fetching web page";
+  if (tool.kind === "edit" && titleStartsWith(tool, /^writing\b/iu)) {
+    return hasNewFileDiff(tool) ? "Creating file" : "Writing file";
+  }
+  if (tool.kind === "edit" && titleStartsWith(tool, /^editing\b/iu)) return "Editing file";
+  if (tool.kind === "search" && titleStartsWith(tool, /^searching\b/iu)) {
+    const activity = searchActivity(tool);
+    if (activity === "searched_code") return "Searching code";
+    if (activity === "searched_web") return "Searching web";
+    return "Searching";
+  }
+  if (titleStartsWith(tool, /^searching capabilities\b/iu)) return "Finding tools and skills";
+  if (titleStartsWith(tool, /^search(?:ing|ed) skills\b/iu)) return "Searching skills";
+  if (titleStartsWith(tool, /^search(?:ing|ed) MCP tools\b/iu)) return "Searching MCP tools";
+  if (titleStartsWith(tool, /^loading skill\b/iu)) return "Loading skill";
+  if (titleStartsWith(tool, /^installing skill\b/iu)) return "Installing skill";
+  if (titleStartsWith(tool, /^managing\b/iu)) return "Running subagent";
+  if (titleStartsWith(tool, /^selecting MCP tool\b/iu)) return "Selecting MCP tool";
+  if (titleStartsWith(tool, /^using MCP feature\b/iu)) {
+    return readsTelegramGuidelines(tool) ? "Reading guidelines" : "Using MCP resource or prompt";
+  }
+  if (titleStartsWith(tool, /^listing\b/iu)) return "Listing memories";
+  if (titleStartsWith(tool, /^remembering\b/iu)) return "Saving memory";
+  if (titleStartsWith(tool, /^asking\b/iu)) return "Asking a question";
+  if (titleStartsWith(tool, /^inspect(?:ing|ed)\b/iu)) return "Inspecting images";
+  if (titleStartsWith(tool, /^read(?:ing)?\s+tool result\b/iu)) return "Reading tool result";
+  return undefined;
+}
+
 function displayToolTitle(tool: ToolState): string {
   const name = toolName(tool);
-  if (canonicalFxToolName(name)) return tool.title;
+  const namedCanonical = canonicalFxToolName(name);
+  if (namedCanonical) return canonicalToolRowTitle(tool, namedCanonical);
   const namedTelegram = telegramToolName(name);
   if (namedTelegram) return TELEGRAM_MCP_TOOL_ROW_TITLES[namedTelegram];
   if (PROVIDER_SEARCH_TOOLS.has(name)) return "Searching web";
@@ -288,6 +391,10 @@ function displayToolTitle(tool: ToolState): string {
   const titledTelegram = telegramToolName(toolTitle(tool));
   if (titledTelegram) return TELEGRAM_MCP_TOOL_ROW_TITLES[titledTelegram];
   if (PROVIDER_SEARCH_TOOLS.has(toolTitle(tool))) return "Searching web";
+  const titledCanonical = canonicalFxToolName(toolTitle(tool));
+  if (titledCanonical) return canonicalToolRowTitle(tool, titledCanonical);
+  const wireTitle = fxWireToolRowTitle(tool);
+  if (wireTitle) return wireTitle;
   return tool.title;
 }
 
@@ -305,12 +412,7 @@ function hasNewFileDiff(tool: ToolState): boolean {
 }
 
 function terminalActivity(tool: ToolState): ToolActivity {
-  const input = tool.input && typeof tool.input === "object"
-    ? tool.input as { action?: unknown; kind?: unknown }
-    : undefined;
-  const action = typeof input?.action === "string"
-    ? input.action
-    : typeof input?.kind === "string" ? input.kind : undefined;
+  const action = terminalAction(tool);
   return action === "exec" || action === "start"
     || titleStartsWith(tool, /^(?:running|starting)\b/iu)
     ? "commands"
@@ -347,6 +449,7 @@ function canonicalActivity(tool: ToolState, name: CanonicalFxToolName): ToolActi
   if (rule === "omit") return undefined;
   if (rule === "terminal") return terminalActivity(tool);
   if (rule === "write_file") return hasNewFileDiff(tool) ? "created_files" : "wrote_files";
+  if (name === "mcp_features" && readsTelegramGuidelines(tool)) return "used_chat_tools";
   return rule;
 }
 
@@ -355,51 +458,52 @@ function toolActivity(tool: ToolState): ToolActivity | undefined {
   const name = toolName(tool);
   const namedCanonical = canonicalFxToolName(name);
   if (namedCanonical) return canonicalActivity(tool, namedCanonical);
-  if (telegramToolName(name)) return "used_telegram";
+  if (telegramToolName(name)) return "used_chat_tools";
   if (PROVIDER_SEARCH_TOOLS.has(name)) return "searched_web";
   if (dynamicMcpTool(name)) return "used_external_tools";
 
   const title = toolTitle(tool);
-  if (telegramToolName(title)) return "used_telegram";
+  if (telegramToolName(title)) return "used_chat_tools";
   if (PROVIDER_SEARCH_TOOLS.has(title)) return "searched_web";
   const titledCanonical = canonicalFxToolName(title);
   if (titledCanonical) return canonicalActivity(tool, titledCanonical);
+  if (titleStartsWith(tool, /^search(?:ing|ed) skills\b/iu)) return "searched_skills";
+  if (titleStartsWith(tool, /^search(?:ing|ed) MCP tools\b/iu)) return "searched_mcp_tools";
+  if (titleStartsWith(tool, /^inspect(?:ing|ed)\b/iu)) return "inspected_images";
+  if (titleStartsWith(tool, /^read(?:ing)?\s+tool result\b/iu)) return "read_tool_results";
 
   switch (tool.kind) {
     case "execute":
       return terminalActivity(tool);
     case "read":
       if (titleStartsWith(tool, /^fetching\b/iu)) return "fetched_pages";
-      if (titleStartsWith(tool, /^(?:listing|matching)\b/iu)) return "searched_files";
+      if (titleStartsWith(tool, /^matching\b/iu)) return "searched_files";
       if (titleStartsWith(tool, /^searching\b/iu)) return searchActivity(tool);
       if (titleStartsWith(tool, /^reading\b/iu)) return "read_files";
-      if (titleStartsWith(tool, /^inspecting\b/iu)) return "inspected_files";
       return tool.title.trim() ? undefined : "read_files";
     case "edit":
       if (hasNewFileDiff(tool)) return "created_files";
-      if (titleStartsWith(tool, /^creating\b/iu)) return "created_folders";
       if (titleStartsWith(tool, /^writing\b/iu)) return "wrote_files";
       return "edited_files";
     case "search":
       return searchActivity(tool);
     case "fetch":
       return "fetched_pages";
-    case "delete":
-      return "deleted_files";
-    case "move":
-      if (titleStartsWith(tool, /^copying\b/iu)) return "copied_files";
-      if (titleStartsWith(tool, /^renaming\b/iu)) return "renamed_files";
-      return "moved_files";
     default:
-      if (titleStartsWith(tool, /^opening\b/iu)) return "opened_files";
-      if (titleStartsWith(tool, /^inspecting\b/iu)) return "inspected_media";
       if (titleStartsWith(tool, /^(?:remembering|listing)\b/iu)) return "used_memory";
-      if (titleStartsWith(tool, /^(?:loading|installing) skill\b/iu)) return "used_skills";
+      if (titleStartsWith(tool, /^searching capabilities\b/iu)) return "searched_capabilities";
+      if (titleStartsWith(tool, /^search(?:ing|ed) skills\b/iu)) return "searched_skills";
+      if (titleStartsWith(tool, /^search(?:ing|ed) MCP tools\b/iu)) return "searched_mcp_tools";
+      if (titleStartsWith(tool, /^loading skill\b/iu)) return "used_skills";
+      if (titleStartsWith(tool, /^installing skill\b/iu)) return "installed_skills";
       if (titleStartsWith(tool, /^managing\b/iu)) return "used_subagents";
       if (titleStartsWith(tool, /^asking\b/iu)) return "asked_user";
-      if (titleStartsWith(tool, /^reading\b/iu)) return "inspected_tool_results";
-      if (titleStartsWith(tool, /^(?:searching|selecting) MCP tool/iu)) return undefined;
-      if (titleStartsWith(tool, /^using MCP feature/iu)) return "used_external_tools";
+      if (titleStartsWith(tool, /^inspect(?:ing|ed)\b/iu)) return "inspected_images";
+      if (titleStartsWith(tool, /^read(?:ing)?\s+tool result\b/iu)) return "read_tool_results";
+      if (titleStartsWith(tool, /^selecting MCP tool/iu)) return undefined;
+      if (titleStartsWith(tool, /^using MCP feature/iu)) {
+        return readsTelegramGuidelines(tool) ? "used_chat_tools" : "used_external_tools";
+      }
       if (dynamicMcpTool(title)) return "used_external_tools";
       return undefined;
   }
@@ -413,7 +517,6 @@ function activitySummary(activity: ToolActivity, count: number): string {
   switch (activity) {
     case "commands": return `ran ${counted(count, "command")}`;
     case "created_files": return `created ${counted(count, "file")}`;
-    case "created_folders": return `created ${counted(count, "folder")}`;
     case "wrote_files": return `wrote ${counted(count, "file")}`;
     case "edited_files": return `edited ${counted(count, "file")}`;
     case "read_files": return `read ${counted(count, "file")}`;
@@ -421,21 +524,19 @@ function activitySummary(activity: ToolActivity, count: number): string {
     case "searched_files": return "searched files";
     case "searched_code": return "searched code";
     case "searched_web": return "searched web";
+    case "searched_capabilities": return "searched capabilities";
+    case "searched_skills": return "searched skills";
+    case "searched_mcp_tools": return "searched MCP tools";
     case "fetched_pages": return `fetched ${counted(count, "page")}`;
-    case "inspected_files": return `inspected ${counted(count, "file")}`;
-    case "opened_files": return `opened ${counted(count, "file")}`;
-    case "inspected_media": return "inspected media";
-    case "inspected_tool_results": return "inspected tool results";
-    case "deleted_files": return `deleted ${counted(count, "file")}`;
-    case "copied_files": return `copied ${counted(count, "file")}`;
-    case "renamed_files": return `renamed ${counted(count, "file")}`;
-    case "moved_files": return `moved ${counted(count, "file")}`;
     case "used_terminal": return "used terminal";
     case "used_memory": return "used memory";
     case "used_skills": return "used skills";
+    case "installed_skills": return `installed ${counted(count, "skill")}`;
     case "used_subagents": return "used subagents";
+    case "inspected_images": return "inspected images";
+    case "read_tool_results": return `read ${counted(count, "tool result")}`;
     case "asked_user": return "asked user";
-    case "used_telegram": return "used Telegram";
+    case "used_chat_tools": return "used chat tools";
     case "used_external_tools": return "used external tools";
   }
 }
@@ -477,6 +578,8 @@ export class AcpProjector {
   private tools = new Map<string, ToolState>();
   private commands: TimelineSnapshot["commands"] = [];
   private changedAt = Date.now();
+
+  constructor(private readonly mcpIcons: McpIconMap = {}) {}
 
   apply(update: acp.SessionUpdate): ProjectorChange {
     this.changedAt = Date.now();
@@ -592,12 +695,16 @@ export class AcpProjector {
       return hidden;
     };
 
-    for (const entry of this.timeline) {
+    const suppressBefore = this.guidelinesBootstrapIndex();
+    for (const [index, entry] of this.timeline.entries()) {
       if (entry.type === "tool") {
         const tool = this.tools.get(entry.toolCallId);
         if (tool) group.push(tool);
         continue;
       }
+      // The bootstrap directive forbids announcing the guidelines read; when the
+      // model narrates anyway, drop that preamble instead of relaying it.
+      if (index < suppressBefore) continue;
 
       const markdown = redactSecrets(entry.markdown);
       const blocks = markdownToRichBlocks(markdown);
@@ -616,9 +723,20 @@ export class AcpProjector {
     return items;
   }
 
+  // Timeline index of the guidelines resource read, but only when it is the
+  // turn's first tool call (a bootstrap turn); -1 otherwise. Assistant text
+  // before that index is a forbidden announcement and is not rendered.
+  private guidelinesBootstrapIndex(): number {
+    for (const [index, entry] of this.timeline.entries()) {
+      if (entry.type !== "tool") continue;
+      const tool = this.tools.get(entry.toolCallId);
+      return tool && readsTelegramGuidelines(tool) ? index : -1;
+    }
+    return -1;
+  }
+
   rich(options: {
     final: boolean;
-    collapseTools: boolean;
     expandStreamingTools: boolean;
     includeTools?: boolean;
   }): InputRichMessageWithoutUpload {
@@ -628,14 +746,12 @@ export class AcpProjector {
       return { blocks: [{ type: "thinking", text: [THINKING_CUSTOM_EMOJI, " Thinking…"] }] };
     }
 
-    const blocks = items.flatMap((item, index) => {
+    const blocks = items.flatMap((item) => {
       if (item.type === "assistant") return item.blocks;
-      const streaming = !options.final && index === items.length - 1;
       return [this.toolGroupBlock(
         item.tools,
-        options.collapseTools,
-        streaming,
-        options.expandStreamingTools,
+        !options.final,
+        !options.final && options.expandStreamingTools,
       )];
     });
     return { blocks };
@@ -643,49 +759,65 @@ export class AcpProjector {
 
   private toolGroupBlock(
     tools: ToolState[],
-    collapseTools: boolean,
-    streaming: boolean,
-    expandStreamingTools: boolean,
+    working: boolean,
+    expanded: boolean,
   ): RichBlock {
-    const blocks = collapseTools
-      ? tools.map((tool) => this.toolRow(tool))
-      : tools.flatMap((tool) => this.expandedToolBlocks(tool));
+    const blocks = tools.map((tool) => this.toolRow(tool));
     return {
       type: "details",
-      summary: streaming ? [THINKING_CUSTOM_EMOJI, " Working…"] : completedToolSummary(tools, this.changedAt),
+      summary: working ? "Working..." : completedToolSummary(tools, this.changedAt),
       blocks,
-      ...(streaming && expandStreamingTools ? { is_open: true as const } : {}),
+      ...(expanded ? { is_open: true as const } : {}),
     };
   }
 
   private toolRow(tool: ToolState): RichBlock {
+    const canonicalName = inferredCanonicalFxToolName(tool);
+    if (canonicalName === "mcp_features" && readsTelegramGuidelines(tool)) {
+      const iconId = this.mcpIcons.telegram;
+      return {
+        type: "paragraph",
+        text: iconId
+          ? [
+              { type: "custom_emoji" as const, custom_emoji_id: iconId, alternative_text: "🧩" },
+              " Reading guidelines",
+            ]
+          : "Reading guidelines",
+      };
+    }
     const argument = toolArgumentPreview(tool);
-    const title = `${failed(tool.status) ? "⊗" : "∴"} ${redactSecrets(displayToolTitle(tool))}`;
+    const displayTitle = redactSecrets(displayToolTitle(tool));
+    const fxIconId = canonicalName
+      ? fxToolIconForTool(this.mcpIcons, canonicalName)
+      : undefined;
+    const iconId = fxIconId
+      ?? mcpIconForTool(this.mcpIcons, tool.name ?? "")
+      ?? mcpIconForTool(this.mcpIcons, tool.title);
+    const title = iconId
+      ? [
+          {
+            type: "custom_emoji" as const,
+            custom_emoji_id: iconId,
+            alternative_text: fxIconId ? "🛠️" : "🧩",
+          },
+          ` ${displayTitle}`,
+        ]
+      : [displayTitle];
     return {
       type: "paragraph",
       text: argument
-        ? [{ type: "bold", text: title }, " ", { type: "code", text: argument }]
-        : { type: "bold", text: title },
+        ? [...title, " ", { type: "code", text: argument }]
+        : iconId ? title : title[0]!,
     };
-  }
-
-  private expandedToolBlocks(tool: ToolState): RichBlock[] {
-    const blocks: RichBlock[] = [this.toolRow(tool)];
-    const input = stringify(tool.input);
-    const output = stringify(tool.output);
-    const content = contentText(tool.content).map((value) => stringify(value)).filter(Boolean).join("\n\n");
-    if (input) blocks.push({ type: "pre", text: input, language: "json" });
-    if (output) blocks.push({ type: "pre", text: output, language: "json" });
-    if (!output && content) blocks.push({ type: "pre", text: content });
-    return blocks;
   }
 
   plainFinal(includeTools: boolean): string {
     const parts = this.projected(includeTools).map((item) => {
       if (item.type === "assistant") return item.markdown.trim();
       const rows = item.tools.map((tool) => {
-        const argument = toolArgumentPreview(tool);
-        return `${failed(tool.status) ? "⊗" : "∴"} ${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
+        const guidelines = inferredCanonicalFxToolName(tool) === "mcp_features" && readsTelegramGuidelines(tool);
+        const argument = guidelines ? "" : toolArgumentPreview(tool);
+        return `${redactSecrets(displayToolTitle(tool))}${argument ? ` ${argument}` : ""}`;
       });
       return [completedToolSummary(item.tools, this.changedAt), ...rows].join("\n");
     });

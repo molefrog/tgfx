@@ -6,7 +6,6 @@ type RenderMode = "streaming" | "final";
 
 export type RendererConfig = {
   mode: RenderMode;
-  collapseTools: boolean;
   expandStreamingTools: boolean;
   updateEveryMs: number;
 };
@@ -30,7 +29,10 @@ export type TgfxConfig = {
     chatId: DecimalId;
     topicId: DecimalId;
   };
-  renderer: RendererConfig;
+  streaming: boolean;
+  expandStreamingTools: boolean;
+  updateEveryMs: number;
+  customIcons: boolean;
 };
 
 export type Route = {
@@ -82,12 +84,17 @@ export type AttachmentRef = {
   width?: number;
   height?: number;
   duration?: number;
+  stickerName?: string;
+  emoji?: string;
+  customEmojiId?: string;
+  localPath?: string;
 };
 
 type TelegramEnvelope = {
   telegram_message: {
     version: 1;
     source: "tgfx:telegram";
+    instructions: string;
     event: "message.created" | "message.edited" | "interaction.choice" | "poll.answer";
     event_id: string;
     context_ref: string;
@@ -126,13 +133,25 @@ type TelegramEnvelope = {
     attachments: Array<{
       ref: string;
       kind: AttachmentKind;
-      state: "remote";
+      state: "remote" | "local";
       size?: number;
       mime?: string;
       name?: string;
       width?: number;
       height?: number;
       duration_seconds?: number;
+      sticker?: {
+        file_id: string;
+        name?: string;
+        emoji?: string;
+        custom_emoji_id?: string;
+        image: {
+          state: "local" | "remote";
+          path?: string;
+          attachment_ref?: string;
+          mime?: string;
+        };
+      };
     }>;
     reply?: {
       message_ref: string;

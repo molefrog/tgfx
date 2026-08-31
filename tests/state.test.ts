@@ -172,8 +172,11 @@ describe("SQLite operational journal", () => {
     state.close();
   });
 
-  test("requires explicit handoff for unfinished work and preserves unknown effect safety", () => {
+  test("adopting a new workspace resets sessions and queued prompts but keeps delivery state", () => {
     const state = store();
+    state.ensureRoute({ key: "100:42:0", botId: "100", chatId: "42", topicId: "0", chatKind: "private" });
+    state.setRouteSession("100:42:0", "sess-a");
+    state.setLastPrompt("100:42:0", { text: "pending" });
     const id = state.ingestUpdate({
       botId: "100", updateId: 15, routeKey: "100:42:0", authorized: true, payload: { prompt: "work" },
     })!;
@@ -181,23 +184,26 @@ describe("SQLite operational journal", () => {
       effectKey: "outgoing", botId: "100", routeKey: "100:42:0", kind: "text",
       payload: { chatId: "42", topicId: "0", text: "answer" },
     });
-    state.beginEffect({ effectKey: "unknown-effect", botId: "100", routeKey: "100:42:0", toolName: "send" });
     state.createInteraction({
       id: "pending-approval", botId: "100", routeKey: "100:42:0", kind: "fx_permission",
       payload: { prompt: "Proceed?", options: ["yes"] },
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
-    expect(state.unfinished()).toEqual({ inbox: 1, outbox: 1, effects: 1, approvals: 1, total: 4 });
 
-    state.abandonUnfinished("user chose workspace handoff");
+    expect(state.adoptWorkspace("/project-a")).toEqual({ changed: false, discarded: 0 });
+    expect(state.adoptWorkspace("/project-a")).toEqual({ previous: "/project-a", changed: false, discarded: 0 });
+    const moved = state.adoptWorkspace("/project-b");
+    expect(moved).toEqual({ previous: "/project-a", changed: true, discarded: 1 });
 
+    const route = state.route("100:42:0")!;
+    expect(route.session_id).toBeNull();
+    expect(route.generation).toBe(2);
+    expect(route.last_prompt_json).toBeNull();
     expect(state.inbox(id)).toMatchObject({ status: "discarded", payload_json: null });
-    expect(state.recoverableOutbox()).toHaveLength(0);
     expect(state.interaction("pending-approval")?.state).toBe("expired");
-    expect(state.unfinished().total).toBe(0);
-    expect(state.beginEffect({
-      effectKey: "unknown-effect", botId: "100", routeKey: "100:42:0", toolName: "send",
-    })).toBe("unknown");
+    // Telegram-side facts survive the move: cursor and undelivered replies.
+    expect(state.nextOffset("100")).toBe(16);
+    expect(state.recoverableOutbox()).toHaveLength(1);
     state.close();
   });
 

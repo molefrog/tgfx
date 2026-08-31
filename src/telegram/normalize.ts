@@ -8,6 +8,7 @@ import type {
   TgfxConfig,
 } from "../types";
 import { routeKey } from "../types";
+import { TELEGRAM_GUIDELINES_URI } from "../mcp/guidelines";
 
 function ref(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -90,6 +91,12 @@ function attachmentRefs(message: Message): AttachmentRef[] {
   if (message.sticker) add({
     kind: "sticker", fileId: message.sticker.file_id, fileUniqueId: message.sticker.file_unique_id,
     ...(message.sticker.file_size === undefined ? {} : { size: message.sticker.file_size }),
+    mimeType: message.sticker.is_animated
+      ? "application/x-tgsticker"
+      : message.sticker.is_video ? "video/webm" : "image/webp",
+    ...(message.sticker.set_name ? { stickerName: message.sticker.set_name } : {}),
+    ...(message.sticker.emoji ? { emoji: message.sticker.emoji } : {}),
+    ...(message.sticker.custom_emoji_id ? { customEmojiId: message.sticker.custom_emoji_id } : {}),
     width: message.sticker.width, height: message.sticker.height,
   });
   if (message.video_note) add({
@@ -206,7 +213,13 @@ export function isAuthorized(config: TgfxConfig, message: InboundMessage): boole
     || (senderId !== undefined && config.access.userIds.includes(senderId));
 }
 
-export function toEnvelope(message: InboundMessage) {
+export const SESSION_BOOTSTRAP_INSTRUCTIONS =
+  `New session: first call the built-in mcp_features tool with ` +
+  `{"action": "resource_read", "server": "telegram", "uri": "${TELEGRAM_GUIDELINES_URI}"} ` +
+  `(no capability_search or mcp_search_tools needed). Output no text before this call ` +
+  `and never mention the guidelines - silently apply them from now on.`;
+
+export function toEnvelope(message: InboundMessage, options: { sessionBootstrap?: boolean } = {}) {
   const editedMessage = message.raw.edited_message ?? message.raw.edited_channel_post;
   const envelopeSender = message.sender.kind === "user"
     ? {
@@ -232,6 +245,8 @@ export function toEnvelope(message: InboundMessage) {
     telegram_message: {
       version: 1 as const,
       source: "tgfx:telegram" as const,
+      instructions: "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), polls, group admin actions and more. Use search.",
+      ...(options.sessionBootstrap ? { session_bootstrap: SESSION_BOOTSTRAP_INSTRUCTIONS } : {}),
       event: message.event,
       event_id: `tg:${message.updateId}`,
       context_ref: message.contextRef,
@@ -256,13 +271,32 @@ export function toEnvelope(message: InboundMessage) {
       attachments: message.attachments.map((attachment) => ({
         ref: attachment.ref,
         kind: attachment.kind,
-        state: "remote" as const,
+        state: attachment.localPath ? "local" as const : "remote" as const,
         ...(attachment.size === undefined ? {} : { size: attachment.size }),
         ...(attachment.mimeType ? { mime: attachment.mimeType } : {}),
         ...(attachment.name ? { name: attachment.name } : {}),
         ...(attachment.width === undefined ? {} : { width: attachment.width }),
         ...(attachment.height === undefined ? {} : { height: attachment.height }),
         ...(attachment.duration === undefined ? {} : { duration_seconds: attachment.duration }),
+        ...(attachment.kind === "sticker" ? {
+          sticker: {
+            file_id: attachment.fileId,
+            ...(attachment.stickerName ? { name: attachment.stickerName } : {}),
+            ...(attachment.emoji ? { emoji: attachment.emoji } : {}),
+            ...(attachment.customEmojiId ? { custom_emoji_id: attachment.customEmojiId } : {}),
+            image: attachment.localPath
+              ? {
+                  state: "local" as const,
+                  path: attachment.localPath,
+                  ...(attachment.mimeType ? { mime: attachment.mimeType } : {}),
+                }
+              : {
+                  state: "remote" as const,
+                  attachment_ref: attachment.ref,
+                  ...(attachment.mimeType ? { mime: attachment.mimeType } : {}),
+                },
+          },
+        } : {}),
       })),
       ...(message.reply ? { reply: message.reply } : {}),
       ...(message.provenance ? { provenance: message.provenance } : {}),

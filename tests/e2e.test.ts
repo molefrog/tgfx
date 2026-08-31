@@ -29,17 +29,18 @@ async function fakeFx(directory: string): Promise<string> {
 const BOT: BotIdentity = { id: "100", username: "fake_bot", displayName: "Fake Bot" };
 
 async function makeWorkspace(
-  config: Omit<TgfxConfig, "version" | "activeBotId" | "renderer"> & { renderer?: TgfxConfig["renderer"] },
+  config: Partial<TgfxConfig> & Pick<TgfxConfig, "access" | "approvals">,
 ): Promise<{
   paths: WorkspacePaths; fxBinary: string;
 }> {
   const workspace = await mkdtemp(join(tmpdir(), "tgfx-e2e-"));
   temporary.push(workspace);
-  const paths = workspacePaths(workspace);
+  process.env.TGFX_HOME = join(workspace, "tgfx-home");
+  const paths = workspacePaths(BOT.id, workspace);
   await saveConfig(paths, {
     version: 1,
     activeBotId: BOT.id,
-    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 500 },
+    streaming: true, expandStreamingTools: true, updateEveryMs: 500, customIcons: true,
     ...config,
   });
   return { paths, fxBinary: await fakeFx(workspace) };
@@ -98,7 +99,7 @@ describe("tgfx over the local Telegram simulator", () => {
     const { paths, fxBinary } = await makeWorkspace({
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      renderer: { mode: "final", collapseTools: true, expandStreamingTools: true, updateEveryMs: 500 },
+      streaming: false,
     });
     const { app, running } = await startApp(paths, fxBinary, telegram);
     try {
@@ -112,6 +113,7 @@ describe("tgfx over the local Telegram simulator", () => {
       });
       expect(telegram.calls("sendRichMessageDraft")).toHaveLength(0);
       expect(telegram.calls("setMyCommands").at(-1)?.payload.commands).toEqual([
+        { command: "clear", description: "Start a fresh 𝒇x conversation" },
         { command: "compact", description: "Compact the 𝒇x conversation" },
         { command: "model", description: "Choose the 𝒇x model" },
         { command: "cost", description: "Show local 𝒇x usage and spend" },

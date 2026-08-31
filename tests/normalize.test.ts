@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Update } from "grammy/types";
-import { commandFromText, groupMigrationFromUpdate, isAuthorized, normalizeMessageUpdate, shouldInvokeAgent, toEnvelope } from "../src/telegram/normalize";
+import { commandFromText, groupMigrationFromUpdate, isAuthorized, normalizeMessageUpdate, SESSION_BOOTSTRAP_INSTRUCTIONS, shouldInvokeAgent, toEnvelope } from "../src/telegram/normalize";
 import type { BotIdentity, TgfxConfig } from "../src/types";
 
 const bot: BotIdentity = { id: "100", username: "tgfx_test_bot", displayName: "tgfx" };
@@ -8,7 +8,7 @@ const config: TgfxConfig = {
   version: 1, activeBotId: "100",
   access: { userIds: ["42"], chatIds: [] },
   approvals: { chatId: "42", topicId: "0" },
-  renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: true, updateEveryMs: 800 },
+  streaming: true, expandStreamingTools: true, updateEveryMs: 800, customIcons: true,
 };
 
 function update(overrides: Record<string, unknown> = {}): Update {
@@ -31,6 +31,8 @@ describe("Telegram input normalization", () => {
     const envelope = toEnvelope(message);
     expect(message.text).toBe("hello");
     expect(envelope.telegram_message.source).toBe("tgfx:telegram");
+    expect(envelope.telegram_message.instructions).toContain("`telegram` MCP");
+    expect(envelope.telegram_message.instructions).toContain("`set_reaction`");
     expect(envelope.telegram_message.event).toBe("message.created");
     expect(envelope.telegram_message.event_id).toBe("tg:11");
     expect(envelope.telegram_message.sender).toMatchObject({ user_id: "42", display_name: "Ada" });
@@ -38,6 +40,18 @@ describe("Telegram input normalization", () => {
     expect(envelope.telegram_message.response_target).toEqual({ kind: "automatic_reply" });
     expect(envelope.telegram_message.scope).toEqual({ chat_id: "42", kind: "private", topic_id: "0" });
     expect(isAuthorized(config, message)).toBeTrue();
+    expect(envelope.telegram_message).not.toContainKey("session_bootstrap");
+  });
+
+  test("injects the session bootstrap directive only when requested", () => {
+    const message = normalizeMessageUpdate(bot, update())!;
+    const envelope = toEnvelope(message, { sessionBootstrap: true });
+    expect(envelope.telegram_message.session_bootstrap).toBe(SESSION_BOOTSTRAP_INSTRUCTIONS);
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("mcp_features");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("resource_read");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("telegram://guidelines");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("capability_search");
+    expect(SESSION_BOOTSTRAP_INSTRUCTIONS).toContain("no text before this call");
   });
 
   test("exposes opaque attachment metadata but never the Bot API file_id", () => {
@@ -157,6 +171,31 @@ describe("Telegram input normalization", () => {
     }));
     expect(message?.attachments).toHaveLength(1);
     expect(message?.text).toBeUndefined();
+  });
+
+  test("exposes a sendable sticker file ID, name, and its automatically downloaded image", () => {
+    const message = normalizeMessageUpdate(bot, update({
+      text: undefined,
+      sticker: {
+        file_id: "reusable-secret-id", file_unique_id: "stable-sticker-id",
+        width: 512, height: 512, is_animated: false, is_video: false,
+        set_name: "FriendlyFrogs", emoji: "🐸", file_size: 321,
+      },
+    }))!;
+    message.attachments[0]!.localPath = "/tmp/tgfx/sticker.webp";
+    const attachment = toEnvelope(message).telegram_message.attachments[0]!;
+    expect(attachment).toMatchObject({
+      kind: "sticker",
+      state: "local",
+      mime: "image/webp",
+      sticker: {
+        file_id: "reusable-secret-id",
+        name: "FriendlyFrogs",
+        emoji: "🐸",
+        image: { state: "local", path: "/tmp/tgfx/sticker.webp", mime: "image/webp" },
+      },
+    });
+    expect(JSON.stringify(attachment)).toContain("reusable-secret-id");
   });
 
   test("recognizes both halves of a group-to-supergroup migration", () => {

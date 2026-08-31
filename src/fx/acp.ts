@@ -1,6 +1,7 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import { VERSION } from "../version";
 
 export type FxSessionInfo = {
   sessionId: string;
@@ -35,7 +36,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * FX 0.0.6 includes exact terminal metadata in `command_result`, an extension
+ * FX 0.0.7 includes exact terminal metadata in `command_result`, an extension
  * field that ACP's stable schema otherwise removes. Move it to standard
  * `rawOutput` before validation while leaving any native raw output untouched.
  */
@@ -208,7 +209,7 @@ export class FxRouteSession {
       const initialized = await ctx.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: { session: { configOptions: { boolean: {} } } },
-        clientInfo: { name: "tgfx", title: "𝒕𝒈(𝒇x)", version: "0.1.0" },
+        clientInfo: { name: "tgfx", title: "𝒕𝒈(𝒇x)", version: VERSION },
       });
       const mcpServers: acp.McpServer[] = this.options.mcp ? [{
         name: "telegram",
@@ -251,7 +252,7 @@ export class FxRouteSession {
       const modes = "modes" in response ? response.modes : undefined;
       const model = selectValue(configOptions, "model") ?? this.options.model ?? "default";
       if (permissionMode === "auto") {
-        // Always select code explicitly. FX 0.0.6 can report its display mode
+        // Always select code explicitly. FX 0.0.7 can report its display mode
         // as ask while retaining the configured permission policy internally.
         const canSetMode = modes?.availableModes.some((candidate) => candidate.id === "code");
         if (canSetMode) {

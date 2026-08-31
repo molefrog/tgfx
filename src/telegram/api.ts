@@ -47,13 +47,19 @@ export function adminCapabilitiesForMember(member: ChatMember): Set<AdminCapabil
  * points tgfx at a local Bot API simulator in tests and development.
  */
 export function createTelegramApi(token: string): TelegramApi {
-  return new TelegramApi(token, process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT);
+  return new TelegramApi(
+    token,
+    process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT,
+    process.env.TGFX_INTERNAL_TELEGRAM_FILE_ROOT,
+  );
 }
 
 export class TelegramApi {
   readonly api: Api;
-  constructor(token: string, apiRoot?: string) {
+  private readonly fileRoot: string;
+  constructor(token: string, apiRoot?: string, fileRoot?: string) {
     this.api = new Api(token, apiRoot ? { apiRoot } : undefined);
+    this.fileRoot = fileRoot ?? `https://api.telegram.org/file/bot${token}`;
   }
 
   private async call<T>(operation: () => Promise<T>): Promise<T> {
@@ -63,6 +69,14 @@ export class TelegramApi {
   getMe() { return this.call(() => this.api.getMe()); }
 
   getWebhookInfo() { return this.call(() => this.api.getWebhookInfo()); }
+
+  getStickerSet(name: string) { return this.call(() => this.api.getStickerSet(name)); }
+
+  async downloadFile(fileId: string): Promise<{ filePath: string; response: Response }> {
+    const file = await this.call(() => this.api.getFile(fileId));
+    if (!file.file_path) throw new TelegramError("Telegram did not return a downloadable path for this file.");
+    return { filePath: file.file_path, response: await fetch(`${this.fileRoot}/${file.file_path}`) };
+  }
 
   async getUpdates(offset: number, timeout = 25, signal?: AbortSignal): Promise<Update[]> {
     return this.call(() => this.api.getUpdates({
@@ -162,5 +176,25 @@ export class TelegramApi {
         ...(caption ? { caption } : {}),
         ...(topicId === "0" ? {} : { message_thread_id: Number(topicId) }),
       }));
+  }
+
+  async sendSticker(
+    chatId: string,
+    sticker: string | Uint8Array,
+    topicId = "0",
+    upload = false,
+    emoji?: string,
+  ) {
+    const input = upload
+      ? typeof sticker === "string" ? new InputFile(sticker) : new InputFile(sticker, "sticker.webp")
+      : sticker as string;
+    return this.call(() => this.api.sendSticker(
+      chatId,
+      input,
+      {
+        ...(topicId === "0" ? {} : { message_thread_id: Number(topicId) }),
+        ...(emoji ? { emoji } : {}),
+      },
+    ));
   }
 }

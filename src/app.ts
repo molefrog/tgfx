@@ -1,4 +1,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
@@ -7,14 +10,19 @@ import { isFxUsagePeriod, readFxUsage, type FxUsagePeriod } from "./fx/usage";
 import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
 import { costReport, type CostReportView } from "./telegram/cost-report";
+import { TGFX_CUSTOM_ICON_SET } from "./telegram/custom-icon-set";
 import { PeerDraftLimiter } from "./telegram/draft-scheduler";
+import { mcpIconsFromStickerSet, type McpIconMap } from "./telegram/mcp-icons";
 import {
   closedModelPicker,
   failedModelSelection,
   modelPicker,
+  providerIconsFromStickerSet,
   providerPicker,
   selectedModel,
   type ModelPickerData,
+  type ModelPickerView,
+  type ProviderIconMap,
 } from "./telegram/model-picker";
 import {
   createDraftId,
@@ -36,14 +44,19 @@ import type {
   AdminCapability,
   BotIdentity,
   InboundMessage,
+  RendererConfig,
   Route,
   SenderIdentity,
   TgfxConfig,
 } from "./types";
 import { routeKey } from "./types";
-import { pruneWorkspaceFiles, saveConfig, type WorkspacePaths } from "./config";
+import { pruneBotFiles, saveConfig, tgfxHome, type WorkspacePaths } from "./config";
+import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
+  command: "clear",
+  description: "Start a fresh 𝒇x conversation",
+}, {
   command: "compact",
   description: "Compact the 𝒇x conversation",
 }, {
@@ -67,7 +80,6 @@ const COMPACTING_MESSAGE: InputRichMessageWithoutUpload = {
 const COMPACTED_MESSAGE: InputRichMessageWithoutUpload = {
   blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
 };
-
 type StopCapableUpdate = Update & {
   stopped_message_generation?: {
     chat: { id: number };
@@ -115,8 +127,9 @@ function makePrompt(
   message: InboundMessage,
   textOverride?: string,
   adminContext?: Record<string, unknown>,
+  sessionBootstrap?: boolean,
 ): acp.ContentBlock[] {
-  const envelope = toEnvelope(message) as { telegram_message: Record<string, unknown> };
+  const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
   if (adminContext) envelope.telegram_message.admin_context = adminContext;
   const blocks: acp.ContentBlock[] = [{
     type: "text",
@@ -137,9 +150,13 @@ export class TgfxApp {
   private readonly activeDraftIds = new Map<string, number>();
   private readonly draftLimiters = new Map<string, PeerDraftLimiter>();
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
+  private readonly pendingSessionBootstrap = new Set<string>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
+  private readonly stickerTemporaryDirectories = new Set<string>();
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
+  private customIconsEnabled: boolean;
+  private iconStickers?: Promise<ReadonlyArray<{ custom_emoji_id?: string }> | undefined>;
   private pollTask?: Promise<void>;
   private stopping = false;
   private stopTask?: Promise<void>;
@@ -155,10 +172,13 @@ export class TgfxApp {
     fxBinary: string;
     model?: string;
     permissionMode?: FxPermissionMode;
-    renderer?: Partial<TgfxConfig["renderer"]>;
+    mcpLaunch?: { command: string; args: string[] };
+    renderer?: Partial<RendererConfig>;
+    customIcons?: boolean;
     log?: (event: TgfxLogEvent) => void;
   }) {
     this.config = options.config;
+    this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
   }
@@ -175,9 +195,18 @@ export class TgfxApp {
   async run(): Promise<void> {
     const webhook = await this.options.telegram.getWebhookInfo();
     if (webhook.url) throw new Error("This bot has a webhook configured. Remove it before using tgfx long polling.");
+    const adoption = this.state.adoptWorkspace(this.options.paths.workspace);
+    if (adoption.changed) {
+      this.log({
+        event: "workspace.adopted",
+        message: `moved from ${adoption.previous} · sessions reset${adoption.discarded ? ` · ${adoption.discarded} queued message(s) discarded` : ""}`,
+        previous: adoption.previous,
+        discarded: adoption.discarded,
+      });
+    }
     await recoverOutbox(this.options.telegram, this.state);
     this.state.prune();
-    await pruneWorkspaceFiles(this.options.paths);
+    await pruneBotFiles(this.options.paths.files);
     await this.installInitialMenus();
     const recovery = this.state.recoverInbox();
     if (recovery.interrupted) {
@@ -197,7 +226,7 @@ export class TgfxApp {
     }
     this.log({
       event: "polling.started",
-      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.rendererConfig.mode}${this.rendererConfig.collapseTools ? " · collapsed tools" : " · visible tools"}`,
+      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.rendererConfig.mode}`,
       bot: this.options.bot.id,
       workspace: this.options.paths.workspace,
       renderer: this.rendererConfig.mode,
@@ -206,8 +235,13 @@ export class TgfxApp {
     await Promise.race([this.pollTask, this.stopped]);
   }
 
-  private get rendererConfig(): TgfxConfig["renderer"] {
-    return { ...this.config.renderer, ...this.options.renderer };
+  private get rendererConfig(): RendererConfig {
+    return {
+      mode: this.config.streaming ? "streaming" : "final",
+      expandStreamingTools: this.config.expandStreamingTools,
+      updateEveryMs: this.config.updateEveryMs,
+      ...this.options.renderer,
+    };
   }
 
   private draftLimiter(chatId: string): PeerDraftLimiter {
@@ -258,6 +292,10 @@ export class TgfxApp {
     await Promise.race([queued, Bun.sleep(3_000)]);
     await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
     await queued;
+    await Promise.allSettled([...this.stickerTemporaryDirectories].map((directory) =>
+      rm(directory, { recursive: true, force: true })
+    ));
+    this.stickerTemporaryDirectories.clear();
     const menuChats = new Set([
       ...this.config.access.chatIds,
       ...this.config.access.userIds,
@@ -376,7 +414,13 @@ export class TgfxApp {
       if (id !== undefined) {
         const mediaGroupId = String(message.provenance?.media_group_id ?? "");
         if (mediaGroupId) this.scheduleAlbum(id, message.route.key, mediaGroupId);
-        else this.enqueue(id, message.route.key);
+        else {
+          const command = commandFromText(message.text, this.options.bot.username);
+          const immediateControl = command?.addressed
+            && (command.name === "model" || command.name === "cost");
+          if (immediateControl) await this.dispatch(id);
+          else this.enqueue(id, message.route.key);
+        }
       }
       return;
     }
@@ -546,13 +590,15 @@ export class TgfxApp {
   }
 
   private async dispatchMessage(row: InboxRow, message: InboundMessage): Promise<void> {
+    const invokesAgent = shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id);
+    if (invokesAgent) await this.prepareStickerImages(message);
     this.state.registerInbound(message);
-    if (!shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id)) return;
+    if (!invokesAgent) return;
     const command = commandFromText(message.text, this.options.bot.username);
     if (command && !command.addressed) return;
 
     if (command) {
-      if (command.name !== "compact" && command.name !== "model" && command.name !== "cost") {
+      if (command.name !== "clear" && command.name !== "compact" && command.name !== "model" && command.name !== "cost") {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
@@ -572,11 +618,54 @@ export class TgfxApp {
         await this.openCostReport(message);
         return;
       }
+      if (command.name === "clear") {
+        await this.runClear(message.route);
+        return;
+      }
       await this.runCompact(row, message);
       return;
     }
 
-    await this.runTurn(row, message, makePrompt(message, undefined, await this.adminContext(message.route)));
+    const sessionBootstrap = this.sessionBootstrapPending(message.route);
+    await this.runTurn(
+      row,
+      message,
+      makePrompt(message, undefined, await this.adminContext(message.route), sessionBootstrap),
+      { sessionBootstrap },
+    );
+  }
+
+  private async prepareStickerImages(message: InboundMessage): Promise<void> {
+    const stickers = message.attachments.filter((attachment) => attachment.kind === "sticker");
+    if (!stickers.length) return;
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-stickers-"));
+    this.stickerTemporaryDirectories.add(temporaryRoot);
+    try {
+      await Promise.all(stickers.map(async (sticker) => {
+        const file = await this.options.telegram.downloadFile(sticker.fileId);
+        const fallbackExtension = sticker.mimeType === "application/x-tgsticker"
+          ? ".tgs"
+          : sticker.mimeType === "video/webm" ? ".webm" : ".webp";
+        const extension = extname(file.filePath) || fallbackExtension;
+        const path = await safeDownloadPath(
+          temporaryRoot,
+          message.contextRef,
+          `sticker_${sticker.ref}${extension}`,
+        );
+        try {
+          const existing = await stat(path);
+          if (!existing.isFile()) throw new Error("The temporary sticker image is not a regular file.");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await writeResponseLimited(file.response, path, 20 * 1024 * 1024);
+        }
+        sticker.localPath = path;
+      }));
+    } catch (error) {
+      this.stickerTemporaryDirectories.delete(temporaryRoot);
+      await rm(temporaryRoot, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   private async openModelPicker(message: InboundMessage): Promise<void> {
@@ -602,18 +691,68 @@ export class TgfxApp {
       expiresAt,
     });
     try {
-      const view = providerPicker(data);
-      const sent = await this.options.telegram.sendText(
-        message.route.chatId,
-        view.text,
-        message.route.topicId,
-        { reply_markup: view.replyMarkup },
-      );
+      let view = providerPicker(data, 0, await this.modelProviderIcons(true));
+      let sent;
+      try {
+        sent = await this.options.telegram.sendText(
+          message.route.chatId,
+          view.text,
+          message.route.topicId,
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
+        );
+      } catch (error) {
+        if (!this.hasCustomModelIcons(view)) throw error;
+        this.disableCustomModelIcons(error);
+        view = providerPicker(data);
+        sent = await this.options.telegram.sendText(
+          message.route.chatId,
+          view.text,
+          message.route.topicId,
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
+        );
+      }
       this.registerBotMessage(message.route, String(sent.message_id));
     } catch (error) {
       this.state.expireInteraction(id);
       throw error;
     }
+  }
+
+  private async modelProviderIcons(refresh = false): Promise<ProviderIconMap> {
+    const stickers = await this.customIconStickers(refresh);
+    return stickers ? providerIconsFromStickerSet(stickers) : {};
+  }
+
+  private async mcpToolIcons(): Promise<McpIconMap> {
+    const stickers = await this.customIconStickers();
+    return stickers ? mcpIconsFromStickerSet(stickers) : {};
+  }
+
+  private async customIconStickers(
+    refresh = false,
+  ): Promise<ReadonlyArray<{ custom_emoji_id?: string }> | undefined> {
+    if (!this.customIconsEnabled) return undefined;
+    if (refresh) this.iconStickers = undefined;
+    this.iconStickers ??= Promise.resolve()
+      .then(() => this.options.telegram.getStickerSet(TGFX_CUSTOM_ICON_SET.name))
+      .then((set) => set.stickers)
+      .catch((error) => {
+        this.log(`Could not load ${TGFX_CUSTOM_ICON_SET.name}; using plain rendering: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
+        return undefined;
+      });
+    return this.iconStickers;
+  }
+
+  private hasCustomModelIcons(view: ModelPickerView): boolean {
+    return view.replyMarkup.inline_keyboard.some((row) =>
+      row.some((button) => button.icon_custom_emoji_id !== undefined)
+    );
+  }
+
+  private disableCustomModelIcons(error: unknown): void {
+    this.customIconsEnabled = false;
+    this.iconStickers = undefined;
+    this.log(`Telegram rejected model picker custom icons; using plain buttons: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
   }
 
   private async costView(period: FxUsagePeriod): Promise<CostReportView> {
@@ -685,7 +824,7 @@ export class TgfxApp {
     this.config.access.chatIds = replaceId(this.config.access.chatIds);
     if (this.config.approvals.chatId === oldChatId) this.config.approvals.chatId = newChatId;
     try {
-      await saveConfig(this.options.paths, this.config);
+      await saveConfig(this.options.paths, this.config, { preserveInheritedSettings: true });
     } catch (error) {
       this.log({
         event: "config.invalid",
@@ -762,9 +901,10 @@ export class TgfxApp {
       },
     };
     this.state.registerInbound(message);
-    const envelope = toEnvelope(message) as { telegram_message: Record<string, unknown> };
+    const sessionBootstrap = this.sessionBootstrapPending(message.route);
+    const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
     envelope.telegram_message.poll = message.provenance;
-    await this.runTurn(row, message, [{ type: "text", text: JSON.stringify(envelope, null, 2) }]);
+    await this.runTurn(row, message, [{ type: "text", text: JSON.stringify(envelope, null, 2) }], { sessionBootstrap });
   }
 
   private async dispatchCallback(row: InboxRow, update: Update, route: Route): Promise<void> {
@@ -831,14 +971,16 @@ export class TgfxApp {
           route.chatId,
           callback.message.message_id,
           view.text,
-          { reply_markup: view.replyMarkup },
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
         ).catch(() => undefined);
         return;
       }
       let view;
       const [action, first, second] = value.split(".", 3);
-      if (action === "p") view = providerPicker(data, Number(first));
-      else if (action === "v") view = modelPicker(data, Number(first), Number(second));
+      if (action === "p") view = providerPicker(data, Number(first), await this.modelProviderIcons());
+      else if (action === "v") {
+        view = modelPicker(data, Number(first), Number(second), await this.modelProviderIcons());
+      }
       else if (action === "s") {
         const model = data.options[Number(first)];
         if (!model || !this.state.resolveInteraction(id, { model: model.value })) {
@@ -871,7 +1013,7 @@ export class TgfxApp {
           route.chatId,
           callback.message.message_id,
           view.text,
-          { reply_markup: view.replyMarkup },
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
         );
         return;
       }
@@ -880,12 +1022,27 @@ export class TgfxApp {
         return;
       }
       await this.options.telegram.answerCallback(callback.id);
-      await this.options.telegram.editText(
-        route.chatId,
-        callback.message.message_id,
-        view.text,
-        { reply_markup: view.replyMarkup },
-      );
+      try {
+        await this.options.telegram.editText(
+          route.chatId,
+          callback.message.message_id,
+          view.text,
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
+        );
+      } catch (error) {
+        if (!this.hasCustomModelIcons(view)) throw error;
+        this.disableCustomModelIcons(error);
+        const plain = action === "p"
+          ? providerPicker(data, Number(first))
+          : action === "v" ? modelPicker(data, Number(first), Number(second)) : undefined;
+        if (!plain) throw error;
+        await this.options.telegram.editText(
+          route.chatId,
+          callback.message.message_id,
+          plain.text,
+          { parse_mode: "HTML", reply_markup: plain.replyMarkup },
+        );
+      }
       return;
     }
     if (kind === "mcp" && id && (value === "approve" || value === "deny")) {
@@ -968,12 +1125,13 @@ export class TgfxApp {
         raw: update,
       };
       this.state.registerInbound(message);
-      const envelope = toEnvelope(message) as { telegram_message: Record<string, unknown> };
+      const sessionBootstrap = this.sessionBootstrapPending(message.route);
+      const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
       envelope.telegram_message.interaction = { ref: `interaction_${id}`, choice_index: index, label };
       await this.runTurn(row, message, [
         { type: "text", text: JSON.stringify(envelope, null, 2) },
         { type: "text", text: message.text! },
-      ]);
+      ], { sessionBootstrap });
       return;
     }
     await this.options.telegram.answerCallback(callback.id, "This action is no longer active");
@@ -987,6 +1145,21 @@ export class TgfxApp {
       chatId: route.chatId,
       topicId: route.topicId,
       messageId,
+    });
+  }
+
+  private async runClear(route: Route): Promise<void> {
+    const previous = this.sessions.get(route.key);
+    this.sessions.delete(route.key);
+    this.state.resetRoute(route.key);
+    if (previous) await previous.dispose({ closeSession: true });
+    await this.session(route);
+    await this.options.telegram.sendText(route.chatId, "✓ Started a fresh conversation", route.topicId);
+    this.log({
+      event: "session.cleared",
+      message: `${this.label(route.chatId, route.topicId)} · fresh conversation started`,
+      chat: route.chatId,
+      topic: route.topicId,
     });
   }
 
@@ -1078,11 +1251,25 @@ export class TgfxApp {
     }
   }
 
-  private async runTurn(row: InboxRow, message: InboundMessage, blocks: acp.ContentBlock[]): Promise<void> {
+  // True when the next prompt will be the first turn of a brand-new fx session,
+  // so its envelope should carry the session_bootstrap directive. Peek only —
+  // runTurn clears the flag once the directive-bearing prompt is on its way.
+  private sessionBootstrapPending(route: Route): boolean {
+    return this.pendingSessionBootstrap.has(route.key)
+      || (!this.sessions.has(route.key) && !this.state.route(route.key)?.session_id);
+  }
+
+  private async runTurn(
+    row: InboxRow,
+    message: InboundMessage,
+    blocks: acp.ContentBlock[],
+    options?: { sessionBootstrap?: boolean },
+  ): Promise<void> {
     const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
     const session = await this.session(message.route);
-    const projector = new AcpProjector();
+    if (options?.sessionBootstrap) this.pendingSessionBootstrap.delete(message.route.key);
+    const projector = new AcpProjector(await this.mcpToolIcons());
     const controller = new AbortController();
     const renderer = new TurnRenderer(
       this.options.telegram,
@@ -1156,7 +1343,11 @@ export class TgfxApp {
     const existing = this.sessions.get(route.key);
     if (existing) return existing;
     const row = this.state.ensureRoute(route);
-    const entrypoint = fileURLToPath(new URL("./index.ts", import.meta.url));
+    const hadNoSession = !row.session_id;
+    const mcpLaunch = this.options.mcpLaunch ?? {
+      command: process.execPath,
+      args: [fileURLToPath(new URL("./index.ts", import.meta.url)), "mcp"],
+    };
     const session = new FxRouteSession({
       workspace: this.options.paths.workspace,
       binary: this.options.fxBinary,
@@ -1164,13 +1355,14 @@ export class TgfxApp {
       permissionMode: this.options.permissionMode,
       previousSessionId: row.session_id ?? undefined,
       mcp: {
-        command: process.execPath,
-        args: [entrypoint, "mcp"],
+        command: mcpLaunch.command,
+        args: mcpLaunch.args,
         env: {
           TGFX_MCP_TOKEN: this.options.token,
           TGFX_MCP_BOT_ID: this.options.bot.id,
           TGFX_MCP_ROUTE_KEY: route.key,
           TGFX_MCP_WORKSPACE: this.options.paths.workspace,
+          TGFX_MCP_HOME: tgfxHome(),
           TGFX_MCP_DATABASE: this.options.paths.database,
           TGFX_MCP_FILES: this.options.paths.files,
           TGFX_MCP_APPROVALS_CHAT: this.config.approvals.chatId,
@@ -1197,6 +1389,7 @@ export class TgfxApp {
     try {
       const info = await session.start();
       this.state.setRouteSession(route.key, info.sessionId, info.replacedPrevious);
+      if (hadNoSession || info.replacedPrevious) this.pendingSessionBootstrap.add(route.key);
       if (info.replacedPrevious) {
         await this.options.telegram.sendText(
           route.chatId,

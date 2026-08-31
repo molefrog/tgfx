@@ -1,5 +1,7 @@
 import { redactSecrets } from "../secrets";
 
+const MINIMUM_FX_VERSION = [0, 0, 7] as const;
+
 export type FxDoctorReport = {
   fail_count: number;
   warn_count: number;
@@ -8,6 +10,18 @@ export type FxDoctorReport = {
   workspace: string;
   checks: Array<{ name: string; status: "ok" | "warn" | "fail"; detail: string }>;
 };
+
+export function assertSupportedFxVersion(version: string): void {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u.exec(version.trim());
+  if (!match) throw new Error(`could not parse fx version “${redactSecrets(version)}”`);
+  const current = match.slice(1, 4).map(Number);
+  for (let index = 0; index < MINIMUM_FX_VERSION.length; index += 1) {
+    if (current[index]! > MINIMUM_FX_VERSION[index]!) return;
+    if (current[index]! < MINIMUM_FX_VERSION[index]!) {
+      throw new Error(`fx 0.0.7 or newer is required (found ${redactSecrets(version)})`);
+    }
+  }
+}
 
 export function parseFxDoctor(output: string): FxDoctorReport {
   let value: unknown;
@@ -57,6 +71,7 @@ export async function inspectFx(binary: string, workspace: string): Promise<{
     run(binary, ["--version"], workspace),
     run(binary, ["doctor", "--json"], workspace),
   ]);
+  assertSupportedFxVersion(version);
   const report = parseFxDoctor(doctor);
   if (report.fail_count > 0) {
     const failures = report.checks

@@ -1,5 +1,5 @@
-import { version } from "../../package.json";
 import { parseArgs as parseNodeArgs } from "node:util";
+import { VERSION } from "../version";
 
 /**
  * Terminal voice for the tgfx CLI.
@@ -10,7 +10,7 @@ import { parseArgs as parseNodeArgs } from "node:util";
  * clean and lets the MCP stdio subcommand share a binary with the terminal UI.
  */
 
-export const VERSION: string = version;
+export { VERSION };
 
 function colorEnabled(): boolean {
   if (process.env.NO_COLOR) return false;
@@ -116,7 +116,7 @@ export function helpText(): string {
     line("tgfx auth [--remove]", "add, rotate, or remove the bot token"),
     line("tgfx doctor", "deep diagnostics: token, chats, rights, fx"),
     "",
-    `  ${dim("run flags:")}  --model <id> · --yolo · --streaming/--no-streaming · --collapse-tools/--no-collapse-tools`,
+    `  ${dim("run flags:")}  --model <id> · --yolo · --streaming/--no-streaming · --no-icons`,
     `  ${dim("global:")}     --json · --no-color · --debug · --help · --version`,
     "",
   ].join("\n");

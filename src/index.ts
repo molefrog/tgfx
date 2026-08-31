@@ -2,13 +2,14 @@
 import { confirm, isCancel, note, password, select, spinner, text } from "@clack/prompts";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { TgfxApp, type TgfxLogEvent } from "./app";
 import {
-  findBotIndex,
+  botPaths,
   loadConfig,
+  projectPaths,
   saveConfig,
-  updateBotIndex,
-  workspacePaths,
+  type ProjectPaths,
   type WorkspacePaths,
 } from "./config";
 import { acquireRuntimeLock } from "./lock";
@@ -56,7 +57,7 @@ function requireInteractive(purpose: string): void {
   }
 }
 
-async function requireConfig(paths: WorkspacePaths): Promise<TgfxConfig> {
+async function requireConfig(paths: ProjectPaths): Promise<TgfxConfig> {
   const config = await loadConfig(paths);
   if (!config) throw new CliError("this folder isn't set up yet", "run tgfx once to connect a bot");
   return config;
@@ -147,7 +148,7 @@ async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promis
   throw new CliError("no matching /start message arrived within two minutes", "run tgfx again to retry");
 }
 
-async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: TelegramApi): Promise<TgfxConfig> {
+async function createConfig(paths: ProjectPaths, bot: BotIdentity, telegram: TelegramApi): Promise<TgfxConfig> {
   requireInteractive("first-run setup");
   const setup = await select({
     message: "Who may use this workspace bot?",
@@ -217,66 +218,35 @@ async function createConfig(paths: WorkspacePaths, bot: BotIdentity, telegram: T
       chatIds: principalKind === "chat" ? [identifier] : [],
     },
     approvals: { chatId: approvalsChatId, topicId: "0" },
-    renderer: { mode: "streaming", collapseTools: true, expandStreamingTools: false, updateEveryMs: 250 },
+    streaming: true,
+    expandStreamingTools: true,
+    updateEveryMs: 250,
+    customIcons: true,
   };
   await telegram.sendText(
     config.approvals.chatId,
     `tgfx connected to ${paths.workspace}. This chat receives approval cards and delivery-failure notices.`,
   );
-  await saveConfig(paths, config);
+  await saveConfig(paths, config, { preserveInheritedSettings: true });
   if (pairedUpdateId !== undefined) {
-    const state = new StateStore(paths.database);
+    const state = new StateStore(botPaths(bot.id).database);
     try {
       state.ensurePollState(bot.id);
       state.advanceCursor(bot.id, pairedUpdateId + 1);
     } finally { state.close(); }
   }
-  return config;
+  return (await loadConfig(paths))!;
 }
 
-async function guardWorkspaceHandoff(
-  paths: WorkspacePaths,
-  bot: BotIdentity,
-  options: { json?: boolean } = {},
-): Promise<void> {
-  const previous = await findBotIndex(bot.id);
-  if (!previous || previous.workspace === paths.workspace) return;
-  const previousPaths = workspacePaths(previous.workspace);
-  if (!existsSync(previousPaths.database)) return;
-  const state = new StateStore(previousPaths.database);
-  try {
-    const unfinished = state.unfinished();
-    if (!unfinished.total) return;
-    const detail = `${unfinished.inbox} inbox · ${unfinished.outbox} outbox · ${unfinished.effects} effects · ${unfinished.approvals} approvals`;
-    if (options.json || !process.stdin.isTTY || !process.stderr.isTTY) {
-      throw new CliError(
-        `bot ${bot.id} has unfinished work in ${previous.workspace} (${detail})`,
-        "resume tgfx there, or run tgfx here interactively to abandon it",
-      );
-    }
-    note(`${previous.workspace}\n${detail}`, "Previous workspace has unfinished work", STDERR);
-    const abandon = await confirm({
-      message: "Abandon that recovery work and move this bot to the current folder?",
-      initialValue: false,
-      ...STDERR,
-    });
-    cancelled(abandon);
-    if (!abandon) {
-      throw new CliError(`resume tgfx in ${previous.workspace} before moving this bot`);
-    }
-    state.abandonUnfinished(`Explicitly abandoned when bot moved to ${paths.workspace}`);
-  } finally { state.close(); }
-}
-
-async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}): Promise<{
+async function runtime(project: ProjectPaths, options: { json?: boolean } = {}): Promise<{
   paths: WorkspacePaths; config: TgfxConfig; token: string; telegram: TelegramApi; bot: BotIdentity;
   fxBinary: string; release: () => Promise<void>;
 }> {
   if (!options.json) banner();
   const fxBinary = process.env.FX_BINARY ?? "fx";
-  const fx = await inspectFx(fxBinary, paths.workspace);
+  const fx = await inspectFx(fxBinary, project.workspace);
   if (!options.json) ok(`fx ${fx.version} · ${fx.report.model} · ${fx.report.auth}`);
-  let config = await loadConfig(paths);
+  let config = await loadConfig(project);
   let token = tokenFromEnvironment();
   let prompted = false;
   if (!token && config) token = await getBotToken(config.activeBotId);
@@ -294,10 +264,9 @@ async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}):
       "run tgfx auth to switch bots",
     );
   }
-  const release = await acquireRuntimeLock(paths, bot.id);
+  const release = await acquireRuntimeLock(bot.id, project.workspace);
   try {
-    await guardWorkspaceHandoff(paths, bot, options);
-    if (!config) config = await createConfig(paths, bot, telegram);
+    if (!config) config = await createConfig(project, bot, telegram);
     const webhook = await telegram.getWebhookInfo();
     if (webhook.url) {
       throw new CliError(
@@ -306,8 +275,7 @@ async function runtime(paths: WorkspacePaths, options: { json?: boolean } = {}):
       );
     }
     if (prompted) await setBotToken(bot.id, token);
-    await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
-    return { paths, config, token, telegram, bot, fxBinary, release };
+    return { paths: { ...project, ...botPaths(bot.id) }, config, token, telegram, bot, fxBinary, release };
   } catch (error) {
     await release();
     throw error;
@@ -328,8 +296,7 @@ async function runCommand(tokens: string[]): Promise<void> {
       yolo: "boolean",
       streaming: "boolean",
       "no-streaming": "boolean",
-      "collapse-tools": "boolean",
-      "no-collapse-tools": "boolean",
+      "no-icons": "boolean",
       json: "boolean",
       "no-color": "boolean",
       debug: "boolean",
@@ -340,13 +307,9 @@ async function runCommand(tokens: string[]): Promise<void> {
   if (flags.help) { process.stderr.write(helpText()); return; }
   if (flags.version) { console.log(VERSION); return; }
   if (flags.streaming && flags["no-streaming"]) throw new CliError("choose --streaming or --no-streaming, not both");
-  if (flags["collapse-tools"] && flags["no-collapse-tools"]) {
-    throw new CliError("choose --collapse-tools or --no-collapse-tools, not both");
-  }
   const streaming = flags.streaming ? true : flags["no-streaming"] ? false : undefined;
-  const collapseTools = flags["collapse-tools"] ? true : flags["no-collapse-tools"] ? false : undefined;
   const json = Boolean(flags.json);
-  const resolved = await runtime(workspacePaths(), { json });
+  const resolved = await runtime(projectPaths(), { json });
   const { release, ...appRuntime } = resolved;
   const log = createLogger(json);
   if (flags.yolo) {
@@ -361,11 +324,14 @@ async function runCommand(tokens: string[]): Promise<void> {
   try {
     app = new TgfxApp({
       ...appRuntime,
+      mcpLaunch: Bun.isStandaloneExecutable
+        ? { command: process.execPath, args: ["mcp"] }
+        : { command: process.execPath, args: [fileURLToPath(import.meta.url), "mcp"] },
       ...(typeof flags.model === "string" ? { model: flags.model } : {}),
+      ...(flags["no-icons"] ? { customIcons: false } : {}),
       permissionMode: flags.yolo ? "yolo" : "auto",
       renderer: {
         ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),
-        ...(collapseTools === undefined ? {} : { collapseTools }),
       },
       log,
     });
@@ -402,7 +368,7 @@ async function allowCommand(tokens: string[]): Promise<void> {
     throw new CliError("give at least one Telegram user or chat ID", "example: tgfx allow 6143594");
   }
   const ids = positionals.map(canonicalId);
-  const paths = workspacePaths();
+  const paths = projectPaths();
   const config = await requireConfig(paths);
   for (const id of ids) {
     const kind = flags.chat || Number(id) < 0 ? "chat" : "user";
@@ -414,7 +380,7 @@ async function allowCommand(tokens: string[]): Promise<void> {
     list.push(id);
     ok(`allowed ${kind} ${id}${kind === "chat" && Number(id) < 0 ? dim(" · everyone in this chat can invoke fx") : ""}`);
   }
-  await saveConfig(paths, config);
+  await saveConfig(paths, config, { preserveInheritedSettings: true });
   process.stderr.write(`  ${dim("saved · restart tgfx to apply")}\n`);
   if (flags.json) console.log(JSON.stringify(config.access, null, 2));
 }
@@ -428,7 +394,7 @@ async function denyCommand(tokens: string[]): Promise<void> {
     throw new CliError("give at least one Telegram user or chat ID", "example: tgfx deny 6143594");
   }
   const ids = positionals.map(canonicalId);
-  const paths = workspacePaths();
+  const paths = projectPaths();
   const config = await requireConfig(paths);
   const notices: Array<{ warning?: boolean; message: string }> = [];
   let changed = false;
@@ -448,7 +414,7 @@ async function denyCommand(tokens: string[]): Promise<void> {
   if (config.access.userIds.length + config.access.chatIds.length === 0) {
     throw new CliError("the allowlist cannot be empty", "allow another user or chat first, then deny this one");
   }
-  if (changed) await saveConfig(paths, config);
+  if (changed) await saveConfig(paths, config, { preserveInheritedSettings: true });
   for (const notice of notices) (notice.warning ? warn : ok)(notice.message);
   const remaining = config.access.userIds.length + config.access.chatIds.length;
   process.stderr.write(
@@ -462,7 +428,7 @@ async function approvalsCommand(tokens: string[]): Promise<void> {
     flags: { json: "boolean" },
     positionals: true,
   });
-  const paths = workspacePaths();
+  const paths = projectPaths();
   const config = await requireConfig(paths);
   if (!positionals.length) {
     if (flags.json) { console.log(JSON.stringify(config.approvals, null, 2)); return; }
@@ -475,7 +441,7 @@ async function approvalsCommand(tokens: string[]): Promise<void> {
   const token = await requireToken(config);
   await createTelegramApi(token).api.getChat(target.chatId);
   config.approvals = { chatId: target.chatId, topicId: target.topicId };
-  await saveConfig(paths, config);
+  await saveConfig(paths, config, { preserveInheritedSettings: true });
   ok(`approvals go to ${target.chatId}${target.topicId === "0" ? "" : `/${target.topicId}`} · restart tgfx to apply`);
   if (flags.json) console.log(JSON.stringify(config.approvals, null, 2));
 }
@@ -493,9 +459,10 @@ function since(iso: string): string {
 
 async function accessCommand(tokens: string[]): Promise<void> {
   const { flags } = parseArgs(tokens, { flags: { json: "boolean" } });
-  const paths = workspacePaths();
+  const paths = projectPaths();
   const config = await requireConfig(paths);
-  const state = existsSync(paths.database) ? new StateStore(paths.database) : undefined;
+  const database = botPaths(config.activeBotId).database;
+  const state = existsSync(database) ? new StateStore(database) : undefined;
   try {
     const principals = [
       ...config.access.userIds.map((id) => ({ id, kind: "user" as const })),
@@ -508,7 +475,12 @@ async function accessCommand(tokens: string[]): Promise<void> {
         workspace: paths.workspace,
         access: principals,
         approvals: config.approvals,
-        renderer: config.renderer,
+        settings: {
+          streaming: config.streaming,
+          expandStreamingTools: config.expandStreamingTools,
+          updateEveryMs: config.updateEveryMs,
+          customIcons: config.customIcons,
+        },
         sessions: routes.map((route) => ({
           chat: route.chat_id,
           topic: route.topic_id,
@@ -555,7 +527,7 @@ async function accessCommand(tokens: string[]): Promise<void> {
 
 async function authCommand(tokens: string[]): Promise<void> {
   const { flags } = parseArgs(tokens, { flags: { remove: "boolean" } });
-  const paths = workspacePaths();
+  const paths = projectPaths();
   banner();
   if (flags.remove) {
     const config = await requireConfig(paths);
@@ -569,12 +541,9 @@ async function authCommand(tokens: string[]): Promise<void> {
   const environmentToken = tokenFromEnvironment();
   const token = environmentToken ?? await askForToken();
   const { bot, telegram } = await validateToken(token);
-  const release = await acquireRuntimeLock(paths, bot.id);
+  const release = await acquireRuntimeLock(bot.id, paths.workspace);
   try {
     let config = await loadConfig(paths);
-    // The switch is confirmed before anything destructive: abandoning a
-    // previous workspace's recovery work must not happen for an operation the
-    // operator then cancels.
     const previous = config?.activeBotId;
     if (config && previous !== bot.id) {
       requireInteractive("switching bots");
@@ -586,7 +555,6 @@ async function authCommand(tokens: string[]): Promise<void> {
       cancelled(replace);
       if (!replace) throw new CliError("bot switch cancelled; the existing workspace configuration was not changed");
     }
-    await guardWorkspaceHandoff(paths, bot);
     const webhook = await telegram.getWebhookInfo();
     if (webhook.url) {
       throw new CliError(
@@ -597,14 +565,13 @@ async function authCommand(tokens: string[]): Promise<void> {
     if (!config) config = await createConfig(paths, bot, telegram);
     else {
       config = { ...config, activeBotId: bot.id };
-      await saveConfig(paths, config);
+      await saveConfig(paths, config, { preserveInheritedSettings: true });
       if (previous !== bot.id) {
         process.stderr.write(`  ${dim(`switched from bot ${previous} · route history stays partitioned by bot ID`)}\n`);
       }
     }
     if (environmentToken) warn("using TELEGRAM_BOT_TOKEN from the environment · not saved to the credential store");
     else await setBotToken(bot.id, token);
-    await updateBotIndex({ botId: bot.id, workspace: paths.workspace });
     ok(`connected @${bot.username ?? bot.id}`);
   } finally {
     await release();
@@ -613,7 +580,7 @@ async function authCommand(tokens: string[]): Promise<void> {
 
 async function doctorCommand(tokens: string[]): Promise<void> {
   const { flags } = parseArgs(tokens, { flags: { json: "boolean" } });
-  const paths = workspacePaths();
+  const paths = projectPaths();
   const checks: Array<{ check: string; ok: boolean; detail: string }> = [];
   let config: TgfxConfig | undefined;
   try {
@@ -693,10 +660,11 @@ async function doctorCommand(tokens: string[]): Promise<void> {
     checks.push({ check: "fx", ok: false, detail: error instanceof Error ? error.message : String(error) });
   }
   if (config) {
+    const database = botPaths(config.activeBotId).database;
     try {
-      const state = new StateStore(paths.database);
+      const state = new StateStore(database);
       state.close();
-      checks.push({ check: "SQLite", ok: true, detail: paths.database });
+      checks.push({ check: "SQLite", ok: true, detail: database });
     } catch (error) {
       checks.push({ check: "SQLite", ok: false, detail: error instanceof Error ? error.message : String(error) });
     }

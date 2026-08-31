@@ -18,6 +18,10 @@ function workspace(): string {
   return root;
 }
 
+function database(root: string): string {
+  return join(root, "tgfx-home", "state", "100.db");
+}
+
 function inbound(input: {
   updateId: number; messageId: string; messageRef: string; text?: string;
   senderRef?: string; displayName?: string;
@@ -49,8 +53,9 @@ async function rpc(root: string, requests: Array<Record<string, unknown>>): Prom
       TGFX_MCP_BOT_ID: "100",
       TGFX_MCP_ROUTE_KEY: ROUTE.key,
       TGFX_MCP_WORKSPACE: root,
-      TGFX_MCP_DATABASE: join(root, ".tgfx", "state.sqlite"),
-      TGFX_MCP_FILES: join(root, ".tgfx", "files"),
+      TGFX_MCP_HOME: join(root, "tgfx-home"),
+      TGFX_MCP_DATABASE: database(root),
+      TGFX_MCP_FILES: join(root, "tgfx-home", "files", "100"),
       TGFX_MCP_APPROVALS_CHAT: "42",
       TGFX_MCP_APPROVALS_TOPIC: "0",
       TGFX_MCP_ALLOWED_CHATS: JSON.stringify([]),
@@ -101,7 +106,7 @@ function chatRecent(response: any): { version: number; count: number; messages: 
 describe("Telegram MCP chat resources", () => {
   test("lists and serves the recent-messages resource with bounded excerpts", async () => {
     const root = workspace();
-    const state = new StateStore(join(root, ".tgfx", "state.sqlite"));
+    const state = new StateStore(database(root));
     const longText = "a".repeat(MESSAGE_EXCERPT_LIMIT + 50);
     state.registerInbound(inbound({ updateId: 1, messageId: "1800", messageRef: "msg_user1", text: "Can you review the failing tests?" }));
     state.registerBotMessage({
@@ -116,8 +121,8 @@ describe("Telegram MCP chat resources", () => {
       { id: 3, method: "resources/read", params: { uri: "telegram://chat/recent" } },
     ]);
     const listed = responses.get(2)!.result.resources;
-    expect(listed.map((resource: any) => resource.uri)).toEqual(["telegram://chat/recent"]);
-    expect(listed[0].name).toBe("recent_messages");
+    const recentResource = listed.find((resource: any) => resource.uri === "telegram://chat/recent");
+    expect(recentResource?.name).toBe("recent_messages");
 
     const recent = chatRecent(responses.get(3)!);
     expect(recent.version).toBe(1);
@@ -147,7 +152,7 @@ describe("Telegram MCP chat resources", () => {
 
   test("caps the listing at 25 newest messages, oldest first, and omits missing text", async () => {
     const root = workspace();
-    const state = new StateStore(join(root, ".tgfx", "state.sqlite"));
+    const state = new StateStore(database(root));
     for (let index = 1; index <= 30; index++) {
       state.registerBotMessage({
         ref: `msg_${index}`, botId: "100", routeKey: ROUTE.key, chatId: "42", topicId: "0",

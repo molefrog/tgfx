@@ -5,9 +5,12 @@ node_modules/
 *.log
 logs/
 .tgfx/
+.fx/
 *.tldraw
 *.tldr
 prototypes/
 .DS_Store
 coverage/
+dist/
 *.tgz
+/telegram-provider-emoji/

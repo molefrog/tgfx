@@ -67,6 +67,7 @@ export class TurnRenderer {
   readonly draftId = createDraftId();
   private readonly draftAbort = new AbortController();
   private readonly drafts: AdaptiveDraftScheduler<InputRichMessageWithoutUpload>;
+  private readonly stopOnTurnAbort = () => { void this.abort(); };
 
   constructor(
     private readonly api: TelegramApi,
@@ -92,13 +93,14 @@ export class TurnRenderer {
           : 1_000;
       },
     });
+    if (this.signal?.aborted) this.stopOnTurnAbort();
+    else this.signal?.addEventListener("abort", this.stopOnTurnAbort, { once: true });
   }
 
   start(): void {
     if (!this.streaming || this.stopped) return;
     this.drafts.start(this.projector.rich({
       final: false,
-      collapseTools: this.config.collapseTools,
       expandStreamingTools: this.config.expandStreamingTools,
     }));
   }
@@ -111,12 +113,12 @@ export class TurnRenderer {
     this.visibleOutput = true;
     this.drafts.offer(this.projector.rich({
       final: false,
-      collapseTools: this.config.collapseTools,
       expandStreamingTools: this.config.expandStreamingTools,
     }), priority);
   }
 
   async abort(): Promise<void> {
+    this.signal?.removeEventListener("abort", this.stopOnTurnAbort);
     this.stopped = true;
     this.draftAbort.abort(new Error("draft stopped"));
     await this.drafts.stop();
@@ -130,16 +132,12 @@ export class TurnRenderer {
     this.stopped = true;
     this.draftAbort.abort(new Error("draft finalized"));
     await this.drafts.stop();
-    // Groups are final-only in v0.1, even when the workspace default streams
-    // private chats. Tool timelines belong only to an actually streamed turn.
-    const includeTools = this.streaming;
     const rich = this.projector.rich({
       final: true,
-      collapseTools: this.config.collapseTools,
       expandStreamingTools: this.config.expandStreamingTools,
-      includeTools,
+      includeTools: true,
     });
-    const plain = this.projector.plainFinal(includeTools);
+    const plain = this.projector.plainFinal(true);
     const outboxId = this.state.createOutbox({
       effectKey: input.effectKey,
       botId: input.botId,

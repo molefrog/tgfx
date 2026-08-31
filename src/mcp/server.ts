@@ -1,18 +1,22 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { realpath, stat } from "node:fs/promises";
-import { basename, resolve, sep } from "node:path";
+import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, extname, join, resolve, sep } from "node:path";
 import * as z from "zod/v4";
 import { StateStore } from "../state";
 import { adminCapabilitiesForMember, TelegramApi } from "../telegram/api";
 import type { AdminCapability, AttachmentRef } from "../types";
+import { VERSION } from "../version";
 import { safeDownloadPath, safeName, writeResponseLimited } from "./files";
+import { TELEGRAM_GUIDELINES_TEXT, TELEGRAM_GUIDELINES_URI } from "./guidelines";
 
 type McpEnvironment = {
   token: string;
   botId: string;
   routeKey: string;
   workspace: string;
+  home: string;
   database: string;
   files: string;
   approvalsChat: string;
@@ -51,6 +55,7 @@ function environment(): McpEnvironment {
     botId,
     routeKey,
     workspace: resolve(required("TGFX_MCP_WORKSPACE")),
+    home: resolve(required("TGFX_MCP_HOME")),
     database: resolve(required("TGFX_MCP_DATABASE")),
     files: resolve(required("TGFX_MCP_FILES")),
     approvalsChat: decimalId.parse(required("TGFX_MCP_APPROVALS_CHAT")),
@@ -79,11 +84,56 @@ function effectKey(routeKey: string, contextRef: string, tool: string, args: unk
     .digest("hex");
 }
 
+async function stickerWebp(path: string): Promise<Uint8Array> {
+  const maxBytes = 512 * 1024;
+  for (const quality of [90, 80, 70, 60, 50, 40]) {
+    const bytes = await Bun.file(path)
+      .image()
+      .resize(512, 512, { fit: "inside", withoutEnlargement: false })
+      .webp({ quality })
+      .bytes();
+    if (bytes.byteLength <= maxBytes) return bytes;
+  }
+  throw new Error("The custom image could not be compressed below Telegram's 512 KB static sticker limit.");
+}
+
 export async function runTelegramMcpServer(): Promise<void> {
   const env = environment();
   const workspaceRoot = await realpath(env.workspace);
+  await mkdir(env.files, { recursive: true, mode: 0o700 });
+  const filesRoot = await realpath(env.files);
+  const homeRoot = await realpath(env.home).catch(() => env.home);
+  const projectRuntimeRoot = resolve(workspaceRoot, ".fx", "telegram");
+  const inside = (path: string, root: string) => path === root || path.startsWith(`${root}${sep}`);
+  // Sendable files come from the workspace or from this bot's downloads
+  // directory under the tgfx home; everything else under the home (state
+  // databases, locks, configs) and the project override directory is private.
+  const sendablePath = async (raw: string): Promise<string> => {
+    const resolvedPath = await realpath(resolve(workspaceRoot, raw));
+    if (inside(resolvedPath, filesRoot)) return resolvedPath;
+    if (inside(resolvedPath, homeRoot) || inside(resolvedPath, projectRuntimeRoot)) {
+      throw new Error("Private tgfx runtime files cannot be sent.");
+    }
+    if (!inside(resolvedPath, workspaceRoot)) {
+      throw new Error("Only files inside the current workspace or its Telegram downloads may be sent.");
+    }
+    return resolvedPath;
+  };
   const state = new StateStore(env.database);
-  const telegram = new TelegramApi(env.token, env.apiRoot);
+  const telegram = new TelegramApi(env.token, env.apiRoot, env.fileRoot);
+  const stickerTemporaryDirectories = new Set<string>();
+  let stickerPackDownloadQueue = Promise.resolve();
+  const withStickerPackDownloadMutex = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const previous = stickerPackDownloadQueue;
+    let release!: () => void;
+    stickerPackDownloadQueue = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
   const routeChatId = env.routeKey.split(":")[1] ?? "";
   // Admin needs no tgfx-side configuration: for an allowlisted group chat the
   // available admin tools are exactly the bot's live Telegram admin rights.
@@ -106,15 +156,29 @@ export async function runTelegramMcpServer(): Promise<void> {
   }
   const adminEnabled = (capability: AdminCapability) => grantedAdminCapabilities.has(capability);
   const server = new McpServer(
-    { name: "tgfx-telegram", version: "0.1.0" },
+    { name: "tgfx-telegram", version: VERSION },
     { instructions: [
       "The user's Telegram message is supplied separately in a telegram_message JSON envelope.",
       "Your normal assistant response is automatically sent as the reply to that message.",
       "References are scoped capabilities. Never invent Telegram IDs, file URLs, or local paths.",
-      "Download an attachment before claiming to inspect or modify it.",
+      "Download a remote attachment before claiming to inspect or modify it. Sticker images are downloaded automatically and include a local path.",
       "Use admin tools only when the user's current message explicitly asks for that action.",
       "Read the telegram://chat/recent resource to recover message refs and bounded excerpts of recently observed messages in this chat.",
+      `Read the ${TELEGRAM_GUIDELINES_URI} resource (mcp_features resource_read) for channel guidelines.`,
     ].join(" ") },
+  );
+
+  server.registerResource(
+    "guidelines",
+    TELEGRAM_GUIDELINES_URI,
+    {
+      title: "Telegram channel guidelines",
+      description: "How to use this Telegram channel; read at the start of every session.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => ({
+      contents: [{ uri: uri.href, mimeType: "text/markdown", text: TELEGRAM_GUIDELINES_TEXT }],
+    }),
   );
 
   const RECENT_MESSAGES_LIMIT = 25;
@@ -237,7 +301,7 @@ export async function runTelegramMcpServer(): Promise<void> {
 
   server.registerTool("download_attachment", {
     title: "Download Telegram attachment",
-    description: "Download an attachment_ref from the current Telegram turn into this workspace. Use this before claiming to inspect or modify a file.",
+    description: "Download an attachment_ref from the current Telegram turn into the bot's downloads directory. Use this before claiming to inspect or modify a file.",
     inputSchema: { attachment_ref: z.string(), filename: z.string().optional() },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   }, async (args) => result(await perform("telegram_download_attachment", args, async () => {
@@ -249,19 +313,16 @@ export async function runTelegramMcpServer(): Promise<void> {
     if (attachment.size !== undefined && attachment.size > maxBytes) {
       throw new Error("This attachment exceeds Telegram's 20 MB cloud download limit.");
     }
-    const file = await telegram.api.getFile(attachment.fileId);
-    if (!file.file_path) throw new Error("Telegram did not return a downloadable path for this attachment.");
-    const filename = safeName(args.filename ?? attachment.name ?? basename(file.file_path));
+    const file = await telegram.downloadFile(attachment.fileId);
+    const filename = safeName(args.filename ?? attachment.name ?? basename(file.filePath));
     const path = await safeDownloadPath(env.files, current.context_ref, filename);
-    const fileRoot = env.fileRoot ?? `https://api.telegram.org/file/bot${env.token}`;
-    const response = await fetch(`${fileRoot}/${file.file_path}`);
-    const bytes = await writeResponseLimited(response, path, maxBytes);
+    const bytes = await writeResponseLimited(file.response, path, maxBytes);
     return { downloaded: true, path, bytes, mime_type: attachment.mimeType };
   })));
 
   server.registerTool("send_file", {
     title: "Send workspace file",
-    description: "Upload a file located inside the current workspace to the current Telegram chat.",
+    description: "Upload a file from the current workspace or the bot's downloads directory to the current Telegram chat.",
     inputSchema: {
       path: z.string().describe("Absolute path or workspace-relative path"),
       caption: z.string().max(1024).optional(),
@@ -270,16 +331,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   }, async (args) => result(await perform("telegram_send_file", args, async () => {
     const current = context();
-    const candidate = resolve(workspaceRoot, args.path);
-    const resolvedPath = await realpath(candidate);
-    if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(`${workspaceRoot}${sep}`)) {
-      throw new Error("Only files inside the current workspace may be sent.");
-    }
-    const runtimeDirectory = resolve(workspaceRoot, ".tgfx");
-    const filesDirectory = resolve(runtimeDirectory, "files");
-    const insideRuntime = resolvedPath === runtimeDirectory || resolvedPath.startsWith(`${runtimeDirectory}${sep}`);
-    const insideFiles = resolvedPath === filesDirectory || resolvedPath.startsWith(`${filesDirectory}${sep}`);
-    if (insideRuntime && !insideFiles) throw new Error("Private .tgfx runtime files cannot be sent.");
+    const resolvedPath = await sendablePath(args.path);
     const info = await stat(resolvedPath);
     if (!info.isFile()) throw new Error("Only a regular workspace file may be sent.");
     if (info.size > 50 * 1024 * 1024) throw new Error("This file exceeds Telegram's 50 MB cloud upload limit.");
@@ -291,6 +343,121 @@ export async function runTelegramMcpServer(): Promise<void> {
       ref: reference, botId: env.botId, routeKey: env.routeKey, chatId: current.chat_id,
       topicId: current.topic_id, messageId: String(sent.message_id),
       ...(args.caption ? { excerpt: args.caption } : {}),
+    });
+    return { sent: true, message_ref: reference };
+  })));
+
+  server.registerTool("get_sticker_pack", {
+    title: "Get Telegram sticker pack",
+    description: "Load part of a Telegram sticker pack by its short name. Returns metadata by default. Set download_images to inspect system-temporary image previews before selecting a sticker for send_sticker_by_id.",
+    inputSchema: {
+      name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/)
+        .describe("Sticker pack short name, for example from t.me/addstickers/<name>"),
+      offset: z.number().int().min(0).default(0),
+      limit: z.number().int().min(1).max(50).default(20),
+      download_images: z.boolean().default(false)
+        .describe("Download the selected stickers into system temporary storage for inspection"),
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  }, async (args) => result(await perform("telegram_get_sticker_pack", args, async () => {
+    const current = context();
+    const pack = await telegram.api.getStickerSet(args.name);
+    const selected = pack.stickers.slice(args.offset, args.offset + args.limit);
+    const metadata = selected.map((sticker) => ({
+      file_id: sticker.file_id,
+      ...(sticker.emoji ? { emoji: sticker.emoji } : {}),
+      ...(sticker.custom_emoji_id ? { custom_emoji_id: sticker.custom_emoji_id } : {}),
+      width: sticker.width,
+      height: sticker.height,
+      format: sticker.is_animated ? "animated" : sticker.is_video ? "video" : "static",
+    }));
+    const stickers = args.download_images
+      ? await withStickerPackDownloadMutex(async () => {
+        const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-sticker-pack-"));
+        stickerTemporaryDirectories.add(temporaryRoot);
+        const downloaded: Array<(typeof metadata)[number] & { image: { path: string; mime: string } }> = [];
+        try {
+          for (let start = 0; start < selected.length; start += 4) {
+            const batch = await Promise.all(selected.slice(start, start + 4).map(async (sticker, batchPosition) => {
+              const position = start + batchPosition;
+              const item = metadata[position]!;
+              const preview = sticker.thumbnail;
+              const mime = preview
+                ? "image/webp"
+                : item.format === "animated" ? "application/x-tgsticker" : item.format === "video" ? "video/webm" : "image/webp";
+              const extension = preview ? ".webp" : item.format === "animated" ? ".tgs" : item.format === "video" ? ".webm" : ".webp";
+              const file = await telegram.downloadFile(preview?.file_id ?? sticker.file_id);
+              const path = await safeDownloadPath(
+                temporaryRoot,
+                current.context_ref,
+                `pack_${args.offset + position}_${sticker.file_unique_id}${extname(file.filePath) || extension}`,
+              );
+              await writeResponseLimited(file.response, path, 20 * 1024 * 1024);
+              return { ...item, image: { path, mime } };
+            }));
+            downloaded.push(...batch);
+          }
+          return downloaded;
+        } catch (error) {
+          stickerTemporaryDirectories.delete(temporaryRoot);
+          await rm(temporaryRoot, { recursive: true, force: true });
+          throw error;
+        }
+      })
+      : metadata;
+    const nextOffset = args.offset + selected.length;
+    return {
+      name: pack.name,
+      title: pack.title,
+      sticker_type: pack.sticker_type,
+      total: pack.stickers.length,
+      offset: args.offset,
+      ...(nextOffset < pack.stickers.length ? { next_offset: nextOffset } : {}),
+      stickers,
+    };
+  })));
+
+  server.registerTool("send_sticker_by_id", {
+    title: "Send Telegram sticker by ID",
+    description: "Send an existing sticker to the current Telegram chat using a Telegram file_id supplied in an envelope or by get_sticker_pack.",
+    inputSchema: {
+      file_id: z.string().min(1).describe("Telegram sticker file_id from an envelope or get_sticker_pack"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => result(await perform("telegram_send_sticker_by_id", args, async () => {
+    const current = context();
+    const sent = await telegram.sendSticker(current.chat_id, args.file_id, current.topic_id);
+    const reference = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+    state.registerBotMessage({
+      ref: reference, botId: env.botId, routeKey: env.routeKey, chatId: current.chat_id,
+      topicId: current.topic_id, messageId: String(sent.message_id),
+    });
+    return { sent: true, message_ref: reference };
+  })));
+
+  server.registerTool("send_sticker_file", {
+    title: "Send Telegram sticker file",
+    description: "Upload a workspace-local image or sticker file to the current Telegram chat. Raster images are resized and converted to WebP automatically; .TGS and .WEBM stickers pass through.",
+    inputSchema: {
+      path: z.string().min(1).describe("Absolute path or workspace-relative path to a custom image or sticker file"),
+      emoji: z.string().min(1).max(16).optional().describe("Emoji associated with the uploaded sticker"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => result(await perform("telegram_send_sticker_file", args, async () => {
+    const current = context();
+    const resolvedPath = await sendablePath(args.path);
+    const info = await stat(resolvedPath);
+    if (!info.isFile()) throw new Error("Only a regular workspace file may be sent as a sticker.");
+    if (info.size > 20 * 1024 * 1024) throw new Error("This sticker file exceeds Telegram's upload limit.");
+    const extension = extname(resolvedPath).toLowerCase();
+    const source = extension === ".tgs" || extension === ".webm"
+      ? resolvedPath
+      : await stickerWebp(resolvedPath);
+    const sent = await telegram.sendSticker(current.chat_id, source, current.topic_id, true, args.emoji);
+    const reference = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+    state.registerBotMessage({
+      ref: reference, botId: env.botId, routeKey: env.routeKey, chatId: current.chat_id,
+      topicId: current.topic_id, messageId: String(sent.message_id),
     });
     return { sent: true, message_ref: reference };
   })));
@@ -538,10 +705,15 @@ export async function runTelegramMcpServer(): Promise<void> {
   await server.connect(transport);
   let finish!: () => void;
   const closed = new Promise<void>((resolve) => { finish = resolve; });
-  const stop = async () => { finish(); state.close(); await server.close(); };
+  const stop = () => finish();
   process.stdin.once("end", finish);
   process.stdin.once("close", finish);
-  process.once("SIGTERM", () => void stop());
-  process.once("SIGINT", () => void stop());
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
   await closed;
+  await Promise.allSettled([...stickerTemporaryDirectories].map((directory) =>
+    rm(directory, { recursive: true, force: true })
+  ));
+  state.close();
+  await server.close();
 }
