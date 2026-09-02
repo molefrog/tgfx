@@ -51,6 +51,12 @@ const THINKING_CUSTOM_EMOJI = {
   custom_emoji_id: "5573473356579078196",
   alternative_text: "🙂",
 };
+/** The thinking placeholder starts counting only once a wait is noticeable. */
+const THINKING_ELAPSED_AFTER_MS = 5_000;
+
+function elapsedSeconds(from: number, to: number): number {
+  return Math.max(1, Math.round((to - from) / 1_000));
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -130,12 +136,19 @@ export class AcpProjector {
   private timeline: TimelineEntry[] = [];
   private tools = new Map<string, ToolState>();
   private commands: TimelineSnapshot["commands"] = [];
-  private changedAt = Date.now();
+  private readonly startedAt: number;
+  private changedAt: number;
 
-  constructor(private readonly mcpIcons: McpIconMap = {}) {}
+  constructor(
+    private readonly mcpIcons: McpIconMap = {},
+    private readonly clock: () => number = Date.now,
+  ) {
+    this.startedAt = clock();
+    this.changedAt = this.startedAt;
+  }
 
   apply(update: acp.SessionUpdate): ProjectorChange {
-    this.changedAt = Date.now();
+    this.changedAt = this.clock();
     switch (update.sessionUpdate) {
       case "agent_message_chunk": {
         if (update.content.type !== "text") return "none";
@@ -184,12 +197,16 @@ export class AcpProjector {
   }
 
   private patchTool(update: ToolUpdate): boolean {
-    const now = Date.now();
+    const now = this.clock();
     const id = update.toolCallId;
     const previous = this.tools.get(id);
     if (!previous) this.timeline.push({ type: "tool", toolCallId: id });
 
-    const status = update.status ?? previous?.status ?? "pending";
+    const reported = update.status ?? previous?.status ?? "pending";
+    // fx marks a yielded `run` completed, then streams the command's late output
+    // as `in_progress` on the same call without completing it again. A finished
+    // row stays finished; only its content changed.
+    const status = previous && terminal(previous.status) && !terminal(reported) ? previous.status : reported;
     const next: ToolState = {
       id,
       name: typeof update.name === "string" ? update.name : previous?.name ?? "",
@@ -278,28 +295,57 @@ export class AcpProjector {
     includeTools?: boolean;
   }): InputRichMessageWithoutUpload {
     const items = this.projected(options.includeTools ?? true);
+    const now = this.clock();
     if (!items.length) {
       if (options.final) return { blocks: [{ type: "paragraph", text: "Done." }] };
-      return { blocks: [{ type: "thinking", text: [THINKING_CUSTOM_EMOJI, " Thinking…"] }] };
+      // Only ever append to the placeholder: clients type draft changes in from
+      // the first differing character.
+      const waited = now - this.startedAt;
+      const suffix = waited >= THINKING_ELAPSED_AFTER_MS ? ` ${elapsedSeconds(this.startedAt, now)}s` : "";
+      return { blocks: [{ type: "thinking", text: [THINKING_CUSTOM_EMOJI, ` Thinking…${suffix}`] }] };
     }
 
-    const blocks = items.flatMap((item) => {
+    const blocks = items.flatMap((item, index) => {
       if (item.type === "assistant") return item.blocks;
+      const live = !options.final && index === items.length - 1;
       return [this.toolGroupBlock(
         item.tools,
         !options.final,
         !options.final && options.expandStreamingTools,
+        live ? now : undefined,
       )];
     });
     return { blocks };
   }
 
+  // Consecutive calls that would print the same row fold into one row with a
+  // count, so a command polled ten times is one line, not ten.
+  private rows(tools: ToolState[]): Array<{ tool: ToolState; count: number }> {
+    const rows: Array<{ tool: ToolState; count: number; key: string }> = [];
+    for (const tool of tools) {
+      const { title, argument } = describeTool(tool);
+      const key = JSON.stringify([title, argumentPreview(argument)]);
+      const previous = rows.at(-1);
+      if (previous?.key === key) previous.count++;
+      else rows.push({ tool, count: 1, key });
+    }
+    return rows;
+  }
+
+  // A live group (the newest thing in a draft) ends with an elapsed counter.
+  // It is the last row on purpose: every heartbeat changes only those digits,
+  // so the client animates nothing above them.
   private toolGroupBlock(
     tools: ToolState[],
     working: boolean,
     expanded: boolean,
+    liveAt?: number,
   ): RichBlock {
-    const blocks = tools.map((tool) => this.toolRow(tool));
+    const blocks = this.rows(tools).map(({ tool, count }) => this.toolRow(tool, count));
+    if (liveAt !== undefined) {
+      const startedAt = Math.min(...tools.map((tool) => tool.startedAt));
+      blocks.push({ type: "paragraph", text: `⏱ ${elapsedSeconds(startedAt, liveAt)}s` });
+    }
     return {
       type: "details",
       summary: working ? "Working..." : completedToolSummary(tools, this.changedAt),
@@ -321,8 +367,9 @@ export class AcpProjector {
     return mcp ? { id: mcp, fx: false } : undefined;
   }
 
-  private toolRow(tool: ToolState): RichBlock {
-    const { title, argument } = describeTool(tool);
+  private toolRow(tool: ToolState, count = 1): RichBlock {
+    const { title: name, argument } = describeTool(tool);
+    const title = count > 1 ? `${name} ×${count}` : name;
     const icon = this.toolIcon(tool);
     const preview = argumentPreview(argument);
     if (!icon && !preview) return { type: "paragraph", text: title };
@@ -340,8 +387,9 @@ export class AcpProjector {
   plainFinal(includeTools: boolean): string {
     const parts = this.projected(includeTools).map((item) => {
       if (item.type === "assistant") return item.markdown.trim();
-      const rows = item.tools.map((tool) => {
-        const { title, argument } = describeTool(tool);
+      const rows = this.rows(item.tools).map(({ tool, count }) => {
+        const { title: name, argument } = describeTool(tool);
+        const title = count > 1 ? `${name} ×${count}` : name;
         const preview = argumentPreview(argument);
         return preview ? `${title} ${preview}` : title;
       });

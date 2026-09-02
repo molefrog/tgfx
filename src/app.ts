@@ -86,7 +86,7 @@ type StopCapableUpdate = Update & {
   stopped_message_generation?: {
     chat: { id: number };
     message_thread_id?: number;
-    draft_id: number;
+    draft_id: number | string;
   };
 };
 
@@ -430,7 +430,9 @@ export class TgfxApp {
       const authorized = this.config.access.userIds.includes(chatId)
         || this.config.access.chatIds.includes(chatId);
       const active = this.activeTurns.get(key);
-      const matchesActiveDraft = this.activeDraftIds.get(key) === stopped.draft_id;
+      // Telegram serializes draft_id as a string; the renderer keeps a number.
+      const activeDraftId = this.activeDraftIds.get(key);
+      const matchesActiveDraft = activeDraftId !== undefined && String(activeDraftId) === String(stopped.draft_id);
       this.state.ingestUpdate({
         botId: this.options.bot.id,
         updateId: update.update_id,
@@ -1378,6 +1380,14 @@ export class TgfxApp {
       projector,
       controller.signal,
       this.draftLimiter(message.route.chatId),
+      {
+        log: (detail) => this.log({
+          event: "draft.failed",
+          message: `${this.label(message.route.chatId, message.route.topicId)} · ${detail}`,
+          chat: message.route.chatId,
+          topic: message.route.topicId,
+        }),
+      },
     );
     this.activeTurns.set(message.route.key, controller);
     this.activeDraftIds.set(message.route.key, renderer.draftId);

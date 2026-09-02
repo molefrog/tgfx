@@ -1010,6 +1010,9 @@ The primary renderer maps the ACP timeline to Telegram Rich Messages:
   `Working...` label and stays open until finalization when
   `expandStreamingTools` is true (the default). The final message uses
   formatted activity labels and collapses every group;
+- consecutive calls that print the same row fold into one row with a count;
+- the newest draft group ends with an elapsed counter (`⏱ 12s`) and the
+  thinking placeholder gains one after five seconds. Both only ever append;
 - the final call uses `sendRichMessage`;
 - private streaming uses `sendRichMessageDraft` with one stable `draft_id`.
 
@@ -1038,9 +1041,18 @@ One request may be in flight, and only the newest pending frame survives behind
 it. Per chat, tgfx keeps Telegram's two draft limits as final safety rails with
 headroom: at most 18 attempts in 5 seconds and 36 in 30 seconds. A `retry_after`
 response blocks that chat for the requested duration and increases its spacing;
-successful requests gradually remove the penalty. An unchanged frame is
-refreshed after 20 seconds, before the 30-second draft expires. ACP continues to
+successful requests gradually remove the penalty. A frame Telegram rejects
+outright is logged and dropped; three rejections in a row silence the draft for
+the rest of the turn, and the final message is still delivered. ACP continues to
 be consumed while Telegram is throttled, so a slow network does not block FX.
+
+Telegram clients type draft changes in from the first differing character, at a
+speed learned from how often frames arrive, and a frame repeated after a long
+silence redraws the whole block from empty. So while a tool group is the newest
+thing on screen, the renderer re-renders every 3 seconds: only the elapsed
+counter at the tail changes, the rows above it stay put, and new rows appear at
+a healthy pace. An otherwise unchanged frame is still refreshed after 20
+seconds, before the 30-second draft expires.
 
 If rich messages are unavailable or a block cannot be represented, the renderer
 falls back to ordinary messages with explicit Telegram entities. It does not send

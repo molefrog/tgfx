@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { StateStore } from "../src/state";
 import { AcpProjector } from "../src/fx/projector";
 import { AdaptiveDraftScheduler, PeerDraftLimiter } from "../src/telegram/draft-scheduler";
@@ -165,6 +166,83 @@ describe("Telegram renderer boundaries", () => {
     await Bun.sleep(10);
     expect(sends).toHaveLength(3);
     await scheduler.stop();
+  });
+
+  test("drops a rejected frame, keeps streaming, and gives up after three rejections in a row", async () => {
+    const sends: string[] = [];
+    const errors: boolean[] = [];
+    const scheduler = new AdaptiveDraftScheduler<string>({
+      limiter: new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
+      coalesceMs: 0,
+      keepaliveMs: 60_000,
+      retryDelay: (error) => isRetryableTelegramError(error) ? 1_000 : false,
+      onError: (_error, gaveUp) => { errors.push(gaveUp); },
+      send: async (value) => {
+        if (value.startsWith("bad")) throw new TelegramError("Bad Request: can't parse", undefined, 400);
+        sends.push(value);
+      },
+    });
+
+    scheduler.start("first");
+    await waitFor(() => sends.length === 1);
+    scheduler.offer("bad1", "immediate");
+    await waitFor(() => errors.length === 1);
+    scheduler.offer("second", "immediate");
+    await waitFor(() => sends.length === 2);
+    for (const [index, value] of ["bad2", "bad3", "bad4"].entries()) {
+      scheduler.offer(value, "immediate");
+      await waitFor(() => errors.length === index + 2);
+    }
+    expect(scheduler.offer("third", "immediate")).toBeFalse();
+    await Bun.sleep(10);
+
+    expect(sends).toEqual(["first", "second"]);
+    expect(errors).toEqual([false, false, false, true]);
+    await scheduler.stop();
+  });
+
+  test("re-renders a live tool group on the heartbeat so its counter grows at the tail", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tgfx-heartbeat-"));
+    const state = new StateStore(join(directory, "state.sqlite"));
+    const drafts: InputRichMessageWithoutUpload[] = [];
+    const api = {
+      sendRichDraft: async (_chatId: string, _draftId: number, rich: InputRichMessageWithoutUpload) => {
+        drafts.push(rich);
+      },
+    } as unknown as TelegramApi;
+    let now = 0;
+    const projector = new AcpProjector({}, () => now);
+    const renderer = new TurnRenderer(
+      api,
+      state,
+      { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
+      { mode: "streaming", expandStreamingTools: true, updateEveryMs: 0 },
+      projector,
+      undefined,
+      new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
+      { heartbeatMs: 5 },
+    );
+    try {
+      renderer.start();
+      renderer.changed(projector.apply({
+        sessionUpdate: "tool_call", toolCallId: "cmd", name: "shell", title: "Running", status: "pending",
+        rawInput: { action: "run", command: "sleep 9" },
+      } as never));
+      await waitFor(() => drafts.length === 2);
+      // Same clock, same frame: heartbeats send nothing.
+      await Bun.sleep(30);
+      expect(drafts).toHaveLength(2);
+
+      now = 12_000;
+      await waitFor(() => drafts.length === 3);
+      const group = drafts[2]!.blocks![0] as { type: string; blocks: unknown[] };
+      expect(group.type).toBe("details");
+      expect(group.blocks.at(-1)).toEqual({ type: "paragraph", text: "⏱ 12s" });
+    } finally {
+      await renderer.abort();
+      state.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("does not render hidden thought or pending-tool updates", async () => {

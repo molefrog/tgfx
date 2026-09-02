@@ -61,9 +61,26 @@ async function retryTelegram<T>(
   throw lastError;
 }
 
+export type TurnRendererOptions = {
+  /** Receives one line per failed draft frame. */
+  log?: (detail: string) => void;
+  /**
+   * Telegram clients type draft changes in with a speed learned from how often
+   * frames arrive, and a frame that repeats after a long silence resets the
+   * whole block. While a tool group is the newest thing on screen, re-render
+   * this often so its elapsed counter grows at the tail and nothing before it
+   * is redrawn.
+   */
+  heartbeatMs?: number;
+  keepaliveMs?: number;
+};
+
+const HEARTBEAT_MS = 3_000;
+
 export class TurnRenderer {
   private stopped = false;
   private visibleOutput = false;
+  private heartbeat?: ReturnType<typeof setInterval>;
   readonly draftId = createDraftId();
   private readonly draftAbort = new AbortController();
   private readonly drafts: AdaptiveDraftScheduler<InputRichMessageWithoutUpload>;
@@ -77,9 +94,11 @@ export class TurnRenderer {
     private readonly projector: AcpProjector,
     private readonly signal?: AbortSignal,
     limiter = new PeerDraftLimiter({ minGapMs: config.updateEveryMs }),
+    private readonly options: TurnRendererOptions = {},
   ) {
     this.drafts = new AdaptiveDraftScheduler({
       limiter,
+      ...(options.keepaliveMs === undefined ? {} : { keepaliveMs: options.keepaliveMs }),
       send: (rich) => this.api.sendRichDraft(
         this.route.chatId,
         this.draftId,
@@ -92,17 +111,29 @@ export class TurnRenderer {
           ? error.retryAfter * 1_000
           : 1_000;
       },
+      onError: (error, gaveUp) => {
+        if (this.stopped) return;
+        const reason = error instanceof Error ? error.message : String(error);
+        this.options.log?.(`draft frame failed${gaveUp ? "; draft streaming stopped for this turn" : ""} · ${reason}`);
+      },
     });
     if (this.signal?.aborted) this.stopOnTurnAbort();
     else this.signal?.addEventListener("abort", this.stopOnTurnAbort, { once: true });
   }
 
-  start(): void {
-    if (!this.streaming || this.stopped) return;
-    this.drafts.start(this.projector.rich({
+  private frame(): InputRichMessageWithoutUpload {
+    return this.projector.rich({
       final: false,
       expandStreamingTools: this.config.expandStreamingTools,
-    }));
+    });
+  }
+
+  start(): void {
+    if (!this.streaming || this.stopped) return;
+    this.drafts.start(this.frame());
+    this.heartbeat = setInterval(() => {
+      if (!this.stopped) this.drafts.offer(this.frame(), "normal");
+    }, this.options.heartbeatMs ?? HEARTBEAT_MS);
   }
 
   changed(change: ProjectorChange): void {
@@ -111,17 +142,20 @@ export class TurnRenderer {
       ? "immediate"
       : change === "boundary" || change === "tool" ? "high" : "normal";
     this.visibleOutput = true;
-    this.drafts.offer(this.projector.rich({
-      final: false,
-      expandStreamingTools: this.config.expandStreamingTools,
-    }), priority);
+    this.drafts.offer(this.frame(), priority);
+  }
+
+  private stopDrafts(reason: string): Promise<void> {
+    this.stopped = true;
+    clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+    this.draftAbort.abort(new Error(reason));
+    return this.drafts.stop();
   }
 
   async abort(): Promise<void> {
     this.signal?.removeEventListener("abort", this.stopOnTurnAbort);
-    this.stopped = true;
-    this.draftAbort.abort(new Error("draft stopped"));
-    await this.drafts.stop();
+    await this.stopDrafts("draft stopped");
   }
 
   private get streaming(): boolean {
@@ -129,9 +163,7 @@ export class TurnRenderer {
   }
 
   async finish(input: { botId: string; inboxId: number; effectKey: string }): Promise<string[]> {
-    this.stopped = true;
-    this.draftAbort.abort(new Error("draft finalized"));
-    await this.drafts.stop();
+    await this.stopDrafts("draft finalized");
     const rich = this.projector.rich({
       final: true,
       expandStreamingTools: this.config.expandStreamingTools,

@@ -326,7 +326,8 @@ describe("tgfx host pipeline", () => {
             update_id: 2,
             stopped_message_generation: {
               chat: { id: 42, type: "private", first_name: "User 42" },
-              draft_id: activeDraftId,
+              // The Bot API serializes draft_id as a string, unlike the number we send.
+              draft_id: String(activeDraftId),
             },
           } as unknown as Update];
         }
@@ -397,7 +398,8 @@ describe("tgfx host pipeline", () => {
             update_id: 2,
             stopped_message_generation: {
               chat: { id: 42, type: "private", first_name: "User 42" },
-              draft_id: activeDraftId,
+              // The Bot API serializes draft_id as a string, unlike the number we send.
+              draft_id: String(activeDraftId),
             },
           } as unknown as Update];
         }

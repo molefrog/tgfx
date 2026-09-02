@@ -86,9 +86,20 @@ export const FX_TOOLS = {
   grep_files: { title: "Searching code", argument: "pattern", activity: "searched_code" },
   edit_file: { title: "Editing file", argument: "path", activity: "edited_files" },
   write_file: { title: "Writing file", argument: "path", activity: "wrote_files" },
+  // fx's shell actions: `run` starts a command, `interact` observes a running
+  // session (optionally sending `chars` to it), `stop` terminates it.
   shell: {
-    title: (input) => request(input).action === "run" ? "Running command" : "Managing shell",
-    argument: (input) => request(input).command,
+    title: (input) => {
+      const { action, chars } = request(input);
+      if (action === "run") return "Running command";
+      if (action === "interact") return chars ? "Sending input" : "Waiting for command";
+      if (action === "stop") return "Stopping command";
+      return "Managing shell";
+    },
+    argument: (input) => {
+      const { action, command, chars } = request(input);
+      return action === "run" ? command : action === "interact" ? chars : undefined;
+    },
     activity: (input) => request(input).action === "run" ? "commands" : undefined,
   },
   subagent: {

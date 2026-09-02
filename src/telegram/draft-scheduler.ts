@@ -117,10 +117,19 @@ type SchedulerOptions<T> = {
   limiter: PeerDraftLimiter;
   send(value: T): Promise<unknown>;
   retryDelay(error: unknown): number | false;
+  /** Called for every failed send; `gaveUp` marks the last one this stream will attempt. */
+  onError?(error: unknown, gaveUp: boolean): void;
   fingerprint?(value: T): string;
   coalesceMs?: number;
   keepaliveMs?: number;
 };
+
+/**
+ * A frame Telegram rejects outright (a 400) is usually one bad intermediate
+ * parse, not a broken stream: drop it and keep committing newer frames. Only
+ * this many rejections in a row silence the draft for the rest of the turn.
+ */
+const PERMANENT_FAILURE_LIMIT = 3;
 
 const PRIORITY: Record<DraftPriority, number> = {
   normal: 0,
@@ -146,6 +155,7 @@ export class AdaptiveDraftScheduler<T> {
   private inFlight?: Promise<void>;
   private closed = false;
   private failed = false;
+  private permanentFailures = 0;
 
   constructor(private readonly options: SchedulerOptions<T>) {
     this.fingerprint = options.fingerprint ?? ((value) => JSON.stringify(value));
@@ -258,15 +268,19 @@ export class AdaptiveDraftScheduler<T> {
     try {
       await this.options.send(frame.value);
       this.options.limiter.recordSuccess();
+      this.permanentFailures = 0;
       this.committed = frame;
       this.committedAt = Date.now();
     } catch (error) {
       if (this.closed) return;
       const retryAfterMs = this.options.retryDelay(error);
       if (retryAfterMs === false) {
-        this.failed = true;
-        this.pending = undefined;
+        this.permanentFailures++;
+        this.failed = this.permanentFailures >= PERMANENT_FAILURE_LIMIT;
+        this.options.onError?.(error, this.failed);
+        if (this.failed) this.pending = undefined;
       } else {
+        this.options.onError?.(error, false);
         this.options.limiter.recordFlood(Date.now(), retryAfterMs);
         if (!this.pending) this.pending = frame;
       }

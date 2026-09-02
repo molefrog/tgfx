@@ -49,6 +49,12 @@ describe("fx tool descriptions", () => {
     expect(describeTool({ name: "shell", input: { action: "run", command: "ls" } }))
       .toEqual({ title: "Running command", argument: "ls", activity: "commands" });
     expect(describeTool({ name: "shell", input: { action: "stop", session_id: "s1" } }))
+      .toEqual({ title: "Stopping command", argument: "" });
+    expect(describeTool({ name: "shell", input: { action: "interact", session_id: "s1" } }))
+      .toEqual({ title: "Waiting for command", argument: "" });
+    expect(describeTool({ name: "shell", input: { action: "interact", session_id: "s1", chars: "y\n" } }))
+      .toEqual({ title: "Sending input", argument: "y\n" });
+    expect(describeTool({ name: "shell", input: { action: "mystery" } }))
       .toEqual({ title: "Managing shell", argument: "" });
     expect(describeTool({ name: "shell", input: { request: { action: "run", command: "ls" } } }).argument).toBe("ls");
   });

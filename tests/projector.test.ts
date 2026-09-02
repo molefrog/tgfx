@@ -13,6 +13,8 @@ const THINKING_EMOJI = {
   alternative_text: "🙂",
 };
 const WORKING_SUMMARY = "Working...";
+/** The newest draft group ends with an elapsed counter; tests run within its first second. */
+const ELAPSED_ROW = { type: "paragraph" as const, text: "⏱ 1s" };
 
 function draft(projector: AcpProjector, expandStreamingTools = true): RichBlock[] {
   return projector.rich({ final: false, expandStreamingTools }).blocks ?? [];
@@ -162,6 +164,7 @@ describe("ordered ACP projector", () => {
     expect(group.blocks).toEqual([
       { type: "paragraph", text: "Complete" },
       { type: "paragraph", text: "Failed" },
+      ELAPSED_ROW,
     ]);
   });
 
@@ -229,7 +232,10 @@ describe("ordered ACP projector", () => {
 
     const group = details(draft(projector)[0]);
     expect(group.summary).toBe(WORKING_SUMMARY);
-    expect(group.blocks).toEqual([{ type: "paragraph", text: ["Running command", " ", { type: "code", text: "bun test" }] }]);
+    expect(group.blocks).toEqual([
+      { type: "paragraph", text: ["Running command", " ", { type: "code", text: "bun test" }] },
+      ELAPSED_ROW,
+    ]);
     expect(projector.plainFinal(true)).toContain("Running command bun test");
 
     // Finishing changes nothing visible in the row, so no redraw is requested.
@@ -430,7 +436,7 @@ describe("ordered ACP projector", () => {
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "late-input", name: "grep_files", title: "Searching", status: "pending",
     }));
-    expect(details(draft(projector)[0]).blocks).toEqual([{ type: "paragraph", text: "Searching code" }]);
+    expect(details(draft(projector)[0]).blocks).toEqual([{ type: "paragraph", text: "Searching code" }, ELAPSED_ROW]);
     projector.apply(update({
       sessionUpdate: "tool_call_update", toolCallId: "late-input", status: "completed",
       rawInput: { pattern: "needle" },
@@ -438,7 +444,10 @@ describe("ordered ACP projector", () => {
 
     const group = details(draft(projector)[0]);
     expect(group.summary).toEqual(WORKING_SUMMARY);
-    expect(group.blocks).toEqual([{ type: "paragraph", text: ["Searching code", " ", { type: "code", text: "needle" }] }]);
+    expect(group.blocks).toEqual([
+      { type: "paragraph", text: ["Searching code", " ", { type: "code", text: "needle" }] },
+      ELAPSED_ROW,
+    ]);
   });
 
   test("keeps tool argument previews on one line and within 60 characters", () => {
@@ -475,7 +484,7 @@ describe("ordered ACP projector", () => {
 
     const group = details(draft(projector)[0]);
     expect(group.is_open).toBeTrue();
-    expect(group.blocks.map((block) => block.type)).toEqual(["paragraph", "paragraph"]);
+    expect(group.blocks.map((block) => block.type)).toEqual(["paragraph", "paragraph", "paragraph"]);
     expect(rendered(group)).not.toContain("lines");
     expect(rendered(group)).not.toContain("hidden result");
     expect(rendered(group)).not.toContain("secret-guess");
@@ -550,6 +559,59 @@ describe("ordered ACP projector", () => {
       expect(output).not.toContain(token);
       expect(output).toContain("[redacted Telegram token]");
     }
+  });
+
+  test("appends an elapsed counter only to the newest draft group", () => {
+    let now = 10_000;
+    const projector = new AcpProjector({}, () => now);
+    call(projector, "one", "read_file", { path: "one.ts" });
+    now += 7_000;
+    let group = details(draft(projector)[0]);
+    expect(group.blocks.at(-1)).toEqual({ type: "paragraph", text: "⏱ 7s" });
+
+    // A new row lands above the counter, so only the block's tail changes.
+    call(projector, "two", "grep_files", { pattern: "x" });
+    group = details(draft(projector)[0]);
+    expect(rendered(group.blocks.at(-2))).toContain("Searching code");
+    expect(group.blocks.at(-1)).toEqual({ type: "paragraph", text: "⏱ 7s" });
+
+    // Once prose follows, the group is history and stops counting.
+    say(projector, "Found it.");
+    expect(rendered(details(draft(projector)[0]))).not.toContain("⏱");
+    expect(rendered(final(projector))).not.toContain("⏱");
+  });
+
+  test("adds a wait counter to the thinking placeholder after five seconds", () => {
+    let now = 0;
+    const projector = new AcpProjector({}, () => now);
+    now = 4_000;
+    expect(draft(projector)).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Thinking…"] }]);
+    now = 6_400;
+    expect(draft(projector)).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Thinking… 6s"] }]);
+  });
+
+  test("keeps a finished tool finished when fx streams its late output afterwards", () => {
+    const projector = new AcpProjector();
+    finished(projector, "run", "shell", { action: "run", command: "sleep 45 && echo ok" });
+    expect(projector.apply(update({
+      sessionUpdate: "tool_call_update", toolCallId: "run", status: "in_progress",
+      content: [{ type: "content", content: { type: "text", text: "ok\n" } }],
+    }))).toBe("none");
+    expect(details(final(projector)[0]).summary).toBe("Ran 1 command");
+  });
+
+  test("folds consecutive identical rows into one counted row", () => {
+    const projector = new AcpProjector();
+    finished(projector, "run", "shell", { action: "run", command: "sleep 9" });
+    for (const id of ["p1", "p2", "p3"]) finished(projector, id, "shell", { action: "interact", session_id: "shell-1" });
+    finished(projector, "again", "shell", { action: "run", command: "sleep 9" });
+
+    const rows = details(final(projector)[0]).blocks.map((block) => rendered(block));
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toContain("Waiting for command ×3");
+    expect(rows[2]).toContain("Running command");
+    expect(rows[2]).not.toContain("×");
+    expect(projector.plainFinal(true)).toContain("Waiting for command ×3");
   });
 
   test("preserves assistant/tool order in the plain fallback and lists unfinished tools", () => {
