@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { InputRichMessageWithoutUpload } from "grammy/types";
-import { AcpProjector, CANONICAL_FX_TOOL_RULES } from "../src/fx/projector";
-import { TELEGRAM_MCP_TOOL_ROW_TITLES } from "../src/mcp/tool-labels";
+import { AcpProjector } from "../src/fx/projector";
 
 type RichBlock = NonNullable<InputRichMessageWithoutUpload["blocks"]>[number];
 type DetailsBlock = Extract<RichBlock, { type: "details" }>;
@@ -32,19 +31,39 @@ function rendered(block: unknown): string {
   return JSON.stringify(block);
 }
 
+function say(projector: AcpProjector, text: string, messageId?: string): void {
+  projector.apply(update({
+    sessionUpdate: "agent_message_chunk",
+    ...(messageId ? { messageId } : {}),
+    content: { type: "text", text },
+  }));
+}
+
+// fx announces a call with its name and arguments, then reports the outcome
+// (with the tool's output as content) in a separate update.
+function call(projector: AcpProjector, id: string, name: string, rawInput: object = {}): void {
+  projector.apply(update({
+    sessionUpdate: "tool_call", toolCallId: id, name, title: name, kind: "other", status: "pending", rawInput,
+  }));
+}
+
+function complete(projector: AcpProjector, id: string, status = "completed"): void {
+  projector.apply(update({
+    sessionUpdate: "tool_call_update", toolCallId: id, status,
+    content: [{ type: "content", content: { type: "text", text: "tool output" } }],
+  }));
+}
+
+function finished(projector: AcpProjector, id: string, name: string, rawInput: object = {}, status = "completed"): void {
+  call(projector, id, name, rawInput);
+  complete(projector, id, status);
+}
+
 describe("ordered ACP projector", () => {
   test("reparses split ACP Markdown into a heading and rich inline text", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      messageId: "markdown-message",
-      content: { type: "text", text: "# Section heading\n\nParagraph with **bold" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      messageId: "markdown-message",
-      content: { type: "text", text: "** and *italic*." },
-    }));
+    say(projector, "# Section heading\n\nParagraph with **bold", "markdown-message");
+    say(projector, "** and *italic*.", "markdown-message");
 
     expect(final(projector)).toEqual([
       { type: "heading", size: 1, text: "Section heading" },
@@ -63,21 +82,9 @@ describe("ordered ACP projector", () => {
 
   test("separates paragraphs across a hidden tool without changing a lone paragraph", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Before the hidden tool." },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "pending-search",
-      title: "Searching web",
-      status: "pending",
-      content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "After the hidden tool." },
-    }));
+    say(projector, "Before the hidden tool.");
+    projector.apply(update({ sessionUpdate: "tool_call", toolCallId: "unnamed", title: "Searching", status: "pending" }));
+    say(projector, "After the hidden tool.");
 
     expect(draft(projector)).toEqual([
       { type: "paragraph", text: ["Before the hidden tool.", "\n\n"] },
@@ -85,39 +92,19 @@ describe("ordered ACP projector", () => {
     ]);
 
     const lone = new AcpProjector();
-    lone.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Only paragraph." },
-    }));
-    expect(draft(lone)).toEqual([
-      { type: "paragraph", text: "Only paragraph." },
-    ]);
+    say(lone, "Only paragraph.");
+    expect(draft(lone)).toEqual([{ type: "paragraph", text: "Only paragraph." }]);
   });
 
   test("interleaves rich assistant blocks and consecutive tool groups", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Let me **research** the repo." },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "read", title: "Reading", status: "pending",
-      rawInput: { path: "src/app.ts" }, content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "search", title: "Searching", status: "pending",
-      rawInput: { query: "renderer" }, content: [],
-    }));
-    projector.apply(update({ sessionUpdate: "tool_call_update", toolCallId: "read", status: "completed" }));
-    projector.apply(update({ sessionUpdate: "tool_call_update", toolCallId: "search", status: "completed" }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Here is what I found:\n\n- one\n- two" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "tests", title: "Running tests", status: "completed",
-      rawInput: { suite: "projector" }, content: [],
-    }));
+    say(projector, "Let me **research** the repo.");
+    call(projector, "read", "read_file", { path: "src/app.ts" });
+    call(projector, "search", "grep_files", { pattern: "renderer" });
+    complete(projector, "read");
+    complete(projector, "search");
+    say(projector, "Here is what I found:\n\n- one\n- two");
+    finished(projector, "tests", "shell", { action: "run", command: "bun test" });
 
     const blocks = draft(projector);
     expect(blocks.map((block) => block.type)).toEqual([
@@ -129,36 +116,31 @@ describe("ordered ACP projector", () => {
     const firstGroup = details(blocks[1]);
     expect(firstGroup.summary).toBe(WORKING_SUMMARY);
     expect(firstGroup.is_open).toBeTrue();
-    expect(rendered(firstGroup.summary)).not.toContain("custom_emoji");
-    expect(rendered(firstGroup).indexOf("Reading")).toBeLessThan(rendered(firstGroup).indexOf("Searching"));
+    expect(rendered(firstGroup).indexOf("Reading file")).toBeLessThan(rendered(firstGroup).indexOf("Searching code"));
 
     const trailingGroup = details(blocks[4]);
     expect(trailingGroup.summary).toEqual(WORKING_SUMMARY);
     expect(trailingGroup.is_open).toBeTrue();
-    expect(rendered(trailingGroup)).toContain("Running tests");
+    expect(rendered(trailingGroup)).toContain("Running command");
+    expect(rendered(trailingGroup)).toContain("bun test");
     expect(blocks.some((block) => block.type === "thinking")).toBeFalse();
   });
 
   test("keeps first-sight tool order when tools complete in reverse", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "first", title: "First", status: "in_progress", content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "second", title: "Second", status: "in_progress", content: [],
-    }));
-    projector.apply(update({ sessionUpdate: "tool_call_update", toolCallId: "second", status: "completed" }));
+    call(projector, "first", "read_file", { path: "first.ts" });
+    call(projector, "second", "read_file", { path: "second.ts" });
+    complete(projector, "second");
 
     let group = details(draft(projector)[0]);
-    expect(rendered(group)).not.toContain("First");
-    expect(rendered(group)).toContain("Second");
+    expect(rendered(group).indexOf("first.ts")).toBeLessThan(rendered(group).indexOf("second.ts"));
 
-    projector.apply(update({ sessionUpdate: "tool_call_update", toolCallId: "first", status: "completed" }));
+    complete(projector, "first");
     group = details(draft(projector)[0]);
-    expect(rendered(group).indexOf("First")).toBeLessThan(rendered(group).indexOf("Second"));
+    expect(rendered(group).indexOf("first.ts")).toBeLessThan(rendered(group).indexOf("second.ts"));
   });
 
-  test("shows only completed and failed tools", () => {
+  test("waits for unnamed tools to finish before listing them", () => {
     const projector = new AcpProjector();
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "pending", title: "Pending", status: "pending", content: [],
@@ -190,9 +172,7 @@ describe("ordered ACP projector", () => {
     }));
     expect(details(draft(projector)[0]).is_open).toBeTrue();
 
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Content after the first group." },
-    }));
+    say(projector, "Content after the first group.");
     let blocks = draft(projector);
     expect(details(blocks[0]).summary).toBe(WORKING_SUMMARY);
     expect(details(blocks[0]).is_open).toBeTrue();
@@ -220,122 +200,68 @@ describe("ordered ACP projector", () => {
     expect(finalBlocks.some((block) => block.type === "thinking")).toBeFalse();
   });
 
-  test("prefers exact FX tool names over a misleading Telegram-looking title", () => {
-    const read = new AcpProjector();
-    read.apply(update({
+  test("labels rows from fx tool names, never from the agent's wire title", () => {
+    const projector = new AcpProjector();
+    projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "read", name: "read_file",
-      // Exact FX names must win even when kind is absent and the title looks like
-      // a Telegram MCP call that would otherwise be classified first.
-      title: "mcp_telegram_set_reaction", status: "completed", content: [],
+      title: "mcp_telegram_set_reaction", status: "completed", rawInput: { path: "src/app.ts" },
     }));
-    let group = details(final(read)[0]);
+    let group = details(final(projector)[0]);
     expect(group.summary).toBe("Read 1 file");
-    expect(group.blocks).toEqual([{ type: "paragraph", text: "Reading file" }]);
-
-    const create = new AcpProjector();
-    create.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "create", name: "write_file",
-      title: "mcp_telegram_set_reaction", status: "completed",
-      content: [{ type: "diff", path: "/workspace/new.ts", oldText: null, newText: "export {};" }],
-    }));
-    group = details(final(create)[0]);
-    expect(group.summary).toBe("Created 1 file");
-    expect(group.blocks).toEqual([{ type: "paragraph", text: "Creating file" }]);
+    expect(group.blocks).toEqual([{ type: "paragraph", text: ["Reading file", " ", { type: "code", text: "src/app.ts" }] }]);
 
     const omitted = new AcpProjector();
-    omitted.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "select", name: "mcp_select_tool",
-      title: "mcp_telegram_set_reaction", status: "completed", content: [],
-    }));
+    finished(omitted, "select", "mcp_select_tool", { name: "mcp_github_search_code" });
     group = details(final(omitted)[0]);
     expect(group.summary).toBe("Worked for 1s");
-    expect(group.blocks).toEqual([{ type: "paragraph", text: "Selecting MCP tool" }]);
+    expect(rendered(group.blocks)).toContain("Selecting MCP tool");
   });
 
-  test("maps every registered FX tool to a human row and non-generic summary", () => {
-    for (const [name, rule] of Object.entries(CANONICAL_FX_TOOL_RULES)) {
-      const projector = new AcpProjector();
-      projector.apply(update({
-        sessionUpdate: "tool_call",
-        toolCallId: `canonical-${name}`,
-        name,
-        title: "mcp_telegram_set_reaction",
-        status: "completed",
-        content: [],
-      }));
-      const group = details(final(projector)[0]);
-      const row = group.blocks[0];
-      if (row?.type !== "paragraph" || typeof row.text !== "string") {
-        throw new Error(`Expected a plain row title for ${name}`);
-      }
-      expect(row.text).not.toContain("_");
-      expect(row.text).not.toContain("mcp_telegram_");
-      if (rule !== "omit") expect(group.summary).not.toBe("Worked for 1s");
-    }
-  });
-
-  test("classifies terminal actions and name-less FX search evidence", () => {
-    const cases: Array<{
-      title: string;
-      expected: string;
-      kind?: string;
-      name?: string;
-      rawInput?: unknown;
-      content?: unknown[];
-      row?: string;
-    }> = [
-      { name: "terminal", title: "Terminal", rawInput: { kind: "exec" }, expected: "Ran 1 command", row: "Running command" },
-      { name: "terminal", title: "Terminal", rawInput: { action: "read" }, expected: "Used terminal" },
-      { name: "perplexity_search", title: "read_file", expected: "Searched web" },
-      { name: "mcp_github_search_code", title: "read_file", expected: "Used external tools" },
-      { title: "Matching", kind: "read", expected: "Searched files", row: "Finding files" },
-      {
-        title: "Searching",
-        kind: "search",
-        content: [{ type: "content", content: { type: "text", text: "[grep] 2 matches" } }],
-        expected: "Searched code",
-        row: "Searching code",
-      },
-      {
-        title: "Searching",
-        kind: "search",
-        content: [{ type: "content", content: { type: "text", text: '{"id":"search","results":[]}' } }],
-        expected: "Searched web",
-        row: "Searching web",
-      },
-      { title: "Searching", kind: "search", expected: "Searched", row: "Searching" },
-      { title: "Listing", kind: "other", expected: "Used memory", row: "Listing memories" },
-    ];
-
-    for (const [index, tool] of cases.entries()) {
-      const projector = new AcpProjector();
-      projector.apply(update({
-        sessionUpdate: "tool_call",
-        toolCallId: `wire-${index}`,
-        title: tool.title,
-        status: "completed",
-        content: tool.content ?? [],
-        ...(tool.kind ? { kind: tool.kind } : {}),
-        ...(tool.name ? { name: tool.name } : {}),
-        ...(tool.rawInput !== undefined ? { rawInput: tool.rawInput } : {}),
-      }));
-      const group = details(final(projector)[0]);
-      expect(group.summary).toBe(tool.expected);
-      if (tool.row) expect(rendered(group.blocks[0])).toContain(tool.row);
-    }
-  });
-
-  test("renders the guidelines resource read as Reading guidelines with the telegram icon", () => {
-    const projector = new AcpProjector({ telegram: "5231146084922860619" });
+  test("lists named tools with their arguments as soon as fx announces them", () => {
+    const projector = new AcpProjector();
+    expect(projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "cmd", name: "shell", title: "Running", status: "pending",
+      rawInput: { action: "run", command: "bun test" },
+    }))).toBe("tool");
     projector.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "guidelines-read",
-      name: "mcp_features",
-      title: "Using MCP feature",
-      status: "completed",
-      rawInput: { action: "resource_read", server: "telegram", uri: "telegram://guidelines" },
-      content: [],
+      sessionUpdate: "tool_call", toolCallId: "unnamed", title: "Mystery", status: "pending",
     }));
+
+    const group = details(draft(projector)[0]);
+    expect(group.summary).toBe(WORKING_SUMMARY);
+    expect(group.blocks).toEqual([{ type: "paragraph", text: ["Running command", " ", { type: "code", text: "bun test" }] }]);
+    expect(projector.plainFinal(true)).toContain("Running command bun test");
+
+    // Finishing changes nothing visible in the row, so no redraw is requested.
+    expect(projector.apply(update({ sessionUpdate: "tool_call_update", toolCallId: "cmd", status: "completed" }))).toBe("none");
+  });
+
+  test("renders a provider-backed web search from its fx lifecycle before the answer", () => {
+    // Wire shape from fx dev 7e02f32 (vercel-labs/fx#556): the search is
+    // announced with an empty rawInput and completed after the answer streams.
+    const projector = new AcpProjector();
+    projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "chatcmpl-tool-1", name: "web_search",
+      title: "Searching web", kind: "search", status: "pending", rawInput: {},
+    }));
+    say(projector, "Bun 1.4 is the latest release.");
+    projector.apply(update({
+      sessionUpdate: "tool_call_update", toolCallId: "chatcmpl-tool-1", status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "Web search completed" } }],
+    }));
+
+    const blocks = final(projector);
+    expect(blocks.map((block) => block.type)).toEqual(["details", "paragraph"]);
+    const group = details(blocks[0]);
+    expect(group.summary).toBe("Searched web");
+    expect(group.blocks).toEqual([{ type: "paragraph", text: "Searching web" }]);
+  });
+
+  test("renders the guidelines resource read with the telegram icon", () => {
+    const projector = new AcpProjector({ telegram: "5231146084922860619" });
+    finished(projector, "guidelines-read", "mcp_features", {
+      action: "resource_read", server: "telegram", uri: "telegram://guidelines",
+    });
 
     const group = details(final(projector)[0]);
     expect(group.summary).toBe("Used chat tools");
@@ -348,42 +274,35 @@ describe("ordered ACP projector", () => {
     }]);
   });
 
-  test("renders the guidelines read without an icon when the icon map is empty", () => {
+  test("renders the guidelines read without an icon or URI when the icon map is empty", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "guidelines-read-plain",
-      title: "Using MCP feature",
-      kind: "other",
-      status: "completed",
-      content: [{ type: "content", content: { type: "text", text: "[untrusted MCP resource content] telegram://guidelines" } }],
-    }));
+    finished(projector, "guidelines-read-plain", "mcp_features", {
+      action: "resource_read", server: "telegram", uri: "telegram://guidelines",
+    });
 
-    const group = details(final(projector)[0]);
-    expect(group.blocks).toEqual([{ type: "paragraph", text: "Reading guidelines" }]);
+    expect(details(final(projector)[0]).blocks).toEqual([{ type: "paragraph", text: "Reading guidelines" }]);
     expect(projector.plainFinal(true)).toContain("Reading guidelines");
-    expect(projector.plainFinal(true)).not.toContain("untrusted");
+    expect(projector.plainFinal(true)).not.toContain("telegram://");
+  });
+
+  test("uses the MCP server icon for resource reads through mcp_features", () => {
+    const icons = { github: "gh-emoji", "tool:mcp_features": "features-emoji" };
+    const projector = new AcpProjector(icons);
+    finished(projector, "readme", "mcp_features", { action: "resource_read", server: "github", uri: "github://readme" });
+    finished(projector, "unknown", "mcp_features", { action: "resource_read", server: "acme", uri: "acme://x" });
+
+    const rows = details(final(projector)[0]).blocks;
+    expect(rendered(rows[0])).toContain('"custom_emoji_id":"gh-emoji"');
+    expect(rendered(rows[1])).toContain('"custom_emoji_id":"features-emoji"');
   });
 
   test("drops assistant preamble that announces the guidelines bootstrap read", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "I'll start by reading the Telegram guidelines, then handle the message." },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "bootstrap-read",
-      name: "mcp_features",
-      title: "Using MCP feature",
-      status: "completed",
-      rawInput: { action: "resource_read", server: "telegram", uri: "telegram://guidelines" },
-      content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Hey! What's up?" },
-    }));
+    say(projector, "I'll start by reading the Telegram guidelines, then handle the message.");
+    finished(projector, "bootstrap-read", "mcp_features", {
+      action: "resource_read", server: "telegram", uri: "telegram://guidelines",
+    });
+    say(projector, "Hey! What's up?");
 
     const blocks = final(projector);
     expect(rendered(blocks)).not.toContain("I'll start by reading");
@@ -394,199 +313,41 @@ describe("ordered ACP projector", () => {
 
   test("keeps assistant text before a first tool that is not the guidelines read", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Let me check that file." },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "regular-read",
-      name: "read_file",
-      title: "Reading file",
-      status: "completed",
-      content: [],
-    }));
+    say(projector, "Let me check that file.");
+    finished(projector, "regular-read", "read_file", { path: "README.md" });
 
     expect(rendered(final(projector))).toContain("Let me check that file.");
   });
 
-  test("pluralizes counted title/kind fallback summaries", () => {
-    const cases = [
-      { count: 5, kind: "execute", title: "Running", expected: "Ran 5 commands" },
-      { count: 2, kind: "read", title: "Reading", expected: "Read 2 files" },
-      { count: 2, kind: "edit", title: "Writing", expected: "Wrote 2 files" },
-      { count: 2, kind: "edit", title: "Editing", expected: "Edited 2 files" },
-      { count: 2, kind: "other", title: "Installing skill", expected: "Installed 2 skills" },
-    ];
-
-    for (const activity of cases) {
-      const projector = new AcpProjector();
-      for (let index = 0; index < activity.count; index += 1) {
-        projector.apply(update({
-          sessionUpdate: "tool_call",
-          toolCallId: `${activity.kind}-${index}`,
-          title: activity.title,
-          kind: activity.kind,
-          status: "completed",
-          content: [],
-        }));
-      }
-      expect(details(final(projector)[0]).summary).toBe(activity.expected);
-    }
-  });
-
-  test("uses stable composite summaries, structured create detection, and generic fallback", () => {
+  test("composes group summaries in a stable order and folds overflow", () => {
     const projector = new AcpProjector();
-    const calls = [
-      { id: "move", title: "Moving file", kind: "move", content: [] },
-      { id: "search", title: "Searching", kind: "search", content: [
-        { type: "content", content: { type: "text", text: "[grep] 2 matches" } },
-      ] },
-      { id: "read", title: "Reading", kind: "read", content: [] },
-      { id: "create", title: "Writing", kind: "edit", content: [
-        { type: "diff", path: "/workspace/new.ts", oldText: null, newText: "export {};" },
-      ] },
-      { id: "delete", title: "Deleting file", kind: "delete", content: [] },
-      { id: "command-1", title: "Running", kind: "execute", content: [] },
-      { id: "command-2", title: "Starting", kind: "execute", content: [] },
-    ];
-    for (const call of calls) {
-      projector.apply(update({
-        sessionUpdate: "tool_call",
-        toolCallId: call.id,
-        title: call.title,
-        kind: call.kind,
-        status: "completed",
-        content: call.content,
-      }));
-    }
-    expect(details(final(projector)[0]).summary).toBe(
-      "Ran 2 commands, created 1 file, read 1 file, searched code",
-    );
+    finished(projector, "cmd-1", "shell", { action: "run", command: "bun test" });
+    finished(projector, "cmd-2", "shell", { action: "run", command: "bun run build" });
+    finished(projector, "write", "write_file", { path: "notes.txt", content: "ok" });
+    finished(projector, "read", "read_file", { path: "README.md" });
+    finished(projector, "grep", "grep_files", { pattern: "hello" });
+    for (let index = 0; index < 5; index += 1) finished(projector, `glob-${index}`, "glob_files", { pattern: "*.md" });
+    finished(projector, "future", "future_tool", { x: 1 });
+
+    const summary = "Ran 2 commands, wrote 1 file, read 1 file, searched files + 1 more";
+    expect(details(final(projector)[0]).summary).toBe(summary);
+    expect(projector.plainFinal(true).split("\n")[0]).toBe(summary);
 
     const unknown = new AcpProjector();
-    unknown.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "unknown", title: "Custom activity",
-      kind: "other", status: "completed", content: [],
-    }));
+    finished(unknown, "future", "future_tool", { x: 1 });
     expect(details(final(unknown)[0]).summary).toBe("Worked for 1s");
     expect(unknown.plainFinal(true).split("\n")[0]).toBe("Worked for 1s");
   });
 
-  test("omits failed tools from activity summaries", () => {
+  test("omits failed tools from activity summaries but still lists them", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "command", title: "Running command",
-      kind: "execute", status: "completed", content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "failed", title: "Loading skill",
-      status: "failed", content: [],
-    }));
-
-    expect(details(final(projector)[0]).summary).toBe("Ran 1 command");
-    expect(projector.plainFinal(true).split("\n")[0]).toBe("Ran 1 command");
-  });
-
-  test("aggregates listings once and omits unknown tools from composite overflow", () => {
-    const projector = new AcpProjector();
-    for (let index = 0; index < 5; index += 1) {
-      projector.apply(update({
-        sessionUpdate: "tool_call",
-        toolCallId: `listing-${index}`,
-        title: "Matching",
-        kind: "read",
-        status: "completed",
-        content: [],
-      }));
-    }
-    projector.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "command",
-      title: "Running tests",
-      kind: "execute",
-      status: "completed",
-      content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call",
-      toolCallId: "unknown",
-      title: "Custom activity",
-      kind: "other",
-      status: "completed",
-      content: [],
-    }));
-
-    expect(details(final(projector)[0]).summary).toBe("Ran 1 command, searched files");
-    expect(projector.plainFinal(true).split("\n")[0]).toBe("Ran 1 command, searched files");
-  });
-
-  test("renders every Telegram MCP tool with a human title and one summary category", () => {
-    const telegramTools = Object.entries(TELEGRAM_MCP_TOOL_ROW_TITLES);
-    expect(TELEGRAM_MCP_TOOL_ROW_TITLES.set_reaction).toBe("Reacting to message");
-    const projector = new AcpProjector();
-
-    for (const [name] of telegramTools) {
-      projector.apply(update({
-        sessionUpdate: "tool_call",
-        toolCallId: `telegram-${name}`,
-        title: `mcp_telegram_${name}`,
-        kind: "other",
-        status: "completed",
-        content: [],
-      }));
-    }
+    finished(projector, "command", "shell", { action: "run", command: "ls" });
+    finished(projector, "failed", "skill", { name: "missing" }, "failed");
 
     const group = details(final(projector)[0]);
-    expect(group.summary).toBe("Used chat tools");
-    expect(group.blocks).toEqual(telegramTools.map(([, title]) => ({
-      type: "paragraph",
-      text: title,
-    })));
-    expect(projector.plainFinal(true).split("\n")).toEqual([
-      "Used chat tools",
-      ...telegramTools.map(([, title]) => title),
-    ]);
-    expect(rendered(group.blocks)).not.toContain("mcp_telegram_");
-
-    const named = new AcpProjector();
-    for (const [name] of telegramTools) {
-      named.apply(update({
-        sessionUpdate: "tool_call",
-        toolCallId: `named-telegram-${name}`,
-        name: `mcp_telegram_${name}`,
-        title: "Using Telegram",
-        kind: "other",
-        status: "completed",
-        content: [],
-      }));
-    }
-    expect(details(final(named)[0]).blocks).toEqual(telegramTools.map(([, title]) => ({
-      type: "paragraph",
-      text: title,
-    })));
-  });
-
-  test("labels capability discovery and hides MCP selection from its summary", () => {
-    const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "read", name: "read_file",
-      title: "Reading file", kind: "read", status: "completed", content: [],
-    }));
-    for (const [name, title] of [
-      ["capability_search", "Searching capabilities"],
-      ["mcp_select_tool", "Selecting MCP tool"],
-      ["mcp_features", "Using MCP feature"],
-    ] as const) {
-      projector.apply(update({
-        sessionUpdate: "tool_call", toolCallId: name, name, title,
-        kind: "other", status: "completed", content: [],
-      }));
-    }
-
-    expect(details(final(projector)[0]).summary).toBe(
-      "Read 1 file, searched capabilities, used external tools",
-    );
+    expect(group.summary).toBe("Ran 1 command");
+    expect(rendered(group.blocks)).toContain("Loading skill");
+    expect(projector.plainFinal(true).split("\n")[0]).toBe("Ran 1 command");
   });
 
   test("adds server custom emoji to MCP tool rows only when icons are supplied", () => {
@@ -595,15 +356,12 @@ describe("ordered ACP projector", () => {
       mcp: "mcp-emoji",
       telegram: "telegram-emoji",
     });
-    for (const [id, name, title] of [
-      ["github", "mcp_github_search_code", "Searching GitHub"],
-      ["telegram", "mcp_telegram_send_file", "Sending Telegram file"],
-      ["unknown", "mcp_new_service_call", "Calling new service"],
+    for (const [id, name] of [
+      ["github", "mcp_github_search_code"],
+      ["telegram", "mcp_telegram_send_file"],
+      ["unknown", "mcp_new_service_call"],
     ] as const) {
-      projector.apply(update({
-        sessionUpdate: "tool_call", toolCallId: id, name, title,
-        kind: "other", status: "completed", content: [],
-      }));
+      finished(projector, id, name, { query: "tgfx" });
     }
 
     const rows = details(final(projector)[0]).blocks;
@@ -612,53 +370,23 @@ describe("ordered ACP projector", () => {
     expect(rendered(rows[2])).toContain('"custom_emoji_id":"mcp-emoji"');
 
     const plain = new AcpProjector();
-    plain.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "github", name: "mcp_github_search_code",
-      title: "Searching GitHub", kind: "other", status: "completed", content: [],
-    }));
+    finished(plain, "github", "mcp_github_search_code", { query: "tgfx" });
     expect(rendered(details(final(plain)[0]).blocks)).not.toContain("custom_emoji");
   });
 
-  test("prefers exact FX tool icons over MCP server matching", () => {
+  test("prefers exact fx tool icons over MCP server matching", () => {
     const projector = new AcpProjector({
       "tool:read_file": "read-file-emoji",
-      "tool:mcp_search_tools": "mcp-search-emoji",
+      "tool:web_fetch": "fetch-emoji",
       mcp: "generic-mcp-emoji",
     });
-    for (const [id, name, title] of [
-      ["read", "read_file", "Reading file"],
-      ["search", "mcp_search_tools", "Searching MCP tools"],
-    ] as const) {
-      projector.apply(update({
-        sessionUpdate: "tool_call", toolCallId: id, name, title,
-        kind: "other", status: "completed", content: [],
-      }));
-    }
+    finished(projector, "read", "read_file", { path: "README.md" });
+    finished(projector, "fetch", "web_fetch", { url: "https://example.com" });
 
     const rows = details(final(projector)[0]).blocks;
     expect(rendered(rows[0])).toContain('"custom_emoji_id":"read-file-emoji"');
-    expect(rendered(rows[1])).toContain('"custom_emoji_id":"mcp-search-emoji"');
+    expect(rendered(rows[1])).toContain('"custom_emoji_id":"fetch-emoji"');
     expect(rendered(rows)).not.toContain("generic-mcp-emoji");
-  });
-
-  test("infers FX tool icons from stable ACP labels when name is absent", () => {
-    const projector = new AcpProjector({
-      "tool:read_file": "read-file-emoji",
-      "tool:vision": "vision-emoji",
-    });
-    for (const [id, title, kind] of [
-      ["read", "Reading README.md", "read"],
-      ["vision", "Inspected images", "read"],
-    ] as const) {
-      projector.apply(update({
-        sessionUpdate: "tool_call", toolCallId: id, title, kind,
-        status: "completed", content: [],
-      }));
-    }
-
-    const rows = details(final(projector)[0]).blocks;
-    expect(rendered(rows[0])).toContain('"custom_emoji_id":"read-file-emoji"');
-    expect(rendered(rows[1])).toContain('"custom_emoji_id":"vision-emoji"');
   });
 
   test("uses only the initial thinking block before real output", () => {
@@ -681,7 +409,7 @@ describe("ordered ACP projector", () => {
       content: { type: "text", text: "ignored" },
     }));
     expect(projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "pending", title: "Pending tool", status: "in_progress", content: [],
+      sessionUpdate: "tool_call", toolCallId: "pending", title: "Reading", status: "in_progress",
     }))).toBe("none");
     expect(draft(projector)).toEqual([{
       type: "thinking",
@@ -697,64 +425,28 @@ describe("ordered ACP projector", () => {
     expect(rendered(blocks)).not.toContain("ignored");
   });
 
-  test("renders arguments that arrive with completion and exact arguments recovered from content", () => {
+  test("renders arguments that only arrive with completion", () => {
     const projector = new AcpProjector();
     projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "late-input", title: "Searching", status: "pending", content: [],
+      sessionUpdate: "tool_call", toolCallId: "late-input", name: "grep_files", title: "Searching", status: "pending",
     }));
-    expect(draft(projector).map((block) => block.type)).toEqual(["thinking"]);
+    expect(details(draft(projector)[0]).blocks).toEqual([{ type: "paragraph", text: "Searching code" }]);
     projector.apply(update({
       sessionUpdate: "tool_call_update", toolCallId: "late-input", status: "completed",
-      rawInput: { query: "needle" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "content-argument", title: "Reading", status: "pending", content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call_update", toolCallId: "content-argument", status: "completed",
-      content: [{
-        type: "content",
-        content: { type: "text", text: "<path>src/projector.ts</path>\n<content>file body</content>" },
-      }],
+      rawInput: { pattern: "needle" },
     }));
 
     const group = details(draft(projector)[0]);
     expect(group.summary).toEqual(WORKING_SUMMARY);
-    expect(rendered(group)).toContain('\\"query\\":\\"needle\\"');
-    expect(rendered(group)).toContain("src/projector.ts");
-  });
-
-  test("renders exact terminal commands but never guesses arguments from arbitrary output", () => {
-    const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "terminal", title: "Using terminal",
-      status: "in_progress", content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call_update", toolCallId: "terminal", status: "completed",
-      rawOutput: { command: "bun test --filter projector", exit_code: 0 },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "opaque", title: "Custom tool",
-      status: "completed",
-      content: [{ type: "content", content: { type: "text", text: "result mentions secret-guess" } }],
-    }));
-
-    const group = details(draft(projector)[0]);
-    expect(rendered(group)).toContain("bun test --filter projector");
-    expect(rendered(group)).not.toContain("secret-guess");
+    expect(group.blocks).toEqual([{ type: "paragraph", text: ["Searching code", " ", { type: "code", text: "needle" }] }]);
   });
 
   test("keeps tool argument previews on one line and within 60 characters", () => {
     const projector = new AcpProjector();
     const command = `printf 'first line\nsecond line ${"x".repeat(160)}'`;
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "terminal", title: "Running",
-      status: "completed", rawOutput: { command, exit_code: 0 }, content: [],
-    }));
+    finished(projector, "shell", "shell", { action: "run", command });
 
-    const group = details(draft(projector)[0]);
-    const row = group.blocks[0];
+    const row = details(draft(projector)[0]).blocks[0];
     if (row?.type !== "paragraph" || !Array.isArray(row.text)) {
       throw new Error("Expected a rich tool preview row");
     }
@@ -762,64 +454,51 @@ describe("ordered ACP projector", () => {
       if (!part || typeof part !== "object" || Array.isArray(part)) return false;
       return (part as { type?: unknown }).type === "code";
     }) as { type: "code"; text: string } | undefined;
-    if (!preview) {
-      throw new Error("Expected a code-formatted tool argument preview");
-    }
+    if (!preview) throw new Error("Expected a code-formatted tool argument preview");
     expect(preview.text).not.toContain("\n");
     expect(preview.text).toContain("first line second line");
     expect([...preview.text].length).toBe(60);
     expect(preview.text.endsWith("…")).toBeTrue();
-
   });
 
-  test("never renders tool results inside the group", () => {
+  test("never renders tool output inside the group", () => {
     const projector = new AcpProjector();
     projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "expanded", title: "Inspecting",
+      sessionUpdate: "tool_call", toolCallId: "expanded", name: "read_file", title: "Reading",
       status: "completed", rawInput: { path: "src/app.ts" }, rawOutput: { lines: 10 },
       content: [{ type: "content", content: { type: "text", text: "hidden result" } }],
     }));
+    projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "opaque", title: "Custom tool", status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "result mentions secret-guess" } }],
+    }));
+
     const group = details(draft(projector)[0]);
     expect(group.is_open).toBeTrue();
-    expect(group.blocks.map((block) => block.type)).toEqual(["paragraph"]);
+    expect(group.blocks.map((block) => block.type)).toEqual(["paragraph", "paragraph"]);
     expect(rendered(group)).not.toContain("lines");
     expect(rendered(group)).not.toContain("hidden result");
+    expect(rendered(group)).not.toContain("secret-guess");
   });
 
   test("does not split a tool group on whitespace-only assistant chunks", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "one", title: "One", status: "completed", content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "\n\n   \n" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "two", title: "Two", status: "failed", content: [],
-    }));
+    finished(projector, "one", "read_file", { path: "one.ts" });
+    say(projector, "\n\n   \n");
+    finished(projector, "two", "read_file", { path: "two.ts" }, "failed");
 
     const blocks = draft(projector);
     expect(blocks.map((block) => block.type)).toEqual(["details"]);
     expect(details(blocks[0]).summary).toEqual(WORKING_SUMMARY);
-    expect(rendered(blocks[0]).indexOf("One")).toBeLessThan(rendered(blocks[0]).indexOf("Two"));
+    expect(rendered(blocks[0]).indexOf("one.ts")).toBeLessThan(rendered(blocks[0]).indexOf("two.ts"));
   });
 
-  test("drops FX startup diagnostics without splitting surrounding output", () => {
+  test("drops fx startup diagnostics without splitting surrounding output", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Before diagnostics. " },
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "[context] skill catalog omitted 10 entries" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "skill discovery warning: invalid metadata" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "After diagnostics." },
-    }));
+    say(projector, "Before diagnostics. ");
+    say(projector, "[context] skill catalog omitted 10 entries");
+    say(projector, "skill discovery warning: invalid metadata");
+    say(projector, "After diagnostics.");
 
     expect(projector.snapshot().prose).toBe("Before diagnostics. After diagnostics.");
     const blocks = final(projector);
@@ -830,18 +509,9 @@ describe("ordered ACP projector", () => {
 
   test("drops diagnostics preceded by whitespace and markers split across chunks", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", messageId: "answer",
-      content: { type: "text", text: "Visible answer.\n\n[con" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", messageId: "answer",
-      content: { type: "text", text: "text] omitted startup details" },
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", messageId: "diagnostic",
-      content: { type: "text", text: "  skill discovery warning: invalid metadata" },
-    }));
+    say(projector, "Visible answer.\n\n[con", "answer");
+    say(projector, "text] omitted startup details", "answer");
+    say(projector, "  skill discovery warning: invalid metadata", "diagnostic");
     expect(projector.snapshot().prose).toBe("Visible answer.\n");
     expect(rendered(final(projector))).toContain("Visible answer.");
     expect(rendered(final(projector))).not.toContain("omitted startup details");
@@ -865,18 +535,13 @@ describe("ordered ACP projector", () => {
   test("redacts split secrets across streamed prose and compact tool rows", () => {
     const projector = new AcpProjector();
     const token = `123456789:${"A".repeat(30)}`;
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: `Never echo ${token.slice(0, 20)}` },
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", content: { type: "text", text: token.slice(20) },
-    }));
+    say(projector, `Never echo ${token.slice(0, 20)}`);
+    say(projector, token.slice(20));
     projector.apply(update({
       sessionUpdate: "tool_call", toolCallId: "secret", title: `Using ${token}`,
       status: "completed", rawInput: { token },
-      content: [{ type: "content", content: { type: "text", text: `<path>${token}</path>` } }],
     }));
+    finished(projector, "path", "read_file", { path: token });
 
     const draftOutput = rendered(draft(projector));
     const finalOutput = rendered(final(projector));
@@ -887,30 +552,22 @@ describe("ordered ACP projector", () => {
     }
   });
 
-  test("preserves assistant/tool order in the plain fallback and omits unfinished tools", () => {
+  test("preserves assistant/tool order in the plain fallback and lists unfinished tools", () => {
     const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Before." },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "one", title: "Tool one", status: "completed",
-      rawInput: { path: "one.ts" }, content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "After." },
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "two", title: "Tool two", status: "failed", content: [],
-    }));
-    projector.apply(update({
-      sessionUpdate: "tool_call", toolCallId: "unfinished", title: "Unfinished", status: "in_progress", content: [],
-    }));
+    say(projector, "Before.");
+    finished(projector, "one", "read_file", { path: "one.ts" });
+    say(projector, "After.");
+    finished(projector, "two", "read_file", { path: "two.ts" }, "failed");
+    call(projector, "unfinished", "read_file", { path: "unfinished.ts" });
 
     const plain = projector.plainFinal(true);
-    expect(plain.indexOf("Before.")).toBeLessThan(plain.indexOf("Tool one"));
-    expect(plain.indexOf("Tool one")).toBeLessThan(plain.indexOf("After."));
-    expect(plain.indexOf("After.")).toBeLessThan(plain.indexOf("Tool two"));
-    expect(plain).not.toContain("Unfinished");
+    expect(plain.indexOf("Before.")).toBeLessThan(plain.indexOf("one.ts"));
+    expect(plain.indexOf("one.ts")).toBeLessThan(plain.indexOf("After."));
+    expect(plain.indexOf("After.")).toBeLessThan(plain.indexOf("two.ts"));
+    // A tool that never finished is listed but not counted in its group.
+    const lastGroup = plain.slice(plain.indexOf("After."));
+    expect(lastGroup).toContain("Reading file unfinished.ts");
+    expect(lastGroup).not.toContain("Read 1 file");
     expect(projector.plainFinal(false)).toBe("Before.\n\nAfter.");
   });
 });

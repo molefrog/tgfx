@@ -168,7 +168,7 @@ export const TGFX_CUSTOM_ICONS: readonly CustomIconDefinition[] = [
   { id: "memory", label: "memory", kind: "tool", image: "tools/memory.webp", position: 144, customEmojiId: "5233704708610236161", emoji: "🛠️", aliases: ["memory"] },
   { id: "web_fetch", label: "web_fetch", kind: "tool", image: "tools/web_fetch.webp", position: 145, customEmojiId: "5231123858467110056", emoji: "🛠️", aliases: ["web_fetch"] },
   { id: "web_search", label: "web_search", kind: "tool", image: "tools/web_search.webp", position: 146, customEmojiId: "5233521133118072827", emoji: "🛠️", aliases: ["web_search"] },
-  { id: "terminal", label: "terminal", kind: "tool", image: "tools/terminal.webp", position: 147, customEmojiId: "5231454064142762787", emoji: "🛠️", aliases: ["terminal"] },
+  { id: "terminal", label: "terminal", kind: "tool", image: "tools/terminal.webp", position: 147, customEmojiId: "5231454064142762787", emoji: "🛠️", aliases: ["terminal", "shell"] },
   { id: "capability_search", label: "capability_search", kind: "tool", image: "tools/capability_search.webp", position: 148, customEmojiId: "5233500706253611774", emoji: "🛠️", aliases: ["capability_search"] },
   { id: "skill_search", label: "skill_search", kind: "tool", image: "tools/skill_search.webp", position: 149, customEmojiId: "5233300835655526735", emoji: "🛠️", aliases: ["skill_search"] },
   { id: "skill", label: "skill", kind: "tool", image: "tools/skill.webp", position: 150, customEmojiId: "5231309010212267182", emoji: "🛠️", aliases: ["skill"] },

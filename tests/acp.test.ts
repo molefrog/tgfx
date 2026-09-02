@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
-import { FxRouteSession, preserveFxCommandResult, sanitizeFxEnvironment } from "../src/fx/acp";
+import { FxRouteSession, sanitizeFxEnvironment } from "../src/fx/acp";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -32,42 +32,6 @@ async function events(path: string): Promise<Array<{ event: string; value: any }
 }
 
 describe("FX ACP transport", () => {
-  test("preserves FX terminal command metadata without replacing standard ACP output", () => {
-    const extension = preserveFxCommandResult({
-      jsonrpc: "2.0",
-      method: "session/update",
-      params: {
-        sessionId: "session",
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId: "terminal",
-          status: "completed",
-          command_result: { command: "bun test", exit_code: 0 },
-        },
-      },
-    } as acp.AnyMessage) as unknown as {
-      params: { update: { rawOutput?: unknown } };
-    };
-    expect(extension.params.update.rawOutput).toEqual({ command: "bun test", exit_code: 0 });
-
-    const standard = preserveFxCommandResult({
-      jsonrpc: "2.0",
-      method: "session/update",
-      params: {
-        sessionId: "session",
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId: "terminal",
-          rawOutput: { official: true },
-          command_result: { command: "ignored" },
-        },
-      },
-    } as acp.AnyMessage) as unknown as {
-      params: { update: { rawOutput?: unknown } };
-    };
-    expect(standard.params.update.rawOutput).toEqual({ official: true });
-  });
-
   test("does not expose Telegram host credentials to FX or its shell tools", () => {
     expect(sanitizeFxEnvironment({
       PATH: "/bin",
@@ -77,36 +41,6 @@ describe("FX ACP transport", () => {
       TGFX_MCP_ROUTE_KEY: "route",
       TGFX_INTERNAL_TELEGRAM_API_ROOT: "http://test",
     })).toEqual({ PATH: "/bin", OPENAI_API_KEY: "provider-owned-by-fx" });
-  });
-
-  test("delivers FX terminal command metadata through the validated ACP session", async () => {
-    const fake = await fakeBinary();
-    const updates: acp.SessionUpdate[] = [];
-    const session = new FxRouteSession({
-      workspace: fake.directory,
-      binary: fake.binary,
-      onUpdate: (value) => { updates.push(value); },
-    });
-    try {
-      await session.start();
-      await session.prompt([{ type: "text", text: "COMMAND_RESULT" }]);
-    } finally {
-      await session.dispose({ closeSession: true });
-    }
-
-    const terminal = updates.find((value) =>
-      value.sessionUpdate === "tool_call_update" && value.toolCallId === "terminal-extension"
-    );
-    expect(terminal).toMatchObject({
-      sessionUpdate: "tool_call_update",
-      toolCallId: "terminal-extension",
-      status: "completed",
-      rawOutput: {
-        command: "bun test --filter \"rich blocks\"",
-        cwd: "/workspace",
-        exit_code: 0,
-      },
-    });
   });
 
   test("preserves raw Markdown chunks through ACP untouched", async () => {

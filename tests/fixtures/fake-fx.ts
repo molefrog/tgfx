@@ -134,58 +134,30 @@ const app = acp.agent({ name: "fake-fx" })
         },
       });
     }
-    if (text.includes("COMMAND_RESULT")) {
+    // Tool calls mirror the fx wire shape: a pending `tool_call` with the
+    // tool's name and arguments, then a completed `tool_call_update`.
+    const runTool = async (toolCallId: string, name: string, kind: string, rawInput: object, output: string) => {
       await context.client.notify(acp.methods.client.session.update, {
         sessionId: context.params.sessionId,
-        update: {
-          sessionUpdate: "tool_call",
-          toolCallId: "terminal-extension",
-          title: "Using terminal",
-          kind: "execute",
-          status: "pending",
-        },
-      });
+        update: { sessionUpdate: "tool_call", toolCallId, name, title: name, kind, status: "pending", rawInput },
+      } as unknown as acp.SessionNotification);
       await context.client.notify(acp.methods.client.session.update, {
         sessionId: context.params.sessionId,
         update: {
           sessionUpdate: "tool_call_update",
-          toolCallId: "terminal-extension",
+          toolCallId,
           status: "completed",
-          command_result: {
-            command: "bun test --filter \"rich blocks\"",
-            cwd: "/workspace",
-            exit_code: 0,
-          },
-        },
-      } as unknown as acp.SessionNotification);
-    }
-    if (text.includes("MCP_TOOL")) {
-      await context.client.notify(acp.methods.client.session.update, {
-        sessionId: context.params.sessionId,
-        update: {
-          sessionUpdate: "tool_call",
-          toolCallId: "github-mcp",
-          name: "mcp_github_search_code",
-          title: "Searching GitHub",
-          kind: "other",
-          status: "completed",
-          content: [],
+          content: [{ type: "content", content: { type: "text", text: output } }],
         },
       });
+    };
+    if (text.includes("MCP_TOOL")) {
+      await runTool("github-mcp", "mcp_github_search_code", "other", { query: "tgfx" },
+        '{"server":"github","tool":"mcp_github_search_code","result":{"content":[]}}');
     }
     if (text.includes("FX_TOOL")) {
-      await context.client.notify(acp.methods.client.session.update, {
-        sessionId: context.params.sessionId,
-        update: {
-          sessionUpdate: "tool_call",
-          toolCallId: "read-file",
-          name: "read_file",
-          title: "Reading file",
-          kind: "read",
-          status: "completed",
-          content: [],
-        },
-      });
+      await runTool("read-file", "read_file", "read", { path: "README.md" },
+        "<path>README.md</path>\n<content>\n1\t# Sample\n</content>");
     }
     if (text.includes("PERMISSION")) {
       const decision = await context.client.request(acp.methods.client.session.requestPermission, {

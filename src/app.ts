@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
 import { AcpProjector } from "./fx/projector";
+import { describeTool } from "./fx/tools";
 import { isFxUsagePeriod, readFxUsage, type FxUsagePeriod } from "./fx/usage";
 import { StateStore, type InboxRow } from "./state";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
@@ -1422,12 +1423,15 @@ export class TgfxApp {
   ): Promise<acp.RequestPermissionResponse> {
     const id = crypto.randomUUID().replaceAll("-", "");
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const tool = describeTool({
+      name: (request.toolCall as { name?: string | null }).name,
+      title: request.toolCall.title,
+      input: request.toolCall.rawInput,
+    });
+    const prompt = tool.argument ? `${tool.title}\n${tool.argument}` : tool.title;
     this.state.createInteraction({
       id, botId: this.options.bot.id, routeKey: route.key, kind: "fx_permission",
-      payload: {
-        prompt: request.toolCall.title ?? "𝒇x tool permission",
-        options: request.options,
-      },
+      payload: { prompt, options: request.options },
       expiresAt,
     });
     const keyboard = request.options.map((option, index) => [{
@@ -1438,7 +1442,7 @@ export class TgfxApp {
     try {
       card = await this.options.telegram.sendText(
         this.config.approvals.chatId,
-        `𝒇x permission\n\n${request.toolCall.title ?? "Tool action"}`,
+        `𝒇x permission\n\n${prompt}`,
         this.config.approvals.topicId,
         { reply_markup: { inline_keyboard: keyboard } },
       );

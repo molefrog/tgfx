@@ -18,6 +18,8 @@ describe("MCP custom icons", () => {
     expect(mcpIconForTool(icons, "mcp_github_search_code")).toBe("5231279684175569128");
     expect(mcpIconForTool(icons, "mcp_unknown_service_call")).toBe("5231020053402527360");
     expect(fxToolIconForTool(icons, "terminal")).toBe("5231454064142762787");
+    // fx renamed its terminal tool to shell; both share the terminal icon.
+    expect(fxToolIconForTool(icons, "shell")).toBe("5231454064142762787");
   });
 
   test("renders no MCP icon when the caller supplies no icon map", () => {
