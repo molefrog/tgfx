@@ -96,7 +96,12 @@ Telegram Bot API:
    ACP processes are created lazily, one per active route. When the user supplied
    `tgfx --model <id>`, each process launches as `fx acp --model <id>` with the
    model ID as a separate argument.
-5. The terminal becomes a small append-only status view and waits. The same bot
+5. The terminal becomes a small live status view and waits: one line draws the
+   `telegram ── tgfx ── fx` link with polling health and messages moving along
+   it, one line per busy route shows who is talking and the turn as a glyph
+   trace, and a row of single-key switches follows. Logs stay hidden until `l`
+   opens a tail beneath. Without a terminal, or with `--no-tui`, tgfx prints a
+   plain append-only log instead. The same bot
    cannot be active in another local workspace until this process stops.
 6. An allowed person sends the bot a message. An ordinary private message starts
    a turn; a group message must use `/compact`, mention the bot, or reply to it.

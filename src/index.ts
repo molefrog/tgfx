@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { TgfxApp, type TgfxLogEvent } from "./app";
+import { StatusStore, type StatusEvent } from "./status";
 import {
   botPaths,
   loadConfig,
@@ -238,16 +239,44 @@ async function createConfig(paths: ProjectPaths, bot: BotIdentity, telegram: Tel
   return (await loadConfig(paths))!;
 }
 
-async function runtime(project: ProjectPaths, options: { json?: boolean } = {}): Promise<{
+/** Config and token when both are already on disk, so a run can skip setup and prompts. */
+async function knownWorkspace(project: ProjectPaths): Promise<{ config: TgfxConfig; token: string } | undefined> {
+  const config = await loadConfig(project);
+  if (!config) return undefined;
+  const token = tokenFromEnvironment() ?? await getBotToken(config.activeBotId);
+  return token ? { config, token } : undefined;
+}
+
+async function runtime(project: ProjectPaths, options: {
+  json?: boolean;
+  quiet?: boolean;
+  known?: { config: TgfxConfig; token: string };
+  /** Startup progress for the live view; each step reports before and after. */
+  boot?: (event: Extract<StatusEvent, { type: "boot" }>) => void;
+} = {}): Promise<{
   paths: WorkspacePaths; config: TgfxConfig; token: string; telegram: TelegramApi; bot: BotIdentity;
   fxBinary: string; release: () => Promise<void>;
 }> {
-  if (!options.json) banner();
+  const chatty = !options.json && !options.quiet;
+  const boot = options.boot ?? (() => undefined);
+  const step = async <T,>(name: "fx" | "telegram" | "lock", work: () => Promise<T>, done: (value: T) => string | undefined) => {
+    boot({ step: name, state: "running", type: "boot" });
+    try {
+      const value = await work();
+      const detail = done(value);
+      boot({ step: name, state: "done", type: "boot", ...(detail ? { detail } : {}) });
+      return value;
+    } catch (error) {
+      boot({ step: name, state: "failed", type: "boot", detail: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  };
+  if (chatty) banner();
   const fxBinary = process.env.FX_BINARY ?? "fx";
-  const fx = await inspectFx(fxBinary, project.workspace);
-  if (!options.json) ok(`fx ${fx.version} · ${fx.report.model} · ${fx.report.auth}`);
-  let config = await loadConfig(project);
-  let token = tokenFromEnvironment();
+  const fx = await step("fx", () => inspectFx(fxBinary, project.workspace), (report) => report.report.model);
+  if (chatty) ok(`fx ${fx.version} · ${fx.report.model} · ${fx.report.auth}`);
+  let config = options.known?.config ?? await loadConfig(project);
+  let token = options.known?.token ?? tokenFromEnvironment();
   let prompted = false;
   if (!token && config) token = await getBotToken(config.activeBotId);
   if (options.json && (!config || !token)) {
@@ -257,14 +286,15 @@ async function runtime(project: ProjectPaths, options: { json?: boolean } = {}):
     );
   }
   if (!token) { token = await askForToken(); prompted = true; }
-  const { telegram, bot } = await validateToken(token);
+  const validToken = token;
+  const { telegram, bot } = await step("telegram", () => validateToken(validToken), (result) => `@${result.bot.username ?? result.bot.id}`);
   if (config && config.activeBotId !== bot.id) {
     throw new CliError(
       `this folder is configured for bot ${config.activeBotId}, but the supplied token belongs to ${bot.id}`,
       "run tgfx auth to switch bots",
     );
   }
-  const release = await acquireRuntimeLock(bot.id, project.workspace);
+  const release = await step("lock", () => acquireRuntimeLock(bot.id, project.workspace), () => undefined);
   try {
     if (!config) config = await createConfig(project, bot, telegram);
     const webhook = await telegram.getWebhookInfo();
@@ -297,6 +327,7 @@ async function runCommand(tokens: string[]): Promise<void> {
       streaming: "boolean",
       "no-streaming": "boolean",
       "no-icons": "boolean",
+      "no-tui": "boolean",
       json: "boolean",
       "no-color": "boolean",
       debug: "boolean",
@@ -309,19 +340,43 @@ async function runCommand(tokens: string[]): Promise<void> {
   if (flags.streaming && flags["no-streaming"]) throw new CliError("choose --streaming or --no-streaming, not both");
   const streaming = flags.streaming ? true : flags["no-streaming"] ? false : undefined;
   const json = Boolean(flags.json);
-  const resolved = await runtime(projectPaths(), { json });
-  const { release, ...appRuntime } = resolved;
-  const log = createLogger(json);
-  if (flags.yolo) {
-    const message = "fx permission checks are disabled for this run (--yolo)";
-    if (json) log({ event: "permission.mode", message, mode: "yolo" });
-    else warn(message);
-  }
+  const project = projectPaths();
+  // The live view needs a terminal on both ends and a workspace that is already
+  // set up, so no prompt has to share the screen with it. Otherwise stay a plain log.
+  const known = json ? undefined : await knownWorkspace(project);
+  const live = !json && !flags["no-tui"] && known !== undefined
+    && Boolean(process.stderr.isTTY && process.stdin.isTTY);
+  const store = live ? new StatusStore({ yolo: Boolean(flags.yolo) }) : undefined;
+  const log = store ? (event: TgfxLogEvent) => store.logLine(event.message) : createLogger(json);
   let app: TgfxApp | undefined;
+  let view: { unmount(): void } | undefined;
+  let release: (() => Promise<void>) | undefined;
   const shutdown = () => void app?.stop();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   try {
+    if (store) {
+      const { startTui } = await import("./cli/tui");
+      view = startTui({
+        store,
+        controls: {
+          quit: shutdown,
+          setStreaming: (on) => app?.setStreaming(on),
+          setCustomIcons: (on) => app?.setCustomIcons(on),
+          setPaused: (on) => app?.setPaused(on),
+        },
+      });
+    }
+    const resolved = await runtime(project, {
+      json, quiet: live, ...(known ? { known } : {}), ...(store ? { boot: (event) => store.apply(event) } : {}),
+    });
+    const { release: releaseLock, ...appRuntime } = resolved;
+    release = releaseLock;
+    if (flags.yolo) {
+      const message = "fx permission checks are disabled for this run (--yolo)";
+      if (json) log({ event: "permission.mode", message, mode: "yolo" });
+      else if (!live) warn(message);
+    }
     app = new TgfxApp({
       ...appRuntime,
       mcpLaunch: Bun.isStandaloneExecutable
@@ -334,13 +389,16 @@ async function runCommand(tokens: string[]): Promise<void> {
         ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),
       },
       log,
+      ...(store ? { status: (event: StatusEvent) => store.apply(event) } : {}),
     });
+    store?.apply({ type: "settings", settings: app.settings() });
     await app.run();
   } finally {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
     await app?.stop();
-    await release();
+    await release?.();
+    view?.unmount();
     if (json) log({ event: "stopped", message: "stopped" });
     else ok("stopped");
   }

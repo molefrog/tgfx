@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { InputRichMessageWithoutUpload, Message, Update } from "grammy/types";
 import { TgfxApp } from "../src/app";
+import type { StatusEvent } from "../src/status";
 import { workspacePaths, type WorkspacePaths } from "../src/config";
 import { StateStore } from "../src/state";
 import type { TelegramApi } from "../src/telegram/api";
@@ -856,5 +857,110 @@ describe("tgfx host pipeline", () => {
         state: "resolved", result_json: JSON.stringify("allow"),
       });
     } finally { state.close(); }
+  });
+});
+
+describe("tgfx status feed", () => {
+  test("reports a turn to the status view from arrival to delivery", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-status-"));
+    temporary.push(workspace);
+    const paths = testPaths(workspace);
+    const fxBinary = await fakeFx(workspace);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: false,
+    };
+    let firstPoll = true;
+    let delivered!: () => void;
+    const permanent = new Promise<void>((resolve) => { delivered = resolve; });
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        if (firstPoll) { firstPoll = false; return [update(1, 42, "hello")]; }
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => true as const,
+      deleteCommands: async () => true as const,
+      sendRichDraft: async () => true as const,
+      sendRich: async () => { delivered(); return { message_id: 520 } as Message.TextMessage; },
+      sendText: async () => ({ message_id: 521 }) as Message.TextMessage,
+    } as unknown as TelegramApi;
+    const events: StatusEvent[] = [];
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined, status: (event) => events.push(event),
+    });
+    const running = app.run();
+    await Promise.race([permanent, Bun.sleep(5_000).then(() => { throw new Error("final delivery timed out"); })]);
+    await app.stop();
+    await running;
+
+    const kinds = events.map((event) =>
+      event.type === "turn" || event.type === "session" ? `${event.type}.${event.state}`
+        : event.type === "boot" ? `boot.${event.step}.${event.state}` : event.type);
+    expect(kinds.slice(0, 3)).toEqual(["boot.menus.running", "boot.menus.done", "boot.polling.done"]);
+    expect(kinds.indexOf("inbound")).toBeLessThan(kinds.indexOf("session.starting"));
+    expect(kinds.indexOf("session.starting")).toBeLessThan(kinds.indexOf("session.ready"));
+    expect(kinds.indexOf("turn.started")).toBeLessThan(kinds.indexOf("turn.event"));
+    expect(kinds.at(-1)).toBe("turn.finished");
+    const inbound = events.find((event) => event.type === "inbound");
+    expect(inbound).toMatchObject({ who: "User 42", route: { key: "100:42:0", chat: "User 42", group: false } });
+    const glyphs = events.flatMap((event) => event.type === "turn" && event.state === "event" ? [event.glyph] : []);
+    expect(glyphs).toContain("·");
+    const finished = events.at(-1);
+    expect(finished).toMatchObject({ type: "turn", state: "finished", outcome: "delivered" });
+    expect(typeof (finished as { seconds: number }).seconds).toBe("number");
+  });
+
+  test("pausing holds the poll loop until it is resumed", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-pause-"));
+    temporary.push(workspace);
+    const paths = testPaths(workspace);
+    const fxBinary = await fakeFx(workspace);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" },
+      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: false,
+    };
+    let resumed = false;
+    let pollsBeforeResume = 0;
+    let polls = 0;
+    let menusInstalled!: () => void;
+    const menus = new Promise<void>((resolve) => { menusInstalled = resolve; });
+    let firstPolled!: () => void;
+    const first = new Promise<void>((resolve) => { firstPolled = resolve; });
+    const telegram = {
+      getWebhookInfo: async () => ({ url: "" }),
+      getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        polls++;
+        if (!resumed) pollsBeforeResume++;
+        firstPolled();
+        return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
+      },
+      setCommands: async () => { menusInstalled(); return true as const; },
+      deleteCommands: async () => true as const,
+      sendText: async () => ({ message_id: 530 }) as Message.TextMessage,
+    } as unknown as TelegramApi;
+    const events: StatusEvent[] = [];
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary, log: () => undefined, status: (event) => events.push(event),
+    });
+    app.setPaused(true);
+    expect(app.settings().paused).toBe(true);
+    const running = app.run();
+    // Installing menus is the last awaited step before the poll loop parks on
+    // the gate; one macrotask flush lets it get there.
+    await menus;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(polls).toBe(0);
+    resumed = true;
+    app.setPaused(false);
+    await first;
+    expect(pollsBeforeResume).toBe(0);
+    expect(events.filter((event) => event.type === "settings").map((event) => (event as { settings: { paused: boolean } }).settings.paused)).toEqual([true, false]);
+    await app.stop();
+    await running;
   });
 });

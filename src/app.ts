@@ -33,6 +33,7 @@ import {
   TurnRenderer,
 } from "./telegram/renderer";
 import { redactSecrets } from "./secrets";
+import type { RouteLabel, Settings, StatusEvent, TraceGlyph } from "./status";
 import {
   commandFromText,
   groupMigrationFromUpdate,
@@ -143,6 +144,31 @@ function makePrompt(
 
 export type TgfxLogEvent = { event: string; message: string } & Record<string, unknown>;
 
+function senderName(message: InboundMessage): string {
+  return message.sender.kind === "unknown" ? "someone" : message.sender.displayName;
+}
+
+/** What the status view calls a route: a person in private, the chat title in a group. */
+function routeLabel(message: InboundMessage): RouteLabel {
+  const chat = (message.raw.message ?? message.raw.edited_message)?.chat;
+  const group = message.route.chatKind !== "private";
+  const title = chat && "title" in chat && chat.title ? chat.title : message.route.chatId;
+  const topic = message.route.topicId === "0" ? "" : `/${message.route.topicId}`;
+  return { key: message.route.key, chat: group ? `${title}${topic}` : senderName(message), group };
+}
+
+/** One glyph per ACP event for the status trace; undefined for events that say nothing new. */
+function traceGlyph(update: acp.SessionUpdate): TraceGlyph | undefined {
+  switch (update.sessionUpdate) {
+    case "agent_thought_chunk": return "⋯";
+    case "agent_message_chunk": return "·";
+    case "tool_call": return "▪";
+    case "tool_call_update":
+      return update.status === "completed" ? "▫" : update.status === "failed" ? "✗" : undefined;
+    default: return undefined;
+  }
+}
+
 export class TgfxApp {
   private readonly state: StateStore;
   private readonly sessions = new Map<string, FxRouteSession>();
@@ -154,6 +180,9 @@ export class TgfxApp {
   private readonly pendingSessionBootstrap = new Set<string>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
   private readonly stickerTemporaryDirectories = new Set<string>();
+  private readonly routeLabels = new Map<string, RouteLabel>();
+  private readonly queueWaiting = new Map<string, number>();
+  private resumePolling?: () => void;
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
   private customIconsEnabled: boolean;
@@ -177,6 +206,8 @@ export class TgfxApp {
     renderer?: Partial<RendererConfig>;
     customIcons?: boolean;
     log?: (event: TgfxLogEvent) => void;
+    /** Live status for the terminal view; distinct from the log. */
+    status?: (event: StatusEvent) => void;
   }) {
     this.config = options.config;
     this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
@@ -189,9 +220,59 @@ export class TgfxApp {
     (this.options.log ?? ((value: TgfxLogEvent) => console.log(value.message)))(event);
   }
 
+  private status(event: StatusEvent): void {
+    this.options.status?.(event);
+  }
+
+  private setWaiting(routeKeyValue: string, waiting: number): void {
+    this.queueWaiting.set(routeKeyValue, Math.max(0, waiting));
+    const label = this.routeLabels.get(routeKeyValue);
+    if (label) this.status({ type: "queue", route: label, waiting: Math.max(0, waiting) });
+  }
+
+  private labelFor(route: Route): RouteLabel {
+    return this.routeLabels.get(route.key)
+      ?? { key: route.key, chat: this.label(route.chatId, route.topicId), group: route.chatKind !== "private" };
+  }
+
   private label(chatId: string, topicId = "0"): string {
     return topicId === "0" ? chatId : `${chatId}/${topicId}`;
   }
+
+  /** The switches the terminal view can flip while the process runs. */
+  settings(): Settings {
+    return {
+      streaming: this.rendererConfig.mode === "streaming",
+      customIcons: this.customIconsEnabled,
+      paused: this.resumePolling !== undefined,
+      yolo: this.options.permissionMode === "yolo",
+    };
+  }
+
+  /** Applies to the next turn; a running turn keeps the mode it started with. */
+  setStreaming(on: boolean): void {
+    this.options.renderer = { ...this.options.renderer, mode: on ? "streaming" : "final" };
+    this.status({ type: "settings", settings: this.settings() });
+  }
+
+  setCustomIcons(on: boolean): void {
+    this.customIconsEnabled = on;
+    this.status({ type: "settings", settings: this.settings() });
+  }
+
+  /** Paused, tgfx stops asking Telegram for updates; nothing is acknowledged or lost. */
+  setPaused(on: boolean): void {
+    if (on && !this.resumePolling) {
+      this.pollGate = new Promise<void>((resolve) => { this.resumePolling = resolve; });
+    } else if (!on && this.resumePolling) {
+      this.resumePolling();
+      this.resumePolling = undefined;
+      this.pollGate = undefined;
+    }
+    this.status({ type: "settings", settings: this.settings() });
+  }
+
+  private pollGate?: Promise<void>;
 
   async run(): Promise<void> {
     const webhook = await this.options.telegram.getWebhookInfo();
@@ -205,10 +286,12 @@ export class TgfxApp {
         discarded: adoption.discarded,
       });
     }
+    this.status({ type: "boot", step: "menus", state: "running" });
     await recoverOutbox(this.options.telegram, this.state);
     this.state.prune();
     await pruneBotFiles(this.options.paths.files);
     await this.installInitialMenus();
+    this.status({ type: "boot", step: "menus", state: "done" });
     const recovery = this.state.recoverInbox();
     if (recovery.interrupted) {
       await this.options.telegram.sendText(
@@ -232,6 +315,7 @@ export class TgfxApp {
       workspace: this.options.paths.workspace,
       renderer: this.rendererConfig.mode,
     });
+    this.status({ type: "boot", step: "polling", state: "done" });
     this.pollTask = this.poll();
     await Promise.race([this.pollTask, this.stopped]);
   }
@@ -309,10 +393,13 @@ export class TgfxApp {
   private async poll(): Promise<void> {
     let backoff = 500;
     while (!this.stopping) {
+      if (this.pollGate) await Promise.race([this.pollGate, this.stopped]);
+      if (this.stopping) break;
       try {
         const updates = await this.options.telegram.getUpdates(
           this.state.nextOffset(this.options.bot.id), 25, this.pollAbort.signal,
         );
+        if (backoff !== 500) this.status({ type: "poll", state: "listening" });
         backoff = 500;
         for (const update of updates) await this.accept(update);
       } catch (error) {
@@ -327,6 +414,7 @@ export class TgfxApp {
           throw error;
         }
         this.log(`Telegram poll failed · ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
+        this.status({ type: "poll", state: "reconnecting", retryMs: backoff });
         await Promise.race([Bun.sleep(backoff), this.stopped]);
         backoff = Math.min(30_000, backoff * 2);
       }
@@ -413,6 +501,9 @@ export class TgfxApp {
           : {}),
       });
       if (id !== undefined) {
+        const label = routeLabel(message);
+        this.routeLabels.set(label.key, label);
+        this.status({ type: "inbound", route: label, who: senderName(message) });
         const mediaGroupId = String(message.provenance?.media_group_id ?? "");
         if (mediaGroupId) this.scheduleAlbum(id, message.route.key, mediaGroupId);
         else {
@@ -510,7 +601,13 @@ export class TgfxApp {
 
   private enqueue(inboxId: number, routeKeyValue: string): void {
     const previous = this.queueTails.get(routeKeyValue) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => this.dispatch(inboxId));
+    // Waiting counts everything behind the item the route is busy with.
+    const busy = this.queueTails.has(routeKeyValue);
+    if (busy) this.setWaiting(routeKeyValue, (this.queueWaiting.get(routeKeyValue) ?? 0) + 1);
+    const next = previous.catch(() => undefined).then(() => {
+      if (busy) this.setWaiting(routeKeyValue, (this.queueWaiting.get(routeKeyValue) ?? 1) - 1);
+      return this.dispatch(inboxId);
+    });
     let tail!: Promise<void>;
     tail = next.finally(() => {
       if (this.queueTails.get(routeKeyValue) === tail) this.queueTails.delete(routeKeyValue);
@@ -993,6 +1090,7 @@ export class TgfxApp {
           const updated = await (await this.session(route)).setModel(model.value);
           const selected = updated.options.find((option) => option.value === updated.currentValue) ?? model;
           view = selectedModel(selected);
+          this.status({ type: "model", route: this.labelFor(route), model: updated.currentValue });
           this.log({
             event: "session.model_changed",
             message: `${this.label(route.chatId, route.topicId)} · model changed · ${updated.currentValue}`,
@@ -1283,7 +1381,10 @@ export class TgfxApp {
     );
     this.activeTurns.set(message.route.key, controller);
     this.activeDraftIds.set(message.route.key, renderer.draftId);
+    const statusRoute = this.labelFor(message.route);
     const remove = session.onUpdate((update) => {
+      const glyph = traceGlyph(update);
+      if (glyph) this.status({ type: "turn", route: statusRoute, state: "event", glyph });
       renderer.changed(projector.apply(update));
     });
     renderer.start();
@@ -1296,6 +1397,11 @@ export class TgfxApp {
       chat: message.route.chatId,
       topic: message.route.topicId,
     });
+    this.status({
+      type: "turn", route: statusRoute, state: "started",
+      who: senderName(message), text: (message.text ?? "").replace(/\s+/g, " ").trim(),
+    });
+    let outcome: "delivered" | "cancelled" | "failed" = "failed";
     try {
       await session.prompt(blocks, {
         signal: controller.signal,
@@ -1305,6 +1411,7 @@ export class TgfxApp {
         if (this.stopping) throw controller.signal.reason ?? new Error("tgfx stopped");
         await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
         this.state.clearLastPrompt(message.route.key);
+        outcome = "cancelled";
         this.log({ event: "turn.cancelled", message: `${routeLabel} · turn cancelled`, chat: message.route.chatId });
         return;
       }
@@ -1314,6 +1421,7 @@ export class TgfxApp {
         effectKey: `final:${this.options.bot.id}:${row.id}`,
       });
       this.state.clearLastPrompt(message.route.key);
+      outcome = "delivered";
       const seconds = ((performance.now() - startedAt) / 1_000).toFixed(1);
       this.log({
         event: "turn.delivered",
@@ -1327,11 +1435,16 @@ export class TgfxApp {
         if (this.stopping) throw error;
         await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
         this.state.clearLastPrompt(message.route.key);
+        outcome = "cancelled";
         this.log({ event: "turn.cancelled", message: `${routeLabel} · turn cancelled`, chat: message.route.chatId });
         return;
       }
       throw error;
     } finally {
+      this.status({
+        type: "turn", route: statusRoute, state: "finished", outcome,
+        seconds: Number(((performance.now() - startedAt) / 1_000).toFixed(1)),
+      });
       await renderer.abort();
       remove();
       this.activeTurns.delete(message.route.key);
@@ -1387,8 +1500,10 @@ export class TgfxApp {
       },
     });
     this.sessions.set(route.key, session);
+    this.status({ type: "session", route: this.labelFor(route), state: "starting" });
     try {
       const info = await session.start();
+      this.status({ type: "session", route: this.labelFor(route), state: "ready", model: info.model });
       this.state.setRouteSession(route.key, info.sessionId, info.replacedPrevious);
       if (hadNoSession || info.replacedPrevious) this.pendingSessionBootstrap.add(route.key);
       if (info.replacedPrevious) {
@@ -1411,6 +1526,7 @@ export class TgfxApp {
       return session;
     } catch (error) {
       this.sessions.delete(route.key);
+      this.status({ type: "session", route: this.labelFor(route), state: "gone" });
       await session.dispose();
       throw error;
     }
@@ -1450,12 +1566,16 @@ export class TgfxApp {
       this.state.expireInteraction(id);
       throw error;
     }
+    const statusRoute = this.labelFor(route);
+    this.status({ type: "turn", route: statusRoute, state: "event", glyph: "!" });
+    this.status({ type: "turn", route: statusRoute, state: "waiting", waiting: true });
     return new Promise<acp.RequestPermissionResponse>((resolve) => {
       let settled = false;
       const finish = (response: acp.RequestPermissionResponse) => {
         if (settled) return;
         settled = true;
         this.permissionWaiters.delete(id);
+        this.status({ type: "turn", route: statusRoute, state: "waiting", waiting: false });
         resolve(response);
       };
       this.permissionWaiters.set(id, {

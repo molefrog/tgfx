@@ -23,7 +23,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "bun build --target=bun --minify --sourcemap=linked src/index.ts --outdir dist --entry-naming=tgfx.js",
+    "build": "bun build --target=bun --minify --sourcemap=linked --external react-devtools-core src/index.ts --outdir dist --entry-naming=tgfx.js",
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "check": "bunx tsc --noEmit",
@@ -37,9 +37,13 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@types/bun": "latest",
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/react": "19",
     "grammy": "1.45.1",
+    "ink": "7.1.1",
+    "ink-testing-library": "4.0.0",
     "marked": "18.0.11",
     "qrcode-terminal": "^0.12.0",
+    "react": "19.2.8",
     "typescript": "latest",
     "zod": "4.4.3"
   }
