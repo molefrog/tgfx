@@ -1,6 +1,6 @@
 # 𝒕𝒈(𝒇x) specification
 
-> Status: implemented v0.1 specification, 23 August 2026. This document describes
+> Status: implemented v0.1 specification, 3 September 2026. This document describes
 > the current product contract and calls out remaining later work explicitly.
 
 𝒕𝒈(𝒇x), typed as `tgfx`, is a small local program that lets a Telegram chat talk
@@ -233,20 +233,47 @@ In a non-interactive terminal, tgfx never waits for a hidden prompt. It uses
 
 ### Normal run
 
-Running `tgfx` again selects the known bot and workspace configuration:
+Running `tgfx` again selects the known bot and workspace configuration and
+mounts a small live status view: a few lines redrawn in place, never a
+full-screen TUI.
 
 ```text
-tgfx 0.1.0
-✓ fx 0.0.6 · selected-model · authenticated provider
-@my_fx_bot · polling · /Users/me/code/my-project · streaming
-12:04:11 Mole Frog · turn started
-12:04:19 Mole Frog · delivered 1 message · 8.2s
+@my_fx_bot ●──·──────·──────·── tgfx ──·──────·──────·── ◐ fx
+  Mole Frog  review the failing tests  ⋯·▪▫·        9s · 2 tools · openai/gpt-5.4
+  f format  p pause ○  l log ○                                           q quit
 ```
 
-Steady-state lines use stable numeric chat/topic route IDs. `tgfx doctor`
-resolves live group names and rights when a human-readable diagnostic is
-needed, without maintaining a second chat directory. The wordmark stays plain
-ASCII in the terminal; the 𝒕𝒈(𝒇x) mark belongs to documentation.
+The first line is the wire. Its left segment is the long-poll link: dots flow
+while listening, and it breaks into `╌╌ ✕ retry 4s ╌╌` during backoff. Its
+right segment is the ACP link, with incoming messages and deliveries sliding
+along both as labelled packets. While tgfx starts, the wire assembles from
+tgfx outwards as each check (fx, token, lock, menus) comes back, so the delay
+before polling is visible rather than blank.
+
+One line per busy route names the chat, the person, and the turn as a glyph
+trace (`⋯` thinking, `·` prose, `▪`/`▫` tool started and finished, `!` waiting
+for approval, `✂` cancelled) with elapsed time, tool count, and the session's
+model. A group route also shows how many messages wait behind its turn. Idle,
+the line collapses to a summary of the last turn.
+
+The last line holds the switches: `f` opens a format menu (streaming, custom
+icons) navigated with arrows and space, `p` pauses polling without
+acknowledging anything, `l` shows a tail of the log beneath, and `q` quits.
+`✓ yolo` appears when FX permission checks are off for this run.
+
+The view needs a terminal on both ends and a workspace that is already set up.
+`--json`, `--no-tui`, and non-TTY runs print the plain append-only log instead:
+
+```text
+@my_fx_bot · polling · /Users/me/code/my-project · streaming
+12:04:11 6143594 · turn started
+12:04:19 6143594 · delivered 1 message · 8.2s
+```
+
+Log lines use stable numeric chat/topic route IDs. `tgfx doctor` resolves live
+group names and rights when a human-readable diagnostic is needed, without
+maintaining a second chat directory. The wordmark stays plain ASCII in the
+terminal; the 𝒕𝒈(𝒇x) mark belongs to documentation.
 
 If the same bot is active in another folder, startup stops before polling:
 
@@ -257,10 +284,6 @@ If the same bot is active in another folder, startup stops before polling:
 
 Stop that tgfx process before using this bot here.
 ```
-
-Steady-state output is append-only and readable in an ordinary terminal. Short
-setup tasks may use a spinner, but tgfx does not use a full-screen TUI. A
-`--json` mode provides machine-readable operational events.
 
 ### Workspace and bot execution model
 
@@ -400,8 +423,8 @@ The intended commands are deliberately limited. Each is one verb, one idea:
 | `tgfx auth [--remove]` | Add, rotate, or remove the Telegram bot token. |
 | `tgfx doctor` | Check FX, Telegram, the approvals chat, live admin rights, SQLite, and workspace access. |
 
-The run flags are `--model <id>`, `--yolo`, and
-`--streaming`/`--no-streaming`; `--json`, `--no-color`, and `--debug` are global.
+The run flags are `--model <id>`, `--yolo`, `--streaming`/`--no-streaming`,
+`--no-icons`, and `--no-tui`; `--json`, `--no-color`, and `--debug` are global.
 Human-readable output is the default and `--json` is the machine
 mode everywhere. Conversational output — banners, prompts, errors, hints — goes
 to stderr; primary command output goes to stdout, so `tgfx access --json | jq`
@@ -412,6 +435,8 @@ stays clean.
 | `--model <id>` | FX default/session model | Pass `<id>` directly as `fx acp --model <id>` for this run. The value is not saved by tgfx. |
 | `--yolo` | off (FX auto mode) | Disable FX permission checks for this process through `FX_PERMISSION_MODE=yolo`. tgfx's Telegram-admin approval layer remains active. |
 | `--streaming` / `--no-streaming` | streaming | Stream a private draft, or wait for one final response. The final response includes collapsed, labeled tool groups in either mode. |
+| `--no-icons` | off (`customIcons` true) | Plain buttons and tool rows instead of the `tgfx icons` custom emoji set. |
+| `--no-tui` | off | Print the plain append-only log instead of the live status view. |
 | `--json` | off | Emit terminal events as JSON Lines with a typed `event` field. |
 | `--no-color` | off | Disable terminal color (NO_COLOR is also honored). |
 | `--debug` | off | Show stack traces behind the one-line error output. |
@@ -448,6 +473,7 @@ change access or approvals keep those settings omitted.
 The token does not belong in this file. Allowlist and approvals-target IDs do:
 they are explicit workspace configuration, not model context or transient
 delivery state. SQLite continues to own route sessions and recovery state.
+
 ### Configuration changes
 
 Configuration commands validate and atomically replace `config.json`. A running
@@ -951,7 +977,7 @@ administrator-action approvals remain active.
 
 Temporary invite links, chat title/description/photo changes, default member
 permissions, reaction cleanup, sender-chat bans, and ownership-like operations
-are deliberately deferred. If added, they belong to a stricter manager profile.
+are deliberately deferred. If added, they need their own stricter gate.
 Invite URLs are secrets, and changing default permissions affects the entire
 group; neither should arrive through a generic Bot API escape hatch.
 
@@ -965,10 +991,7 @@ The MCP server negotiates the latest modern stdio protocol shared by the install
 SDK and FX build. MCP catalog subscriptions are not a Telegram event inbox and do
 not create ACP user turns. The tgfx host remains responsible for polling Telegram
 and deciding when an allowed message, interaction result, poll vote, or bounded
-admin context becomes a turn. The server publishes a rights-filtered catalog at
-session startup and re-checks the required Telegram right at execution; a
-promotion granted mid-session expands the catalog on the next session, while a
-demotion takes effect immediately through the execution-time re-check.
+admin context becomes a turn.
 
 ## Rendering FX in Telegram
 
@@ -1273,16 +1296,15 @@ The implementation should be small enough to navigate without a framework:
 
 | Module | Owns |
 | --- | --- |
-| `cli` | Commands, flags, cwd selection, safe FX argument pass-through, signals, and inline terminal output. |
-| `config` | Workspace config, bot selection, OS secrets, first-run flow, and validation. |
+| `index` | The entry point: commands, flags, first-run flow, safe FX argument pass-through, signals, and composition of everything below. |
+| `cli` | Terminal voice: colors, errors, help, the QR code, and the live status view (`tui`). |
+| `config`, `secrets`, `lock` | Workspace config and validation, the OS credential store, and the machine-wide bot lock. |
 | `state` | SQLite schema, transactions, inbox/outbox/effect/approval recovery, and retention. |
-| `telegram` | grammY client, owned long-poll loop, normalization, allowlist gate, scoped command-menu reconciliation, live permission checks, and API errors. |
-| `routing` | Route keys, per-route queue, cancellation, and FX session generations. |
-| `attachments` | Opaque references, album collection, validated downloads, temporary files, and cleanup. |
-| `fx` | `fx acp` process lifecycle, ACP client, session create/resume/prompt/cancel, available-command snapshots, slash-command forwarding, and permission events. |
-| `telegram-mcp` | Scoped action methods, opaque-ref resolution, interaction callbacks, live admin-rights derivation, and capability validation. |
-| `projector` | Reduction of ACP text/tool/permission events into a current semantic timeline. |
-| `renderer` | Rich blocks, drafts, final messages, fallback entities, splitting, throttle, and retry. |
+| `app` | The host: owned long-poll loop, allowlist gate, routes and per-route queues, turns, cancellation, approvals, command menus, album collection, and the typed status feed. |
+| `status` | The status event contract and the store the live view renders. |
+| `telegram` | grammY client and API errors, update normalization and opaque refs, rich Markdown, the draft scheduler and renderer, the model picker, the cost report, and custom icons. |
+| `fx` | fx preflight, `fx acp` process lifecycle and ACP client, the projector that reduces ACP events into a timeline, tool descriptions, and usage. |
+| `mcp` | The scoped Telegram action server: opaque-ref resolution, validated downloads and paths, live admin-rights derivation, and the agent guidelines. |
 
 Composition belongs in one small entry point. Telegram-specific types should not
 leak into the ACP client, and raw ACP event shapes should not leak into the Bot
@@ -1299,9 +1321,9 @@ specific shapes they consume.
 - an **owned `getUpdates` loop**, rather than a helper that advances an in-memory
   cursor before SQLite has accepted the work;
 - **`bun:sqlite`** directly, with one small v0.1 schema and no ORM;
-- **Citty** for CLI command parsing;
-- **Clack** for the hidden token prompt, confirms, finite spinners, and readable
-  inline status;
+- **`node:util` `parseArgs`** for flags; there is no CLI framework;
+- **Clack** for the hidden token prompt, confirms, and finite setup spinners;
+- **Ink** for the live status view; the plain log path needs no library;
 - **Zod** at untrusted JSON boundaries;
 - **`bun:test`** plus protocol fixtures and fake Telegram/FX transports.
 
@@ -1396,9 +1418,9 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   administrator-right rules. A missing message is treated as already absent, but
   tgfx does not infer a generic deletion event because standard bots do not
   receive one.
-- Join-request updates are accepted only when that group enables the
-  `join_requests` profile and the bot has `can_invite_users`. Pending requests
-  expire locally; a late approval result cannot act on a different request.
+- Join-request updates are accepted only for an allowlisted group where the bot
+  has `can_invite_users`. Pending requests expire locally; a late approval
+  result cannot act on a different request.
 
 ### Telegram message shape
 
@@ -1527,7 +1549,7 @@ the current private-chat bridge:
 - FX session resume behavior after abrupt termination, including MCP capability
   restoration and permission state;
 - which additional FX commands deserve purpose-built Telegram interactions after
-  `/compact`;
+  `/clear`, `/compact`, `/model`, and `/cost`;
 - approval-card usability, callback expiry, and concurrent permission requests
   across Telegram clients;
 - Rich Message behavior across current Telegram mobile, desktop, and web clients,
@@ -1574,8 +1596,9 @@ From a clean machine and a real repository, a user can:
    accurate context envelope reach the correct FX session;
 3. receive a responsive private rich draft or one final group response, with
    correct markup and optional tool collapsing;
-4. invoke `/compact`, see its dedicated progress and completion states, and never
-   forward any other slash command as a model prompt;
+4. invoke `/clear`, `/compact`, `/model`, and `/cost`, see their dedicated
+   progress and completion states, and never see any other slash command
+   forwarded as a model prompt;
 5. cancel a turn and queue another message without corrupting the route;
 6. restart tgfx at every documented reliability boundary without losing a
    locally accepted update, silently replaying an uncertain FX turn, or violating
@@ -1615,6 +1638,6 @@ From a clean machine and a real repository, a user can:
 - [Bun secrets](https://bun.sh/docs/runtime/secrets)
 - [grammY](https://grammy.dev/)
 - [Clack](https://github.com/bombshell-dev/clack)
-- [Citty](https://github.com/unjs/citty)
+- [Ink](https://github.com/vadimdemedes/ink)
 - [Hermes Agent Telegram gateway](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/messaging/telegram.md)
 - [Hermes Agent security model](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/security.md)
