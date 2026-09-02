@@ -55,11 +55,12 @@ describe("Telegram renderer boundaries", () => {
     projector.apply({
       sessionUpdate: "tool_call",
       toolCallId: "tests",
-      title: "Running tests",
+      name: "shell",
+      title: "Running",
       kind: "execute",
       status: "completed",
-      content: [],
-    });
+      rawInput: { action: "run", command: "bun test" },
+    } as never);
     const renderer = new TurnRenderer(
       api,
       state,
@@ -74,7 +75,7 @@ describe("Telegram renderer boundaries", () => {
     expect(sent[0]?.blocks).toEqual([{
       type: "details",
       summary: "Ran 1 command",
-      blocks: [{ type: "paragraph", text: "Running command" }],
+      blocks: [{ type: "paragraph", text: ["Running command", " ", { type: "code", text: "bun test" }] }],
     }]);
   });
 

@@ -19,7 +19,7 @@ Telegram. Works with your locally installed 𝒇x, and provides as much latest T
 
 ## Install
 
-You need [Bun 1.4+](https://bun.sh), an authenticated `fx 0.0.7+`, and a bot
+You need [Bun 1.4+](https://bun.sh), an authenticated `fx 0.0.8+`, and a bot
 token from [@BotFather](https://t.me/BotFather).
 
 Why we depend on Bun? We use it to keep everything minimal and fast,

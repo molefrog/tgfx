@@ -31,40 +31,6 @@ type McpOptions = { command: string; args: string[]; env: Record<string, string>
 const START_TIMEOUT_MS = 30_000;
 const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-/**
- * FX 0.0.7 includes exact terminal metadata in `command_result`, an extension
- * field that ACP's stable schema otherwise removes. Move it to standard
- * `rawOutput` before validation while leaving any native raw output untouched.
- */
-export function preserveFxCommandResult(message: acp.AnyMessage): acp.AnyMessage {
-  if (!("method" in message) || "id" in message
-    || message.method !== acp.methods.client.session.update
-    || !isRecord(message.params)) return message;
-  const update = message.params.update;
-  if (!isRecord(update) || update.sessionUpdate !== "tool_call_update" || update.rawOutput !== undefined) {
-    return message;
-  }
-  const result = update.command_result;
-  if (!isRecord(result) || typeof result.command !== "string") return message;
-  return {
-    ...message,
-    params: { ...message.params, update: { ...update, rawOutput: result } },
-  } as acp.AnyMessage;
-}
-
-function preserveFxExtensions(stream: acp.Stream): acp.Stream {
-  return {
-    writable: stream.writable,
-    readable: stream.readable.pipeThrough(new TransformStream<acp.AnyMessage, acp.AnyMessage>({
-      transform(message, controller) { controller.enqueue(preserveFxCommandResult(message)); },
-    })),
-  };
-}
-
 export function sanitizeFxEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const clean = { ...environment };
   delete clean.TELEGRAM_BOT_TOKEN;
@@ -192,7 +158,7 @@ export class FxRouteSession {
 
     const input = Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>;
     const output = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
-    const stream = preserveFxExtensions(acp.ndJsonStream(input, output));
+    const stream = acp.ndJsonStream(input, output);
     const app = acp.client({ name: "tgfx" })
       .onNotification(acp.methods.client.session.update, async ({ params }) => {
         if (params.update.sessionUpdate === "config_option_update") {
