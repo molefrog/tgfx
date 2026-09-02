@@ -19,11 +19,8 @@ Telegram. Works with your locally installed 𝒇x, and provides as much latest T
 
 ## Install
 
-You need [Bun 1.4+](https://bun.sh), an authenticated `fx` from the dev
-channel (`fx upgrade --channel dev`, until the next stable release), and a bot
-token from [@BotFather](https://t.me/BotFather). Tool rows in Telegram rely on
-the tool names fx started sending over ACP in
-[vercel-labs/fx#556](https://github.com/vercel-labs/fx/pull/556).
+You need [Bun 1.4+](https://bun.sh), an authenticated `fx 0.0.8+`, and a bot
+token from [@BotFather](https://t.me/BotFather).
 
 Why we depend on Bun? We use it to keep everything minimal and fast,
 reusing as much of Bun's built-ins as possible (SQLite, image compression etc.).
