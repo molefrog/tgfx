@@ -354,6 +354,8 @@ async function runCommand(tokens: string[]): Promise<void> {
   // for the setup prompts and mounts the view once they are done.
   const mount = async () => {
     if (!store || view) return;
+    // After setup, wipe the prompts and QR code so the view starts on a clean screen.
+    if (!known) process.stderr.write("[2J[3J[H");
     const { startTui } = await import("./cli/tui");
     view = startTui({
       store,
