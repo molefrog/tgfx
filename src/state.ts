@@ -6,6 +6,9 @@ import type { InboundMessage, Route } from "./types";
 type InboxStatus = "received" | "dispatching" | "running" | "done" | "failed" | "interrupted" | "discarded";
 type OutboxStatus = "pending" | "sending" | "sent" | "failed" | "abandoned";
 
+/** The Telegram message that carries an interaction's buttons. */
+export type InteractionCard = { chatId: string; messageId: number };
+
 export type InboxRow = {
   id: number;
   bot_id: string;
@@ -882,6 +885,27 @@ export class StateStore {
       UPDATE telegram_interactions SET state='expired',updated_at=$now
       WHERE route_key=$route AND kind=$kind AND state='pending'
     `).run({ route: routeKey, kind, now: now() }).changes;
+  }
+
+  /** Remembers which Telegram message carries an interaction's buttons. */
+  attachInteractionCard(id: string, card: InteractionCard): void {
+    this.db.query(`
+      UPDATE telegram_interactions SET payload_json=json_set(payload_json,'$.card',json($card)),updated_at=$now
+      WHERE interaction_id=$id
+    `).run({ id, card: JSON.stringify(card), now: now() });
+  }
+
+  /** Approval cards still waiting for an answer, oldest first. */
+  pendingApprovals(botId: string): Array<{ id: string; kind: string; card?: InteractionCard }> {
+    const rows = this.db.query<{ interaction_id: string; kind: string; payload_json: string }, [string]>(`
+      SELECT interaction_id, kind, payload_json FROM telegram_interactions
+      WHERE bot_id=? AND state='pending' AND (kind='fx_permission' OR kind LIKE 'telegram_admin:%')
+      ORDER BY updated_at
+    `).all(botId);
+    return rows.map((row) => {
+      const card = (JSON.parse(row.payload_json) as { card?: InteractionCard }).card;
+      return { id: row.interaction_id, kind: row.kind, ...(card ? { card } : {}) };
+    });
   }
 
   prune(): void {

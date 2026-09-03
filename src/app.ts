@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
-import { FxRouteSession, type FxPermissionMode } from "./fx/acp";
+import { FxRouteSession, rejectedPermission, type FxPermissionMode } from "./fx/acp";
 import { AcpProjector } from "./fx/projector";
 import { describeTool } from "./fx/tools";
 import { isFxUsagePeriod, readFxUsage, type FxUsagePeriod } from "./fx/usage";
@@ -100,10 +100,36 @@ type PersistedPayload =
 
 type PermissionWaiter = {
   options: acp.PermissionOption[];
-  messageId: number;
   routeKey: string;
-  resolve(value: acp.RequestPermissionResponse): void;
+  /** Answers fx, then relabels the card and the waiting notice. Idempotent. */
+  settle(response: acp.RequestPermissionResponse, label: string, notice: string): Promise<void>;
 };
+
+const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+const WAITING_HERE = "Waiting for your approval above…";
+const WAITING_ELSEWHERE = "𝒇x is waiting for approval in the approvals chat…";
+
+/** A card's buttons once it can no longer be answered. */
+function resolvedKeyboard(label: string): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  return { inline_keyboard: [[{ text: label, callback_data: "resolved" }]] };
+}
+
+function isReject(option: acp.PermissionOption): boolean {
+  return option.kind === "reject_once" || option.kind === "reject_always";
+}
+
+/**
+ * One button per fx option, in fx's order. Session-wide grants say so, and a
+ * Cancel row is added when fx offers no way to decline.
+ */
+function permissionKeyboard(id: string, options: acp.PermissionOption[]): Array<Array<{ text: string; callback_data: string }>> {
+  const rows = options.map((option, index) => [{
+    text: option.kind.endsWith("_always") ? `${option.name} · session` : option.name,
+    callback_data: `fxp:${id}:${index}`,
+  }]);
+  if (!options.some(isReject)) rows.push([{ text: "Cancel", callback_data: `fxp:${id}:cancel` }]);
+  return rows;
+}
 
 function uuid(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -178,6 +204,8 @@ export class TgfxApp {
   private readonly activeDraftIds = new Map<string, number>();
   private readonly draftLimiters = new Map<string, PeerDraftLimiter>();
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
+  /** The live draft of each running turn, so a pending approval can show in it. */
+  private readonly activeRenderers = new Map<string, { projector: AcpProjector; renderer: TurnRenderer }>();
   private readonly pendingSessionBootstrap = new Set<string>();
   private readonly albums = new Map<string, { ids: number[]; timer: ReturnType<typeof setTimeout> }>();
   private readonly stickerTemporaryDirectories = new Set<string>();
@@ -203,6 +231,8 @@ export class TgfxApp {
     fxBinary: string;
     model?: string;
     permissionMode?: FxPermissionMode;
+    /** How long an approval card stays answerable. Default: five minutes. */
+    permissionTimeoutMs?: number;
     mcpLaunch?: { command: string; args: string[] };
     renderer?: Partial<RendererConfig>;
     customIcons?: boolean;
@@ -289,6 +319,7 @@ export class TgfxApp {
     }
     this.status({ type: "boot", step: "menus", state: "running" });
     await recoverOutbox(this.options.telegram, this.state);
+    await this.expireStaleApprovals();
     this.state.prune();
     await pruneBotFiles(this.options.paths.files);
     await this.installInitialMenus();
@@ -350,23 +381,19 @@ export class TgfxApp {
     this.pollAbort.abort(new Error("tgfx is stopping"));
     for (const album of this.albums.values()) clearTimeout(album.timer);
     this.albums.clear();
-    for (const controller of this.activeTurns.values()) controller.abort(new Error("tgfx is stopping"));
-    this.activeDraftIds.clear();
+    // Settle open cards before aborting their turns, so they say why they closed.
     const expiredCards: Promise<unknown>[] = [];
     for (const [id, waiter] of this.permissionWaiters) {
-      const reject = waiter.options.find((option) => option.kind === "reject_once")
-        ?? waiter.options.find((option) => option.kind === "reject_always");
       this.state.expireInteraction(id);
-      expiredCards.push(this.options.telegram.editReplyMarkup(
-        this.config.approvals.chatId,
-        waiter.messageId,
-        { inline_keyboard: [[{ text: "Cancelled · tgfx stopped", callback_data: "resolved" }]] },
-      ).catch(() => undefined));
-      waiter.resolve(reject
-        ? { outcome: { outcome: "selected", optionId: reject.optionId } }
-        : { outcome: { outcome: "cancelled" } });
+      expiredCards.push(waiter.settle(
+        rejectedPermission(waiter.options),
+        "Cancelled · tgfx stopped",
+        "Approval cancelled: tgfx stopped.",
+      ));
     }
     this.permissionWaiters.clear();
+    for (const controller of this.activeTurns.values()) controller.abort(new Error("tgfx is stopping"));
+    this.activeDraftIds.clear();
     await Promise.allSettled(expiredCards);
     // `run()` may have returned through the stop signal while `poll()` was
     // finishing one accepted update. Let that code leave the state boundary
@@ -1155,12 +1182,18 @@ export class TgfxApp {
       const approval = this.state.interaction(id);
       const accepted = approval?.kind.startsWith("telegram_admin:") === true
         && this.state.resolveInteraction(id, value);
-      if (!accepted) this.state.expireInteraction(id);
-      await this.options.telegram.answerCallback(callback.id, accepted ? `Action ${value}d` : "This approval expired");
-      if ("message_id" in callback.message) {
-        await this.options.telegram.editReplyMarkup(route.chatId, callback.message.message_id, {
-          inline_keyboard: [[{ text: accepted ? `Resolved · ${value}` : "Expired", callback_data: "resolved" }]],
-        }).catch(() => undefined);
+      const answered = !accepted && approval?.state === "resolved";
+      if (!accepted && !answered) this.state.expireInteraction(id);
+      await this.options.telegram.answerCallback(
+        callback.id,
+        accepted ? `Action ${value}d` : answered ? "Already answered" : "This approval expired",
+      );
+      if (!answered && "message_id" in callback.message) {
+        await this.options.telegram.editReplyMarkup(
+          route.chatId,
+          callback.message.message_id,
+          resolvedKeyboard(accepted ? `Resolved · ${value}` : "Expired"),
+        ).catch(() => undefined);
       }
       return;
     }
@@ -1170,26 +1203,36 @@ export class TgfxApp {
         return;
       }
       const waiter = this.permissionWaiters.get(id);
-      const option = waiter?.options[Number(value)];
-      if (!waiter || !option) {
-        this.state.expireInteraction(id);
-        await this.options.telegram.answerCallback(callback.id, "This permission request expired");
-        return;
-      }
       const approval = this.state.interaction(id);
-      if (approval?.kind !== "fx_permission" || !this.state.resolveInteraction(id, option.optionId)) {
-        this.state.expireInteraction(id);
+      if (!waiter || approval?.kind !== "fx_permission") {
+        const answered = approval?.state === "resolved";
+        if (!answered) this.state.expireInteraction(id);
+        await this.options.telegram.answerCallback(
+          callback.id,
+          answered ? "Already answered" : "This permission request expired",
+        );
+        return;
+      }
+      const cancel = value === "cancel";
+      const option = cancel ? undefined : waiter.options[Number(value)];
+      if (!cancel && !option) {
+        await this.options.telegram.answerCallback(callback.id, "Unknown option");
+        return;
+      }
+      if (!this.state.resolveInteraction(id, cancel ? "cancel" : option!.optionId)) {
         await this.options.telegram.answerCallback(callback.id, "This permission request expired");
         return;
       }
-      this.permissionWaiters.delete(id);
-      waiter.resolve({ outcome: { outcome: "selected", optionId: option.optionId } });
-      await this.options.telegram.answerCallback(callback.id, option.name);
-      if ("message_id" in callback.message) {
-        await this.options.telegram.editReplyMarkup(route.chatId, callback.message.message_id, {
-          inline_keyboard: [[{ text: `Resolved · ${option.name}`, callback_data: "resolved" }]],
-        }).catch(() => undefined);
-      }
+      const label = option?.name ?? "Cancel";
+      const settled = waiter.settle(
+        option
+          ? { outcome: { outcome: "selected", optionId: option.optionId } }
+          : { outcome: { outcome: "cancelled" } },
+        `Resolved · ${label}`,
+        `Approval · ${label}`,
+      );
+      await this.options.telegram.answerCallback(callback.id, label);
+      await settled;
       return;
     }
     if (kind === "choice" && id && value !== undefined) {
@@ -1392,6 +1435,7 @@ export class TgfxApp {
     );
     this.activeTurns.set(message.route.key, controller);
     this.activeDraftIds.set(message.route.key, renderer.draftId);
+    this.activeRenderers.set(message.route.key, { projector, renderer });
     const statusRoute = this.labelFor(message.route);
     const remove = session.onUpdate((update) => {
       const glyph = traceGlyph(update);
@@ -1460,6 +1504,7 @@ export class TgfxApp {
       remove();
       this.activeTurns.delete(message.route.key);
       this.activeDraftIds.delete(message.route.key);
+      this.activeRenderers.delete(message.route.key);
       if (activeContextRef) this.state.deactivateContext(message.route.key, activeContextRef);
     }
   }
@@ -1486,6 +1531,7 @@ export class TgfxApp {
           TGFX_MCP_TOKEN: this.options.token,
           TGFX_MCP_BOT_ID: this.options.bot.id,
           TGFX_MCP_ROUTE_KEY: route.key,
+          TGFX_MCP_ROUTE_LABEL: this.labelFor(route).chat,
           TGFX_MCP_WORKSPACE: this.options.paths.workspace,
           TGFX_MCP_HOME: tgfxHome(),
           TGFX_MCP_DATABASE: this.options.paths.database,
@@ -1543,86 +1589,120 @@ export class TgfxApp {
     }
   }
 
+  private isApprovalsRoute(route: Route): boolean {
+    return route.chatId === this.config.approvals.chatId && route.topicId === this.config.approvals.topicId;
+  }
+
+  /** Cards a previous process left open can no longer be answered by anyone. */
+  private async expireStaleApprovals(): Promise<void> {
+    await Promise.allSettled(this.state.pendingApprovals(this.options.bot.id).map(async (pending) => {
+      this.state.expireInteraction(pending.id);
+      if (!pending.card) return;
+      await this.options.telegram.editReplyMarkup(
+        pending.card.chatId,
+        pending.card.messageId,
+        resolvedKeyboard("Expired · tgfx restarted"),
+      ).catch(() => undefined);
+    }));
+  }
+
+  /**
+   * Shows fx's permission request as a card in the approvals chat and answers
+   * with the button that gets pressed. Timeout, Stop, and shutdown all answer
+   * with fx's reject option, so silence never grants anything.
+   */
   private async requestPermission(
     route: Route,
     request: acp.RequestPermissionRequest,
     signal?: AbortSignal,
   ): Promise<acp.RequestPermissionResponse> {
+    const rejected = rejectedPermission(request.options);
+    if (signal?.aborted) return rejected;
     const id = crypto.randomUUID().replaceAll("-", "");
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const timeoutMs = this.options.permissionTimeoutMs ?? PERMISSION_TIMEOUT_MS;
     const tool = describeTool({
       name: (request.toolCall as { name?: string | null }).name,
       title: request.toolCall.title,
       input: request.toolCall.rawInput,
     });
     const prompt = tool.argument ? `${tool.title}\n${tool.argument}` : tool.title;
+    const elsewhere = !this.isApprovalsRoute(route);
+    const origin = elsewhere ? ` · ${this.labelFor(route).chat}` : "";
     this.state.createInteraction({
       id, botId: this.options.bot.id, routeKey: route.key, kind: "fx_permission",
       payload: { prompt, options: request.options },
-      expiresAt,
+      expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
     });
-    const keyboard = request.options.map((option, index) => [{
-      text: option.name,
-      callback_data: `fxp:${id}:${index}`,
-    }]);
-    let card;
+
+    const statusRoute = this.labelFor(route);
+    const live = this.activeRenderers.get(route.key);
+    const done = Promise.withResolvers<acp.RequestPermissionResponse>();
+    let card: { message_id: number } | undefined;
+    let notice: { message_id: number } | undefined;
+    let settled = false;
+    let outcome: { label: string } | undefined;
+    const settle = async (response: acp.RequestPermissionResponse, label: string, noticeText: string) => {
+      if (settled) return;
+      settled = true;
+      outcome = { label };
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      this.permissionWaiters.delete(id);
+      this.status({ type: "turn", route: statusRoute, state: "waiting", waiting: false });
+      if (live) live.renderer.changed(live.projector.setWaiting(undefined));
+      done.resolve(response);
+      await Promise.allSettled([
+        card && this.options.telegram.editReplyMarkup(
+          this.config.approvals.chatId, card.message_id, resolvedKeyboard(label),
+        ),
+        notice && this.options.telegram.editText(route.chatId, notice.message_id, noticeText),
+      ]);
+    };
+    const onAbort = () => {
+      this.state.expireInteraction(id);
+      void settle(rejected, "Cancelled", "Approval cancelled.");
+    };
+    const timer = setTimeout(() => {
+      this.state.expireInteraction(id);
+      void settle(rejected, "Expired", "Approval expired.");
+    }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    this.permissionWaiters.set(id, { options: request.options, routeKey: route.key, settle });
+
     try {
       card = await this.options.telegram.sendText(
         this.config.approvals.chatId,
-        `𝒇x permission\n\n${prompt}`,
+        `𝒇x permission${origin}\n\n${prompt}`,
         this.config.approvals.topicId,
-        { reply_markup: { inline_keyboard: keyboard } },
+        { reply_markup: { inline_keyboard: permissionKeyboard(id, request.options) } },
       );
     } catch (error) {
+      if (settled) return done.promise;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      this.permissionWaiters.delete(id);
       this.state.expireInteraction(id);
       throw error;
     }
-    const statusRoute = this.labelFor(route);
+    this.state.attachInteractionCard(id, { chatId: this.config.approvals.chatId, messageId: card.message_id });
+    if (outcome) {
+      // Decided while the card was in flight: the card must not stay answerable.
+      await this.options.telegram.editReplyMarkup(
+        this.config.approvals.chatId, card.message_id, resolvedKeyboard(outcome.label),
+      ).catch(() => undefined);
+      return done.promise;
+    }
+    if (elsewhere) {
+      notice = await this.options.telegram.sendText(route.chatId, WAITING_ELSEWHERE, route.topicId)
+        .catch(() => undefined);
+    }
+    // A bot message hides the live draft; the next frame brings it back, now
+    // carrying the wait.
+    if (live) live.renderer.changed(live.projector.setWaiting(elsewhere ? WAITING_ELSEWHERE : WAITING_HERE));
     this.status({ type: "turn", route: statusRoute, state: "event", glyph: "!" });
     this.status({ type: "turn", route: statusRoute, state: "waiting", waiting: true });
-    return new Promise<acp.RequestPermissionResponse>((resolve) => {
-      let settled = false;
-      const finish = (response: acp.RequestPermissionResponse) => {
-        if (settled) return;
-        settled = true;
-        this.permissionWaiters.delete(id);
-        this.status({ type: "turn", route: statusRoute, state: "waiting", waiting: false });
-        resolve(response);
-      };
-      this.permissionWaiters.set(id, {
-        options: request.options, messageId: card.message_id,
-        routeKey: route.key, resolve: finish,
-      });
-      void (async () => {
-        while (!settled && !signal?.aborted && Date.now() < Date.parse(expiresAt)) {
-          const approval = this.state.interaction(id);
-          if (approval?.state === "resolved" && approval.result_json) {
-            const result = JSON.parse(approval.result_json) as unknown;
-            const selected = request.options.find((option) => option.optionId === result);
-            if (selected) {
-              finish({ outcome: { outcome: "selected", optionId: selected.optionId } });
-              return;
-            }
-          }
-          await Bun.sleep(250);
-        }
-        if (settled) return;
-        const reject = request.options.find((option) => option.kind === "reject_once")
-          ?? request.options.find((option) => option.kind === "reject_always");
-        if (this.state.expireInteraction(id)) {
-          await this.options.telegram.editReplyMarkup(
-            this.config.approvals.chatId,
-            card.message_id,
-            { inline_keyboard: [[{
-              text: signal?.aborted ? "Cancelled" : "Expired", callback_data: "resolved",
-            }]] },
-          ).catch(() => undefined);
-        }
-        finish(reject
-          ? { outcome: { outcome: "selected", optionId: reject.optionId } }
-          : { outcome: { outcome: "cancelled" } });
-      })();
-    });
+    return done.promise;
   }
 
   private async installInitialMenus(): Promise<void> {

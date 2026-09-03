@@ -21,6 +21,8 @@ type McpEnvironment = {
   files: string;
   approvalsChat: string;
   approvalsTopic: string;
+  /** What a person calls the route: a sender's name or a chat title. */
+  routeLabel?: string;
   allowedChats: string[];
   protectedUsers: string[];
   apiRoot?: string;
@@ -60,6 +62,7 @@ function environment(): McpEnvironment {
     files: resolve(required("TGFX_MCP_FILES")),
     approvalsChat: decimalId.parse(required("TGFX_MCP_APPROVALS_CHAT")),
     approvalsTopic: decimalId.parse(process.env.TGFX_MCP_APPROVALS_TOPIC ?? "0"),
+    ...(process.env.TGFX_MCP_ROUTE_LABEL ? { routeLabel: process.env.TGFX_MCP_ROUTE_LABEL } : {}),
     allowedChats: jsonEnvironment("TGFX_MCP_ALLOWED_CHATS", z.array(decimalId), []),
     protectedUsers: jsonEnvironment("TGFX_MCP_PROTECTED_USERS", z.array(decimalId), []),
     ...(process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT
@@ -251,9 +254,11 @@ export async function runTelegramMcpServer(): Promise<void> {
       id, botId: env.botId, routeKey: env.routeKey, kind: `telegram_admin:${capability}`,
       payload: { prompt, options: ["approve", "deny"] }, expiresAt,
     });
+    const elsewhere = env.routeKey !== `${env.botId}:${env.approvalsChat}:${env.approvalsTopic}`;
+    const origin = elsewhere && env.routeLabel ? ` · ${env.routeLabel}` : "";
     let card;
     try {
-      card = await telegram.sendText(env.approvalsChat, `Approval required\n\n${prompt}`, env.approvalsTopic, {
+      card = await telegram.sendText(env.approvalsChat, `Approval required${origin}\n\n${prompt}`, env.approvalsTopic, {
         reply_markup: { inline_keyboard: [[
           { text: "Approve", callback_data: `mcp:${id}:approve` },
           { text: "Deny", callback_data: `mcp:${id}:deny` },
@@ -263,6 +268,7 @@ export async function runTelegramMcpServer(): Promise<void> {
       state.expireInteraction(id);
       throw error;
     }
+    state.attachInteractionCard(id, { chatId: env.approvalsChat, messageId: card.message_id });
     while (Date.now() < Date.parse(expiresAt)) {
       const approval = state.interaction(id);
       if (approval?.state === "resolved" && approval.result_json) {

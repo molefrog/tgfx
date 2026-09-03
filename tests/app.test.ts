@@ -966,3 +966,292 @@ describe("tgfx status feed", () => {
     await running;
   });
 });
+
+type Keyboard = { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+type TelegramEvent =
+  | { kind: "sendText"; chat: string; topic: string; text: string; markup?: Keyboard; messageId: number }
+  | { kind: "editText"; chat: string; messageId: number; text: string }
+  | { kind: "editMarkup"; chat: string; messageId: number; markup: Keyboard }
+  | { kind: "answer"; text?: string }
+  | { kind: "draft"; chat: string; draftId: number; rich: InputRichMessageWithoutUpload }
+  | { kind: "sendRich"; chat: string; rich: InputRichMessageWithoutUpload; messageId: number };
+type SentText = Extract<TelegramEvent, { kind: "sendText" }>;
+type EditedText = Extract<TelegramEvent, { kind: "editText" }>;
+type EditedMarkup = Extract<TelegramEvent, { kind: "editMarkup" }>;
+type Draft = Extract<TelegramEvent, { kind: "draft" }>;
+type SentRich = Extract<TelegramEvent, { kind: "sendRich" }>;
+
+const OPS_CHAT = { id: -5, type: "supergroup", title: "Ops" };
+const OWN_CHAT = { id: 42, type: "private", first_name: "User 42" };
+
+function callbackUpdate(
+  updateId: number,
+  chat: Record<string, unknown>,
+  userId: number,
+  data: string,
+  messageId: number,
+): Update {
+  return {
+    update_id: updateId,
+    callback_query: {
+      id: `callback-${updateId}`, chat_instance: "instance", data,
+      from: { id: userId, is_bot: false, first_name: `User ${userId}` },
+      message: { message_id: messageId, date: Math.floor(Date.now() / 1_000), chat, text: "card" },
+    },
+  } as unknown as Update;
+}
+
+function buttons(card: SentText): Array<{ text: string; callback_data: string }> {
+  return card.markup?.inline_keyboard.flat() ?? [];
+}
+
+function resolvedLabel(edit: EditedMarkup): string {
+  return edit.markup.inline_keyboard[0]?.[0]?.text ?? "";
+}
+
+/** A running app over the fake fx and a scripted Telegram that records every call. */
+async function permissionHarness(options: {
+  approvals: { chatId: string; topicId: string };
+  streaming?: boolean;
+  timeoutMs?: number;
+  seed?: (state: StateStore) => void;
+}) {
+  const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-permission-"));
+  temporary.push(workspace);
+  const paths = testPaths(workspace);
+  const logPath = join(workspace, "fx-events.jsonl");
+  const fxBinary = await fakeFx(workspace, logPath);
+  const config: TgfxConfig = {
+    version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+    approvals: options.approvals, streaming: options.streaming ?? false,
+    expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+  };
+  if (options.seed) {
+    const seeded = new StateStore(paths.database);
+    try { options.seed(seeded); } finally { seeded.close(); }
+  }
+  const events: TelegramEvent[] = [];
+  const watchers: Array<{ test: (event: TelegramEvent) => boolean; resolve: (event: TelegramEvent) => void }> = [];
+  const emit = <T extends TelegramEvent>(event: T): T => {
+    events.push(event);
+    for (const watcher of watchers.splice(0)) {
+      if (watcher.test(event)) watcher.resolve(event);
+      else watchers.push(watcher);
+    }
+    return event;
+  };
+  const until = <T extends TelegramEvent>(test: (event: TelegramEvent) => boolean, label: string): Promise<T> => {
+    const past = events.find(test);
+    if (past) return Promise.resolve(past as T);
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 5_000);
+      watchers.push({ test, resolve: (event) => { clearTimeout(timer); resolve(event as T); } });
+    });
+  };
+  const queue: Update[][] = [];
+  let wake: (() => void) | undefined;
+  let nextMessageId = 800;
+  const polling = Promise.withResolvers<void>();
+  const telegram = {
+    getWebhookInfo: async () => ({ url: "" }),
+    getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+      polling.resolve();
+      while (!queue.length) {
+        if (signal?.aborted) return [];
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+      return queue.shift()!;
+    },
+    setCommands: async () => true as const,
+    deleteCommands: async () => true as const,
+    sendText: async (chat: string, text: string, topic: string, extra?: { reply_markup?: Keyboard }) => ({
+      message_id: emit({
+        kind: "sendText", chat, topic, text, messageId: nextMessageId++,
+        ...(extra?.reply_markup ? { markup: extra.reply_markup } : {}),
+      }).messageId,
+    }) as Message.TextMessage,
+    editText: async (chat: string, messageId: number, text: string) => {
+      emit({ kind: "editText", chat, messageId, text });
+      return true;
+    },
+    editReplyMarkup: async (chat: string, messageId: number, markup: Keyboard) => {
+      emit({ kind: "editMarkup", chat, messageId, markup });
+      return true;
+    },
+    answerCallback: async (_id: string, text?: string) => {
+      emit({ kind: "answer", ...(text === undefined ? {} : { text }) });
+      return true as const;
+    },
+    sendRichDraft: async (chat: string, draftId: number, rich: InputRichMessageWithoutUpload) => {
+      emit({ kind: "draft", chat, draftId, rich });
+      return true as const;
+    },
+    sendRich: async (chat: string, rich: InputRichMessageWithoutUpload) => ({
+      message_id: emit({ kind: "sendRich", chat, rich, messageId: nextMessageId++ }).messageId,
+    }) as Message.TextMessage,
+  } as unknown as TelegramApi;
+  const app = new TgfxApp({
+    config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+    telegram, fxBinary, log: () => undefined,
+    ...(options.timeoutMs === undefined ? {} : { permissionTimeoutMs: options.timeoutMs }),
+  });
+  const running = app.run();
+  return {
+    app,
+    paths,
+    events,
+    until,
+    card: () => until<SentText>((event) => event.kind === "sendText" && buttons(event).some((button) => button.callback_data.startsWith("fxp:")), "permission card"),
+    final: () => until<SentRich>((event) => event.kind === "sendRich", "final message"),
+    answers: () => events.flatMap((event) => event.kind === "answer" && event.text ? [event.text] : []),
+    labels: () => events.flatMap((event) => event.kind === "editMarkup" ? [resolvedLabel(event)] : []),
+    deliver(updates: Update[]): void {
+      queue.push(updates);
+      wake?.();
+      wake = undefined;
+    },
+    async stop(): Promise<void> {
+      await polling.promise;
+      await app.stop();
+      await running;
+    },
+    async permissionResult(): Promise<{ outcome: string; optionId?: string } | undefined> {
+      const raw = await readFile(logPath, "utf8").catch(() => "");
+      const events = raw.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { event: string; value: any });
+      return events.find((entry) => entry.event === "permission_result")?.value.outcome;
+    },
+  };
+}
+
+describe("fx permission cards", () => {
+  test("labels the card with who asked and tells their chat it is waiting", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "-5", topicId: "0" } });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    const card = await h.card();
+    expect(card.chat).toBe("-5");
+    expect(card.text.split("\n")[0]).toBe("𝒇x permission · User 42");
+    const notice = await h.until<SentText>((event) => event.kind === "sendText" && event.chat === "42", "waiting notice");
+    expect(notice.text).toContain("waiting");
+    h.deliver([callbackUpdate(2, OPS_CHAT, 42, buttons(card)[0]!.callback_data, card.messageId)]);
+    const updated = await h.until<EditedText>((event) => event.kind === "editText" && event.messageId === notice.messageId, "notice update");
+    expect(updated.text).toContain("Allow once");
+    await h.final();
+    await h.stop();
+    expect(await h.permissionResult()).toEqual({ outcome: "selected", optionId: "allow" });
+  });
+
+  test("keeps the card plain when the approvals chat is the asking chat", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" } });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    const card = await h.card();
+    expect(card.text.split("\n")[0]).toBe("𝒇x permission");
+    h.deliver([callbackUpdate(2, OWN_CHAT, 42, buttons(card)[0]!.callback_data, card.messageId)]);
+    await h.final();
+    await h.stop();
+    expect(h.events.filter((event) => event.kind === "sendText" && event.chat === "42")).toEqual([card]);
+  });
+
+  test("shows the wait in the live draft and drops it from the final message", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, streaming: true });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    const card = await h.card();
+    await h.until<Draft>((event) => event.kind === "draft" && JSON.stringify(event.rich).includes("approval"), "waiting draft");
+    h.deliver([callbackUpdate(2, OWN_CHAT, 42, buttons(card)[0]!.callback_data, card.messageId)]);
+    const final = await h.final();
+    await h.stop();
+    expect(JSON.stringify(final.rich)).not.toContain("approval");
+  });
+
+  test("rejects when nobody answers before the timeout", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, timeoutMs: 100 });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    await h.card();
+    await h.final();
+    await h.stop();
+    expect(await h.permissionResult()).toEqual({ outcome: "selected", optionId: "reject" });
+    expect(h.labels()).toEqual(["Expired"]);
+  });
+
+  test("offers Cancel and marks session-wide options when fx cannot be declined", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" } });
+    h.deliver([update(1, 42, "PERMISSION_ALWAYS")]);
+    const card = await h.card();
+    expect(buttons(card).map((button) => button.text)).toEqual(["Allow once", "Allow always · session", "Cancel"]);
+    h.deliver([callbackUpdate(2, OWN_CHAT, 42, buttons(card)[2]!.callback_data, card.messageId)]);
+    await h.final();
+    await h.stop();
+    expect(await h.permissionResult()).toEqual({ outcome: "cancelled" });
+    expect(h.labels()).toEqual(["Resolved · Cancel"]);
+  });
+
+  test("ignores a click from outside the approvals chat", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "-5", topicId: "0" } });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    const card = await h.card();
+    h.deliver([callbackUpdate(2, OWN_CHAT, 42, buttons(card)[0]!.callback_data, card.messageId)]);
+    await h.until((event) => event.kind === "answer", "refusal");
+    expect(h.answers().at(-1)).toContain("approvals chat");
+    expect(h.labels()).toEqual([]);
+    h.deliver([callbackUpdate(3, OPS_CHAT, 42, buttons(card)[0]!.callback_data, card.messageId)]);
+    await h.final();
+    await h.stop();
+    expect(await h.permissionResult()).toEqual({ outcome: "selected", optionId: "allow" });
+  });
+
+  test("tells a second clicker the request was already answered", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" } });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    const card = await h.card();
+    h.deliver([
+      callbackUpdate(2, OWN_CHAT, 42, buttons(card)[0]!.callback_data, card.messageId),
+      callbackUpdate(3, OWN_CHAT, 42, buttons(card)[1]!.callback_data, card.messageId),
+    ]);
+    await h.final();
+    await h.stop();
+    expect(h.answers()).toEqual(["Allow once", "Already answered"]);
+    expect(h.labels()).toEqual(["Resolved · Allow once"]);
+  });
+
+  test("rejects and marks the card when the draft is stopped", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, streaming: true });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    await h.card();
+    const draft = await h.until<Draft>((event) => event.kind === "draft", "draft");
+    h.deliver([{ update_id: 2, stopped_message_generation: { chat: { id: 42 }, draft_id: draft.draftId } } as unknown as Update]);
+    await h.until<SentText>((event) => event.kind === "sendText" && event.text.includes("cancelled"), "cancellation notice");
+    await h.stop();
+    expect(await h.permissionResult()).toEqual({ outcome: "selected", optionId: "reject" });
+    expect(h.labels()).toEqual(["Cancelled"]);
+  });
+
+  test("cancels open cards when tgfx stops", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" } });
+    h.deliver([update(1, 42, "PERMISSION")]);
+    await h.card();
+    await h.stop();
+    expect(h.labels()).toEqual(["Cancelled · tgfx stopped"]);
+  });
+
+  test("expires cards a previous process left open", async () => {
+    const h = await permissionHarness({
+      approvals: { chatId: "42", topicId: "0" },
+      seed: (state) => {
+        state.createInteraction({
+          id: "stale", botId: "100", routeKey: "100:42:0", kind: "fx_permission",
+          payload: { prompt: "Running command" }, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        });
+        state.attachInteractionCard("stale", { chatId: "42", messageId: 700 });
+      },
+    });
+    const edit = await h.until<EditedMarkup>((event) => event.kind === "editMarkup" && event.messageId === 700, "stale card");
+    await h.stop();
+    expect(resolvedLabel(edit)).toContain("restarted");
+    const state = new StateStore(h.paths.database);
+    try {
+      expect(state.interaction("stale")?.state).toBe("expired");
+    } finally { state.close(); }
+  });
+});

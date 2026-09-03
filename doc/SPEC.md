@@ -1379,9 +1379,13 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   permission policy cannot diverge. If FX is later switched to ACP `ask`, a
   normal message still cannot approve its permission request: tgfx sends a card
   to the configured approvals chat with the exact tool title and options FX
-  supplied. `tgfx --yolo` instead starts FX with its process-scoped permission
-  checks disabled. Administrator-action cards remain **Approve** and **Deny** in
-  every FX mode.
+  supplied. When the asking chat is not the approvals chat, the card names it
+  the way a person would (the sender in a private chat, the chat title in a
+  group). Session-wide options are marked as such, and a **Cancel** button is
+  added when FX offers no way to decline. `tgfx --yolo` instead starts FX with
+  its process-scoped permission checks disabled. Administrator-action cards
+  remain **Approve** and **Deny** in every FX mode and carry the same origin
+  label.
 - Approval callbacks are single-use, short-lived, attached to one bot and route,
   and accepted only in the exact configured approvals chat/topic from an
   allowlisted clicker. Expired, canceled, already resolved, wrong-route, or
@@ -1393,8 +1397,11 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   can approve; onboarding warns about this explicitly. Use an allowlisted private
   user as the approvals chat for the narrowest setup.
 - While approval is pending, the originating rich draft keeps the tool in its
-  running state. Telegram's Stop button cancels a matching private draft and its
-  FX turn. Approval timeout is fail-closed.
+  running state and shows a waiting line. A chat without a live draft gets a
+  short waiting notice instead, updated with the outcome. Telegram's Stop
+  button cancels a matching private draft and its FX turn. Approval timeout is
+  fail-closed. Cards a previous tgfx process left open are relabelled as
+  expired at startup so a stale button can never be pressed into action.
 - FX stdout is reserved for ACP JSON-RPC. Diagnostics go to stderr or an explicit
   log file.
 - Downloaded and generated paths are canonicalized and must remain inside the

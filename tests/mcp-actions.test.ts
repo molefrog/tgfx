@@ -338,6 +338,7 @@ describe("Telegram MCP actions", () => {
         TGFX_MCP_TOKEN: token,
         TGFX_MCP_BOT_ID: "100",
         TGFX_MCP_ROUTE_KEY: routeKey,
+        TGFX_MCP_ROUTE_LABEL: "Team",
         TGFX_MCP_WORKSPACE: workspace,
         TGFX_MCP_HOME: home,
         TGFX_MCP_DATABASE: database,
@@ -400,10 +401,18 @@ describe("Telegram MCP actions", () => {
       expect(requests.some((request) =>
         request.method === "editMessageText" && request.body.includes("Bulletin two")
       )).toBeTrue();
+      expect(requests.some((request) =>
+        request.method === "sendMessage" && request.body.includes("Approval required · Team")
+      )).toBeTrue();
       const verify = new StateStore(database);
       try {
         expect(verify.db.query("SELECT count(*) AS count FROM managed_pins").get()).toEqual({ count: 1 });
         expect(verify.interaction("join_request")?.state).toBe("resolved");
+        expect(verify.pendingApprovals("100")).toEqual([]);
+        const approval = verify.db.query<{ payload_json: string }, []>(
+          "SELECT payload_json FROM telegram_interactions WHERE kind LIKE 'telegram_admin:%' LIMIT 1",
+        ).get();
+        expect(JSON.parse(approval!.payload_json).card).toEqual({ chatId: "42", messageId: expect.any(Number) });
       } finally { verify.close(); }
     } finally {
       child.kill();
