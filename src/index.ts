@@ -339,9 +339,8 @@ async function runCommand(tokens: string[]): Promise<void> {
   const project = projectPaths();
   // The live view needs a terminal on both ends and a workspace that is already
   // set up, so no prompt has to share the screen with it. Otherwise stay a plain log.
-  const known = json ? undefined : await knownWorkspace(project);
-  const live = !json && !flags["no-tui"] && known !== undefined
-    && Boolean(process.stderr.isTTY && process.stdin.isTTY);
+  const live = !json && !flags["no-tui"] && Boolean(process.stderr.isTTY && process.stdin.isTTY);
+  const known = live ? await knownWorkspace(project) : undefined;
   const store = live ? new StatusStore({ yolo: Boolean(flags.yolo) }) : undefined;
   const log = store ? (event: TgfxLogEvent) => store.logLine(event.message) : createLogger(json);
   let app: TgfxApp | undefined;
@@ -350,22 +349,28 @@ async function runCommand(tokens: string[]): Promise<void> {
   const shutdown = () => void app?.stop();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+  // The view mounts before the startup checks when the workspace is already set
+  // up, so the wire can draw itself as they finish. A first run keeps the screen
+  // for the setup prompts and mounts the view once they are done.
+  const mount = async () => {
+    if (!store || view) return;
+    const { startTui } = await import("./cli/tui");
+    view = startTui({
+      store,
+      controls: {
+        quit: shutdown,
+        setStreaming: (on) => app?.setStreaming(on),
+        setCustomIcons: (on) => app?.setCustomIcons(on),
+        setPaused: (on) => app?.setPaused(on),
+      },
+    });
+  };
   try {
-    if (store) {
-      const { startTui } = await import("./cli/tui");
-      view = startTui({
-        store,
-        controls: {
-          quit: shutdown,
-          setStreaming: (on) => app?.setStreaming(on),
-          setCustomIcons: (on) => app?.setCustomIcons(on),
-          setPaused: (on) => app?.setPaused(on),
-        },
-      });
-    }
+    if (known) await mount();
     const resolved = await runtime(project, {
       json, ...(known ? { known } : {}), ...(store ? { boot: (event) => store.apply(event) } : {}),
     });
+    await mount();
     const { release: releaseLock, ...appRuntime } = resolved;
     release = releaseLock;
     if (flags.yolo) {
