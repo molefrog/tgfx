@@ -54,16 +54,15 @@ We're working on adding this soon!
 
 ## Custom icons
 
-The bot renders tool calls with the
-[tgfx icons](https://t.me/addemoji/ai_provider_labs_by_fxharness_bot) custom
+<img src="doc/assets/custom-icons.png" alt="Tool calls rendered with custom emoji icons" width="305" align="right">
+
+The bot renders tool calls nicely with the
+[tgfx icons](https://t.me/addemoji/ai_provider_labs_by_fxharness_bot) premium custom
 emoji pack: every 𝒇x tool gets its own icon, and so do 100+ popular MCP
 servers (GitHub, Notion, Slack, Figma, and friends). The model picker uses
-provider logos from the same pack. When Telegram doesn't let the bot use
-custom emoji, everything falls back to plain rows.
+provider logos (OpenAI, Anthropic, etc.) from the same pack.
 
-To turn it off for a run, start with `tgfx --no-icons`. To turn it off for
-good, set `customIcons` to `false` in `.fx/telegram/config.json`
-(or once for every project in `~/.fx/telegram/config.json` under `defaults`).
+To turn it off, start with `tgfx --no-icons`.
 
 ## Commands
 
