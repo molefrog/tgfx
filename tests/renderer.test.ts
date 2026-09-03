@@ -26,17 +26,14 @@ describe("Telegram renderer boundaries", () => {
     }
   });
 
-  test("streams only private routes", () => {
-    const config = { mode: "streaming" as const, expandStreamingTools: true, updateEveryMs: 800 };
-    expect(streamsRoute(config, {
-      key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private",
-    })).toBeTrue();
-    expect(streamsRoute(config, {
-      key: "1:-2:0", botId: "1", chatId: "-2", topicId: "0", chatKind: "supergroup",
-    })).toBeFalse();
-    expect(streamsRoute({ ...config, mode: "final" }, {
-      key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private",
-    })).toBeFalse();
+  test("streams only private routes, and only in the two live modes", () => {
+    const privateRoute = { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" as const };
+    const group = { key: "1:-2:0", botId: "1", chatId: "-2", topicId: "0", chatKind: "supergroup" as const };
+    expect(streamsRoute("live", privateRoute)).toBeTrue();
+    expect(streamsRoute("progress", privateRoute)).toBeTrue();
+    expect(streamsRoute("live", group)).toBeFalse();
+    expect(streamsRoute("report", privateRoute)).toBeFalse();
+    expect(streamsRoute("answer", privateRoute)).toBeFalse();
   });
 
   test("includes labeled, collapsed tool groups in a non-streaming final message", async () => {
@@ -66,7 +63,7 @@ describe("Telegram renderer boundaries", () => {
       api,
       state,
       { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
-      { mode: "final", expandStreamingTools: true, updateEveryMs: 800 },
+      "report",
       projector,
     );
 
@@ -216,7 +213,7 @@ describe("Telegram renderer boundaries", () => {
       api,
       state,
       { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
-      { mode: "streaming", expandStreamingTools: true, updateEveryMs: 0 },
+      "live",
       projector,
       undefined,
       new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
@@ -245,6 +242,47 @@ describe("Telegram renderer boundaries", () => {
     }
   });
 
+  test("progress mode drafts a status line, never tool rows", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tgfx-progress-"));
+    const state = new StateStore(join(directory, "state.sqlite"));
+    const drafts: InputRichMessageWithoutUpload[] = [];
+    const api = {
+      sendRichDraft: async (_chatId: string, _draftId: number, rich: InputRichMessageWithoutUpload) => {
+        drafts.push(rich);
+      },
+    } as unknown as TelegramApi;
+    let now = 0;
+    const projector = new AcpProjector({}, () => now);
+    const renderer = new TurnRenderer(
+      api,
+      state,
+      { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
+      "progress",
+      projector,
+      undefined,
+      new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
+      { heartbeatMs: 5 },
+    );
+    try {
+      renderer.start();
+      await waitFor(() => drafts.length === 1);
+      renderer.changed(projector.apply({
+        sessionUpdate: "tool_call", toolCallId: "read", name: "read_file", title: "Reading", status: "pending",
+        rawInput: { path: "a.ts" },
+      } as never));
+      now = 3_000;
+      await waitFor(() => drafts.length === 2);
+      const [block] = drafts[1]!.blocks!;
+      expect(block?.type).toBe("thinking");
+      expect(JSON.stringify(block)).toContain("Reading files…");
+      expect(drafts.every((draft) => draft.blocks!.every((item) => item.type !== "details"))).toBeTrue();
+    } finally {
+      await renderer.abort();
+      state.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("does not render hidden thought or pending-tool updates", async () => {
     const directory = await mkdtemp(join(tmpdir(), "tgfx-hidden-drafts-"));
     const state = new StateStore(join(directory, "state.sqlite"));
@@ -259,7 +297,7 @@ describe("Telegram renderer boundaries", () => {
       api,
       state,
       { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
-      { mode: "streaming", expandStreamingTools: true, updateEveryMs: 0 },
+      "live",
       projector,
       undefined,
       new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),
@@ -315,7 +353,7 @@ describe("Telegram renderer boundaries", () => {
       api,
       state,
       { key: "1:2:0", botId: "1", chatId: "2", topicId: "0", chatKind: "private" },
-      { mode: "streaming", expandStreamingTools: true, updateEveryMs: 0 },
+      "live",
       projector,
       turn.signal,
       new PeerDraftLimiter({ minGapMs: 0, shortLimit: 100, longLimit: 100 }),

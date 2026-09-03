@@ -47,7 +47,7 @@ import type {
   AdminCapability,
   BotIdentity,
   InboundMessage,
-  RendererConfig,
+  OutputMode,
   Route,
   SenderIdentity,
   TgfxConfig,
@@ -214,6 +214,7 @@ export class TgfxApp {
   private resumePolling?: () => void;
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
+  private output: OutputMode;
   private customIconsEnabled: boolean;
   private iconStickers?: Promise<ReadonlyArray<{ custom_emoji_id?: string }> | undefined>;
   private pollTask?: Promise<void>;
@@ -234,13 +235,15 @@ export class TgfxApp {
     /** How long an approval card stays answerable. Default: five minutes. */
     permissionTimeoutMs?: number;
     mcpLaunch?: { command: string; args: string[] };
-    renderer?: Partial<RendererConfig>;
+    /** Run-time overrides of the configured settings, from flags or the terminal view. */
+    output?: OutputMode;
     customIcons?: boolean;
     log?: (event: TgfxLogEvent) => void;
     /** Live status for the terminal view; distinct from the log. */
     status?: (event: StatusEvent) => void;
   }) {
     this.config = options.config;
+    this.output = options.output ?? options.config.output;
     this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
@@ -273,7 +276,7 @@ export class TgfxApp {
   /** The switches the terminal view can flip while the process runs. */
   settings(): Settings {
     return {
-      streaming: this.rendererConfig.mode === "streaming",
+      output: this.output,
       customIcons: this.customIconsEnabled,
       paused: this.resumePolling !== undefined,
       yolo: this.options.permissionMode === "yolo",
@@ -281,8 +284,8 @@ export class TgfxApp {
   }
 
   /** Applies to the next turn; a running turn keeps the mode it started with. */
-  setStreaming(on: boolean): void {
-    this.options.renderer = { ...this.options.renderer, mode: on ? "streaming" : "final" };
+  setOutput(output: OutputMode): void {
+    this.output = output;
     this.status({ type: "settings", settings: this.settings() });
   }
 
@@ -342,29 +345,20 @@ export class TgfxApp {
     }
     this.log({
       event: "polling.started",
-      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.rendererConfig.mode}`,
+      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.output}`,
       bot: this.options.bot.id,
       workspace: this.options.paths.workspace,
-      renderer: this.rendererConfig.mode,
+      output: this.output,
     });
     this.status({ type: "boot", step: "polling", state: "done" });
     this.pollTask = this.poll();
     await Promise.race([this.pollTask, this.stopped]);
   }
 
-  private get rendererConfig(): RendererConfig {
-    return {
-      mode: this.config.streaming ? "streaming" : "final",
-      expandStreamingTools: this.config.expandStreamingTools,
-      updateEveryMs: this.config.updateEveryMs,
-      ...this.options.renderer,
-    };
-  }
-
   private draftLimiter(chatId: string): PeerDraftLimiter {
     let limiter = this.draftLimiters.get(chatId);
     if (!limiter) {
-      limiter = new PeerDraftLimiter({ minGapMs: this.rendererConfig.updateEveryMs });
+      limiter = new PeerDraftLimiter();
       this.draftLimiters.set(chatId, limiter);
     }
     return limiter;
@@ -952,7 +946,7 @@ export class TgfxApp {
     this.config.access.chatIds = replaceId(this.config.access.chatIds);
     if (this.config.approvals.chatId === oldChatId) this.config.approvals.chatId = newChatId;
     try {
-      await saveConfig(this.options.paths, this.config, { preserveInheritedSettings: true });
+      await saveConfig(this.options.paths, this.config);
     } catch (error) {
       this.log({
         event: "config.invalid",
@@ -1313,7 +1307,7 @@ export class TgfxApp {
     const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
     const controller = new AbortController();
-    const streaming = streamsRoute(this.rendererConfig, message.route);
+    const streaming = streamsRoute(this.output, message.route);
     const draftId = streaming ? createDraftId() : undefined;
     this.activeTurns.set(message.route.key, controller);
     if (draftId !== undefined) this.activeDraftIds.set(message.route.key, draftId);
@@ -1420,7 +1414,7 @@ export class TgfxApp {
       this.options.telegram,
       this.state,
       message.route,
-      this.rendererConfig,
+      this.output,
       projector,
       controller.signal,
       this.draftLimiter(message.route.chatId),

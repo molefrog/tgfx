@@ -8,7 +8,7 @@ const alexey: RouteLabel = { key: "100:42:0", chat: "Alexey", group: false };
 const team: RouteLabel = { key: "100:-500:0", chat: "team-fx", group: true };
 
 const idleControls: TuiControls = {
-  quit: () => undefined, setStreaming: () => undefined, setCustomIcons: () => undefined, setPaused: () => undefined,
+  quit: () => undefined, setOutput: () => undefined, setCustomIcons: () => undefined, setPaused: () => undefined,
 };
 
 /** A store on a fake clock, and a view that renders it at a chosen instant. */
@@ -36,7 +36,7 @@ describe("live wire status", () => {
     expect(wire).toMatch(/telegram ●[─·]+ tgfx ┈+ ● fx/);
     expect(routes).toContain("waiting for a message");
     expect(bay).toMatch(/f format\s+p pause ○.*l log ○.*q quit/);
-    expect(bay).not.toContain("streaming");
+    expect(text).not.toContain("live");
     expect(text.split("\n").length).toBe(3);
   });
 
@@ -242,41 +242,43 @@ describe("live wire status", () => {
     const { view, text } = frame();
     expect(text).not.toContain("● on");
     view.stdin.write("f");
-    await until(() => (view.lastFrame() ?? "").includes("▸ streaming"));
+    await until(() => (view.lastFrame() ?? "").includes("▸ output"));
     const lines = view.lastFrame()!.split("\n");
     expect(lines[2]).toContain("f format ▾");
-    expect(lines[3]).toMatch(/▸ streaming\s+● on\s+live draft/);
+    expect(lines[3]).toMatch(/▸ output\s+live\s+live draft/);
     expect(lines[4]).toMatch(/icons\s+● on\s+custom emoji/);
-    expect(lines[5]).toContain("space toggle");
+    expect(lines[5]).toContain("←→ change");
     view.stdin.write("");
-    await until(() => !(view.lastFrame() ?? "").includes("streaming"));
+    await until(() => !(view.lastFrame() ?? "").includes("output"));
     view.unmount();
   });
 
-  test("arrows move the cursor and space toggles the focused option", async () => {
+  test("arrows move the cursor, space and ←→ step the focused option through its values", async () => {
     const { store, frame } = scene();
     const flips: string[] = [];
     const { view } = frame({
       ...idleControls,
-      setStreaming: (on) => { flips.push(`stream:${on}`); store.apply({ type: "settings", settings: { streaming: on } }); },
+      setOutput: (output) => { flips.push(`output:${output}`); store.apply({ type: "settings", settings: { output } }); },
       setCustomIcons: (on) => { flips.push(`icons:${on}`); store.apply({ type: "settings", settings: { customIcons: on } }); },
       setPaused: (on) => flips.push(`pause:${on}`),
     });
     view.stdin.write("f");
-    await until(() => (view.lastFrame() ?? "").includes("▸ streaming"));
+    await until(() => (view.lastFrame() ?? "").includes("▸ output"));
     view.stdin.write("[B");
     await until(() => (view.lastFrame() ?? "").includes("▸ icons"));
     view.stdin.write(" ");
     await until(() => flips.length === 1);
     view.stdin.write("[A");
-    await until(() => (view.lastFrame() ?? "").includes("▸ streaming"));
-    view.stdin.write(" ");
+    await until(() => (view.lastFrame() ?? "").includes("▸ output"));
+    view.stdin.write("[C");
     await until(() => flips.length === 2);
-    expect(flips).toEqual(["icons:false", "stream:false"]);
-    await until(() => /▸ streaming\s+○ off/.test(view.lastFrame() ?? ""));
-    view.stdin.write("p");
+    view.stdin.write("[D");
     await until(() => flips.length === 3);
-    expect(flips[2]).toBe("pause:true");
+    expect(flips).toEqual(["icons:false", "output:answer", "output:live"]);
+    await until(() => /▸ output\s+live/.test(view.lastFrame() ?? ""));
+    view.stdin.write("p");
+    await until(() => flips.length === 4);
+    expect(flips[3]).toBe("pause:true");
     view.unmount();
   });
 });

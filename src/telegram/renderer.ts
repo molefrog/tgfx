@@ -1,6 +1,6 @@
 import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { setTimeout as delay } from "node:timers/promises";
-import type { RendererConfig, Route } from "../types";
+import type { OutputMode, Route } from "../types";
 import { AcpProjector, type ProjectorChange } from "../fx/projector";
 import { StateStore } from "../state";
 import { TelegramApi, TelegramError } from "./api";
@@ -18,8 +18,13 @@ export function createDraftId(): number {
   return (crypto.getRandomValues(new Uint32Array(1))[0]! & 0x7fffffff) || 1;
 }
 
-export function streamsRoute(config: RendererConfig, route: Route): boolean {
-  return config.mode === "streaming" && route.chatKind === "private";
+/** Whether a mode drafts at all; groups never see drafts, whatever the mode. */
+export function streams(output: OutputMode): boolean {
+  return output === "live" || output === "progress";
+}
+
+export function streamsRoute(output: OutputMode, route: Route): boolean {
+  return streams(output) && route.chatKind === "private";
 }
 
 export function splitTelegramText(text: string, limit = 4_000): string[] {
@@ -90,10 +95,10 @@ export class TurnRenderer {
     private readonly api: TelegramApi,
     private readonly state: StateStore,
     private readonly route: Route,
-    private readonly config: RendererConfig,
+    private readonly output: OutputMode,
     private readonly projector: AcpProjector,
     private readonly signal?: AbortSignal,
-    limiter = new PeerDraftLimiter({ minGapMs: config.updateEveryMs }),
+    limiter = new PeerDraftLimiter(),
     private readonly options: TurnRendererOptions = {},
   ) {
     this.drafts = new AdaptiveDraftScheduler({
@@ -122,10 +127,7 @@ export class TurnRenderer {
   }
 
   private frame(): InputRichMessageWithoutUpload {
-    return this.projector.rich({
-      final: false,
-      expandStreamingTools: this.config.expandStreamingTools,
-    });
+    return this.projector.rich({ final: false, output: this.output });
   }
 
   start(): void {
@@ -159,17 +161,13 @@ export class TurnRenderer {
   }
 
   private get streaming(): boolean {
-    return streamsRoute(this.config, this.route);
+    return streamsRoute(this.output, this.route);
   }
 
   async finish(input: { botId: string; inboxId: number; effectKey: string }): Promise<string[]> {
     await this.stopDrafts("draft finalized");
-    const rich = this.projector.rich({
-      final: true,
-      expandStreamingTools: this.config.expandStreamingTools,
-      includeTools: true,
-    });
-    const plain = this.projector.plainFinal(true);
+    const rich = this.projector.rich({ final: true, output: this.output });
+    const plain = this.projector.plainFinal(this.output);
     const outboxId = this.state.createOutbox({
       effectKey: input.effectKey,
       botId: input.botId,

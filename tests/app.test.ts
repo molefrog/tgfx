@@ -8,7 +8,7 @@ import type { StatusEvent } from "../src/status";
 import { workspacePaths, type WorkspacePaths } from "../src/config";
 import { StateStore } from "../src/state";
 import type { TelegramApi } from "../src/telegram/api";
-import type { TgfxConfig } from "../src/types";
+import type { OutputMode, TgfxConfig } from "../src/types";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -58,7 +58,7 @@ describe("tgfx host pipeline", () => {
       activeBotId: "100",
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
@@ -130,7 +130,7 @@ describe("tgfx host pipeline", () => {
       const config: TgfxConfig = {
         version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
         approvals: { chatId: "42", topicId: "0" },
-        streaming: false, expandStreamingTools: true, updateEveryMs: 10,
+        output: "report",
         customIcons,
       };
       let firstPoll = true;
@@ -191,7 +191,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const stickerUpdate = update(1, 42, "") as any;
     delete stickerUpdate.message.text;
@@ -253,7 +253,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     let poll = 0;
     let deliveries = 0;
@@ -303,7 +303,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const texts: string[] = [];
     let phase = 0;
@@ -375,7 +375,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      output: "live",
       customIcons: false,
     };
     const sequence: string[] = [];
@@ -447,7 +447,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const texts: string[] = [];
     const menus: Array<Array<{ command: string }>> = [];
@@ -531,7 +531,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      output: "live",
       customIcons: false,
     };
     let phase = 0;
@@ -641,7 +641,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     let phase = 0;
     let sevenDayCallback = "";
@@ -716,7 +716,7 @@ describe("tgfx host pipeline", () => {
     expect(events.filter((entry) => entry.event === "usage").map((entry) => entry.value.period)).toEqual(["24h", "7d"]);
   });
 
-  test("edits one regular progress message for /compact when streaming is disabled", async () => {
+  test("edits one regular progress message for /compact in report mode", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-compact-final-"));
     temporary.push(workspace);
     const paths = testPaths(workspace);
@@ -724,7 +724,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: false, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "report", customIcons: true,
     };
     const sent: InputRichMessageWithoutUpload[] = [];
     const edits: Array<{ messageId: number; rich: InputRichMessageWithoutUpload }> = [];
@@ -788,7 +788,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     let phase = 0;
     let approvalData!: string;
@@ -871,7 +871,7 @@ describe("tgfx status feed", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: false,
+      output: "live", customIcons: false,
     };
     let firstPoll = true;
     let delivered!: () => void;
@@ -923,7 +923,7 @@ describe("tgfx status feed", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: false,
+      output: "live", customIcons: false,
     };
     let resumed = false;
     let pollsBeforeResume = 0;
@@ -1012,7 +1012,7 @@ function resolvedLabel(edit: EditedMarkup): string {
 /** A running app over the fake fx and a scripted Telegram that records every call. */
 async function permissionHarness(options: {
   approvals: { chatId: string; topicId: string };
-  streaming?: boolean;
+  output?: OutputMode;
   timeoutMs?: number;
   seed?: (state: StateStore) => void;
 }) {
@@ -1023,8 +1023,7 @@ async function permissionHarness(options: {
   const fxBinary = await fakeFx(workspace, logPath);
   const config: TgfxConfig = {
     version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
-    approvals: options.approvals, streaming: options.streaming ?? false,
-    expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+    approvals: options.approvals, output: options.output ?? "report", customIcons: true,
   };
   if (options.seed) {
     const seeded = new StateStore(paths.database);
@@ -1155,7 +1154,7 @@ describe("fx permission cards", () => {
   });
 
   test("shows the wait in the live draft and drops it from the final message", async () => {
-    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, streaming: true });
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "live" });
     h.deliver([update(1, 42, "PERMISSION")]);
     const card = await h.card();
     await h.until<Draft>((event) => event.kind === "draft" && JSON.stringify(event.rich).includes("approval"), "waiting draft");
@@ -1216,7 +1215,7 @@ describe("fx permission cards", () => {
   });
 
   test("rejects and marks the card when the draft is stopped", async () => {
-    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, streaming: true });
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "live" });
     h.deliver([update(1, 42, "PERMISSION")]);
     await h.card();
     const draft = await h.until<Draft>((event) => event.kind === "draft", "draft");

@@ -62,6 +62,17 @@ type FxToolSpec = {
 
 const ARGUMENT_MAX_CHARS = 800;
 
+/** ACP's coarse tool kinds: what a call counts as when fx sends no tool name. */
+const KIND_ACTIVITY: Record<string, ToolActivity> = {
+  read: "read_files",
+  edit: "edited_files",
+  delete: "edited_files",
+  move: "edited_files",
+  search: "searched_code",
+  execute: "commands",
+  fetch: "fetched_pages",
+};
+
 function isRecord(value: unknown): value is ToolInput {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -152,7 +163,12 @@ function telegramToolName(name: string): TelegramMcpToolName | undefined {
     : undefined;
 }
 
-export function describeTool(call: { name?: string | null; title?: string | null; input?: unknown }): ToolDescription {
+export function describeTool(call: {
+  name?: string | null;
+  title?: string | null;
+  kind?: string | null;
+  input?: unknown;
+}): ToolDescription {
   const name = call.name?.trim() ?? "";
   const input = isRecord(call.input) ? call.input : {};
 
@@ -174,7 +190,8 @@ export function describeTool(call: { name?: string | null; title?: string | null
   if (name.startsWith("mcp_")) {
     return { title: "Using MCP tool", argument: text(name.slice(4)), activity: "used_external_tools" };
   }
-  return { title: redactSecrets(call.title?.trim() || "Tool"), argument: text(input) };
+  const activity = call.kind ? KIND_ACTIVITY[call.kind] : undefined;
+  return { title: redactSecrets(call.title?.trim() || "Tool"), argument: text(input), ...(activity ? { activity } : {}) };
 }
 
 function counted(count: number, singular: string, plural = `${singular}s`): string {

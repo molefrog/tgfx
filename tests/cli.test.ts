@@ -7,6 +7,7 @@ import { FakeTelegram } from "./fixtures/fake-telegram";
 
 const temporary: string[] = [];
 afterEach(async () => {
+  delete process.env.TGFX_HOME;
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -20,7 +21,7 @@ async function tgfx(args: string[], options: { cwd: string; env?: Record<string,
     env: {
       ...process.env,
       NO_COLOR: "1",
-      TGFX_HOME: join(isolated, "home"),
+      TGFX_HOME: process.env.TGFX_HOME ?? join(isolated, "home"),
       TELEGRAM_BOT_TOKEN: "",
       ...options.env,
     },
@@ -46,7 +47,7 @@ async function workspace(): Promise<ProjectPaths> {
     activeBotId: "100",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    streaming: true, expandStreamingTools: true, updateEveryMs: 800, customIcons: true,
+    output: "live", customIcons: true,
   });
   return paths;
 }
@@ -133,6 +134,14 @@ describe("tgfx CLI", () => {
     expect(result.stderr).toContain("at least one Telegram");
     expect(result.stderr).toContain("QR");
     expect((await loadConfig(paths))?.access.userIds).toEqual(["42"]);
+  });
+
+  test("--output accepts only a known mode", async () => {
+    const paths = await workspace();
+    const result = await tgfx(["--output", "loud"], { cwd: paths.workspace });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not an output mode");
+    expect(result.stderr).toContain("progress");
   });
 
   test("an empty flag value is rejected", async () => {

@@ -1,12 +1,16 @@
-import { chmod, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { chmod, lstat, mkdir, readdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
-import type { TgfxConfig } from "./types";
+import { OUTPUT_MODES, type TgfxConfig } from "./types";
 
 const decimalId = z.string().regex(/^-?\d+$/, "must be a decimal Telegram ID");
-const draftInterval = z.number().int().min(200).max(10_000);
-const coreConfigSchema = z.object({
+const settingsSchema = z.object({
+  output: z.enum(OUTPUT_MODES),
+  customIcons: z.boolean(),
+});
+const coreSchema = z.object({
   version: z.literal(1),
   activeBotId: decimalId,
   access: z.object({
@@ -17,29 +21,34 @@ const coreConfigSchema = z.object({
   }),
   approvals: z.object({ chatId: decimalId, topicId: decimalId.default("0") }),
 });
-const storedConfigSchema = coreConfigSchema.extend({
+/** A project file: identity plus only the settings that override the defaults. */
+const storedConfigSchema = coreSchema.extend(settingsSchema.partial().shape);
+/** Before 0.2 the project file lived in the workspace and had a streaming switch. */
+const legacyConfigSchema = coreSchema.extend({
   streaming: z.boolean().optional(),
-  expandStreamingTools: z.boolean().optional(),
-  updateEveryMs: draftInterval.optional(),
   customIcons: z.boolean().optional(),
 });
+const globalSchema = z.object({
+  version: z.literal(1).default(1),
+  defaults: settingsSchema.partial().default({}),
+});
 
-export const configSchema = coreConfigSchema.extend({
-  streaming: z.boolean().default(true),
-  expandStreamingTools: z.boolean().default(true),
-  updateEveryMs: draftInterval.default(250),
-  customIcons: z.boolean().default(true),
+export const configSchema = coreSchema.extend({
+  output: settingsSchema.shape.output.default("live"),
+  customIcons: settingsSchema.shape.customIcons.default(true),
 }) satisfies z.ZodType<TgfxConfig>;
 
+export type GlobalConfig = z.infer<typeof globalSchema>;
+
 /**
- * Everything shared across projects lives under one fx-convention directory:
+ * Everything lives under one fx-convention directory; a workspace stays clean:
  *
- *   ~/.fx/telegram/config.json       machine-wide defaults
- *   ~/.fx/telegram/state/<bot>.db    per-bot journal (one writer, held by the lock)
- *   ~/.fx/telegram/state/<bot>.lock  SQLite exclusive-mode process lock
- *   ~/.fx/telegram/files/<bot>/      attachment downloads
- *
- * A project carries only its override config at ./.fx/telegram/config.json.
+ *   ~/.fx/telegram/config.json           machine-wide defaults for the settings
+ *   ~/.fx/telegram/projects/<name>.json  one file per workspace: bot, allowlist,
+ *                                        approvals, and any setting it overrides
+ *   ~/.fx/telegram/state/<bot>.db        per-bot journal (one writer, held by the lock)
+ *   ~/.fx/telegram/state/<bot>.lock      SQLite exclusive-mode process lock
+ *   ~/.fx/telegram/files/<bot>/          attachment downloads
  */
 export function tgfxHome(): string {
   return process.env.TGFX_HOME
@@ -49,7 +58,6 @@ export function tgfxHome(): string {
 
 export type ProjectPaths = {
   workspace: string;
-  directory: string;
   config: string;
 };
 
@@ -62,10 +70,12 @@ export type BotPaths = {
 
 export type WorkspacePaths = ProjectPaths & BotPaths;
 
+/** The project file is named after the folder, made unique by a hash of its full path. */
 export function projectPaths(workspace = process.cwd()): ProjectPaths {
   const canonical = resolve(workspace);
-  const directory = join(canonical, ".fx", "telegram");
-  return { workspace: canonical, directory, config: join(directory, "config.json") };
+  const slug = basename(canonical).replace(/[^\w.-]+/gu, "-") || "root";
+  const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 12);
+  return { workspace: canonical, config: join(tgfxHome(), "projects", `${slug}-${hash}.json`) };
 }
 
 export function botPaths(botId: string): BotPaths {
@@ -82,18 +92,6 @@ export function workspacePaths(botId: string, workspace = process.cwd()): Worksp
   return { ...projectPaths(workspace), ...botPaths(botId) };
 }
 
-const globalSchema = z.object({
-  version: z.literal(1).default(1),
-  defaults: z.object({
-    streaming: z.boolean().optional(),
-    expandStreamingTools: z.boolean().optional(),
-    updateEveryMs: z.number().int().min(200).max(10_000).optional(),
-    customIcons: z.boolean().optional(),
-  }).default({}),
-});
-
-export type GlobalConfig = z.infer<typeof globalSchema>;
-
 async function writePrivateJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await chmod(dirname(path), 0o700);
@@ -102,70 +100,77 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
   await rename(temporary, path);
 }
 
-export async function loadGlobalConfig(): Promise<GlobalConfig> {
-  const path = join(tgfxHome(), "config.json");
+/** The parsed file, or undefined when it does not exist. */
+async function readJson<T extends z.ZodType>(path: string, schema: T): Promise<z.output<T> | undefined> {
+  let raw: string;
   try {
-    return globalSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    raw = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      if (error instanceof z.ZodError) {
-        throw new Error(`Invalid ${path}: ${z.prettifyError(error)}`, { cause: error });
-      }
-      throw error;
-    }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
-  return globalSchema.parse({});
+  try {
+    return schema.parse(JSON.parse(raw));
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw new Error(`Invalid ${path}: ${z.prettifyError(error)}`, { cause: error });
+    }
+    throw error;
+  }
+}
+
+export async function loadGlobalConfig(): Promise<GlobalConfig> {
+  return await readJson(join(tgfxHome(), "config.json"), globalSchema) ?? globalSchema.parse({});
 }
 
 export async function saveGlobalConfig(config: GlobalConfig): Promise<void> {
   await writePrivateJson(join(tgfxHome(), "config.json"), globalSchema.parse(config));
 }
 
-async function loadStoredConfig(paths: ProjectPaths): Promise<z.infer<typeof storedConfigSchema> | undefined> {
-  let raw: string;
-  try {
-    raw = await readFile(paths.config, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-  try {
-    return storedConfigSchema.parse(JSON.parse(raw));
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      throw new Error(`Invalid ${paths.config}: ${z.prettifyError(error)}`, { cause: error });
-    }
-    throw error;
-  }
+type StoredConfig = z.infer<typeof storedConfigSchema>;
+
+function storedRecord(paths: ProjectPaths, stored: StoredConfig): Record<string, unknown> {
+  const { version, activeBotId, access, approvals, ...settings } = stored;
+  return { version, workspace: paths.workspace, activeBotId, access, approvals, ...settings };
+}
+
+/** Moves a workspace-local project file to its new home, once. */
+async function importLegacyConfig(paths: ProjectPaths): Promise<StoredConfig | undefined> {
+  const legacyPath = join(paths.workspace, ".fx", "telegram", "config.json");
+  const legacy = await readJson(legacyPath, legacyConfigSchema);
+  if (!legacy) return undefined;
+  const { streaming, ...rest } = legacy;
+  const stored = storedConfigSchema.parse({
+    ...rest,
+    ...(streaming === undefined ? {} : { output: streaming ? "live" : "report" }),
+  });
+  await writePrivateJson(paths.config, storedRecord(paths, stored));
+  await unlink(legacyPath).catch(() => undefined);
+  await rmdir(dirname(legacyPath)).catch(() => undefined);
+  return stored;
 }
 
 export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | undefined> {
-  const stored = await loadStoredConfig(paths);
+  const stored = await readJson(paths.config, storedConfigSchema) ?? await importLegacyConfig(paths);
   if (!stored) return undefined;
   const { defaults } = await loadGlobalConfig();
   return configSchema.parse({ ...defaults, ...stored });
 }
 
-const SETTING_KEYS = ["streaming", "expandStreamingTools", "updateEveryMs", "customIcons"] as const;
-
-export async function saveConfig(
-  paths: ProjectPaths,
-  config: TgfxConfig,
-  options: { preserveInheritedSettings?: boolean } = {},
-): Promise<void> {
-  const validated = configSchema.parse(config);
-  if (!options.preserveInheritedSettings) {
-    await writePrivateJson(paths.config, validated);
-    return;
-  }
-  const current = await loadStoredConfig(paths);
-  const { streaming, expandStreamingTools, updateEveryMs, customIcons, ...core } = validated;
-  const settings = { streaming, expandStreamingTools, updateEveryMs, customIcons };
+/**
+ * Writes the project's identity. Settings stay where they came from: a key the
+ * project file already overrides is kept up to date, everything else keeps
+ * inheriting the machine-wide defaults.
+ */
+export async function saveConfig(paths: ProjectPaths, config: TgfxConfig): Promise<void> {
+  const { output, customIcons, ...core } = configSchema.parse(config);
+  const current = await readJson(paths.config, storedConfigSchema);
+  const settings: Record<string, unknown> = { output, customIcons };
   const persisted: Record<string, unknown> = { ...core };
-  for (const key of SETTING_KEYS) {
+  for (const key of Object.keys(settingsSchema.shape)) {
     if (current && Object.hasOwn(current, key)) persisted[key] = settings[key];
   }
-  await writePrivateJson(paths.config, storedConfigSchema.parse(persisted));
+  await writePrivateJson(paths.config, storedRecord(paths, storedConfigSchema.parse(persisted)));
 }
 
 export async function pruneBotFiles(files: string, maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<void> {

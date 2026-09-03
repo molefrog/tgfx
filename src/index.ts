@@ -19,7 +19,7 @@ import { deleteBotToken, getBotToken, setBotToken, tokenFromEnvironment } from "
 import { StateStore } from "./state";
 import { adminCapabilitiesForMember, createTelegramApi, type TelegramApi } from "./telegram/api";
 import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairing";
-import type { BotIdentity, TgfxConfig } from "./types";
+import { isOutputMode, OUTPUT_MODES, type BotIdentity, type TgfxConfig } from "./types";
 import { inspectFx } from "./fx/preflight";
 import { terminalQrCode } from "./cli/qr";
 import {
@@ -285,16 +285,14 @@ async function createConfig(paths: ProjectPaths, bot: BotIdentity, telegram: Tel
       chatIds: principalKind === "chat" ? [identifier] : [],
     },
     approvals: { chatId: approvalsChatId, topicId: "0" },
-    streaming: true,
-    expandStreamingTools: true,
-    updateEveryMs: 250,
+    output: "live",
     customIcons: true,
   };
   await telegram.sendText(
     config.approvals.chatId,
     `tgfx connected to ${paths.workspace}. This chat receives approval cards and delivery-failure notices.`,
   );
-  await saveConfig(paths, config, { preserveInheritedSettings: true });
+  await saveConfig(paths, config);
   if (pairedUpdateId !== undefined) {
     const state = new StateStore(botPaths(bot.id).database);
     try {
@@ -386,8 +384,7 @@ async function runCommand(tokens: string[]): Promise<void> {
     flags: {
       model: "string",
       yolo: "boolean",
-      streaming: "boolean",
-      "no-streaming": "boolean",
+      output: "string",
       "no-icons": "boolean",
       "no-tui": "boolean",
       json: "boolean",
@@ -399,8 +396,10 @@ async function runCommand(tokens: string[]): Promise<void> {
   });
   if (flags.help) { process.stderr.write(helpText()); return; }
   if (flags.version) { console.log(VERSION); return; }
-  if (flags.streaming && flags["no-streaming"]) throw new CliError("choose --streaming or --no-streaming, not both");
-  const streaming = flags.streaming ? true : flags["no-streaming"] ? false : undefined;
+  const output = flags.output;
+  if (output !== undefined && !isOutputMode(output)) {
+    throw new CliError(`"${output}" is not an output mode`, `use one of ${OUTPUT_MODES.join(", ")}`);
+  }
   const json = Boolean(flags.json);
   const project = projectPaths();
   // The live view needs a terminal on both ends and a workspace that is already
@@ -427,7 +426,7 @@ async function runCommand(tokens: string[]): Promise<void> {
       store,
       controls: {
         quit: shutdown,
-        setStreaming: (on) => app?.setStreaming(on),
+        setOutput: (output) => app?.setOutput(output),
         setCustomIcons: (on) => app?.setCustomIcons(on),
         setPaused: (on) => app?.setPaused(on),
       },
@@ -452,11 +451,9 @@ async function runCommand(tokens: string[]): Promise<void> {
         ? { command: process.execPath, args: ["mcp"] }
         : { command: process.execPath, args: [fileURLToPath(import.meta.url), "mcp"] },
       ...(typeof flags.model === "string" ? { model: flags.model } : {}),
+      ...(output === undefined ? {} : { output }),
       ...(flags["no-icons"] ? { customIcons: false } : {}),
       permissionMode: flags.yolo ? "yolo" : "auto",
-      renderer: {
-        ...(streaming === undefined ? {} : { mode: streaming ? "streaming" : "final" }),
-      },
       log,
       ...(store ? { status: (event: StatusEvent) => store.apply(event) } : {}),
     });
@@ -507,7 +504,7 @@ async function allowCommand(tokens: string[]): Promise<void> {
     }
     grant(config, await pickPrincipal(paths, config));
   }
-  await saveConfig(paths, config, { preserveInheritedSettings: true });
+  await saveConfig(paths, config);
   process.stderr.write(`  ${dim("saved · restart tgfx to apply")}\n`);
   if (flags.json) console.log(JSON.stringify(config.access, null, 2));
 }
@@ -541,7 +538,7 @@ async function denyCommand(tokens: string[]): Promise<void> {
   if (config.access.userIds.length + config.access.chatIds.length === 0) {
     throw new CliError("the allowlist cannot be empty", "allow another user or chat first, then deny this one");
   }
-  if (changed) await saveConfig(paths, config, { preserveInheritedSettings: true });
+  if (changed) await saveConfig(paths, config);
   for (const notice of notices) (notice.warning ? warn : ok)(notice.message);
   const remaining = config.access.userIds.length + config.access.chatIds.length;
   process.stderr.write(
@@ -568,7 +565,7 @@ async function approvalsCommand(tokens: string[]): Promise<void> {
   const token = await requireToken(config);
   await createTelegramApi(token).api.getChat(target.chatId);
   config.approvals = { chatId: target.chatId, topicId: target.topicId };
-  await saveConfig(paths, config, { preserveInheritedSettings: true });
+  await saveConfig(paths, config);
   ok(`approvals go to ${target.chatId}${target.topicId === "0" ? "" : `/${target.topicId}`} · restart tgfx to apply`);
   if (flags.json) console.log(JSON.stringify(config.approvals, null, 2));
 }
@@ -602,12 +599,7 @@ async function accessCommand(tokens: string[]): Promise<void> {
         workspace: paths.workspace,
         access: principals,
         approvals: config.approvals,
-        settings: {
-          streaming: config.streaming,
-          expandStreamingTools: config.expandStreamingTools,
-          updateEveryMs: config.updateEveryMs,
-          customIcons: config.customIcons,
-        },
+        settings: { output: config.output, customIcons: config.customIcons },
         sessions: routes.map((route) => ({
           chat: route.chat_id,
           topic: route.topic_id,
@@ -692,7 +684,7 @@ async function authCommand(tokens: string[]): Promise<void> {
     if (!config) config = await createConfig(paths, bot, telegram);
     else {
       config = { ...config, activeBotId: bot.id };
-      await saveConfig(paths, config, { preserveInheritedSettings: true });
+      await saveConfig(paths, config);
       if (previous !== bot.id) {
         process.stderr.write(`  ${dim(`switched from bot ${previous} · route history stays partitioned by bot ID`)}\n`);
       }

@@ -11,6 +11,13 @@ describe("fx tool descriptions", () => {
     }
   });
 
+  test("falls back to the ACP kind for the activity when fx sends no tool name", () => {
+    expect(describeTool({ title: "Reading", kind: "read" })).toEqual({ title: "Reading", argument: "", activity: "read_files" });
+    expect(describeTool({ title: "Running", kind: "execute" }).activity).toBe("commands");
+    expect(describeTool({ title: "Searching", kind: "search" }).activity).toBe("searched_code");
+    expect(describeTool({ title: "Custom", kind: "other" }).activity).toBeUndefined();
+  });
+
   test("counts every fx tool except MCP selection in summaries", () => {
     for (const name of Object.keys(FX_TOOLS)) {
       const input = name === "shell" ? { action: "run", command: "ls" } : {};

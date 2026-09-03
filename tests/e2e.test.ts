@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { TgfxApp } from "../src/app";
-import { loadConfig, saveConfig, workspacePaths, type WorkspacePaths } from "../src/config";
+import { loadConfig, saveConfig, saveGlobalConfig, workspacePaths, type WorkspacePaths } from "../src/config";
 import { StateStore } from "../src/state";
 import { TelegramApi } from "../src/telegram/api";
 import type { BotIdentity, TgfxConfig } from "../src/types";
@@ -37,20 +37,20 @@ async function makeWorkspace(
   temporary.push(workspace);
   process.env.TGFX_HOME = join(workspace, "tgfx-home");
   const paths = workspacePaths(BOT.id, workspace);
-  await saveConfig(paths, {
-    version: 1,
-    activeBotId: BOT.id,
-    streaming: true, expandStreamingTools: true, updateEveryMs: 500, customIcons: true,
-    ...config,
-  });
+  const { output = "live", customIcons = true, ...project } = config;
+  await saveGlobalConfig({ version: 1, defaults: { output, customIcons } });
+  await saveConfig(paths, { version: 1, activeBotId: BOT.id, output, customIcons, ...project });
   return { paths, fxBinary: await fakeFx(workspace) };
 }
 
 async function startApp(paths: WorkspacePaths, fxBinary: string, telegram: FakeTelegram): Promise<{
   app: TgfxApp; running: Promise<void>;
+  /** Resolves once the app has finished a turn, so stopping cannot interrupt it. */
+  delivered: Promise<void>;
 }> {
   const config = await loadConfig(paths);
   if (!config) throw new Error("test workspace config missing");
+  const delivered = Promise.withResolvers<void>();
   const app = new TgfxApp({
     config,
     paths,
@@ -58,9 +58,9 @@ async function startApp(paths: WorkspacePaths, fxBinary: string, telegram: FakeT
     bot: BOT,
     telegram: new TelegramApi("100:e2e-token", telegram.url),
     fxBinary,
-    log: () => undefined,
+    log: (event) => { if (event.event === "turn.delivered") delivered.resolve(); },
   });
-  return { app, running: app.run() };
+  return { app, running: app.run(), delivered: delivered.promise };
 }
 
 describe("tgfx over the local Telegram simulator", () => {
@@ -70,11 +70,12 @@ describe("tgfx over the local Telegram simulator", () => {
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
     });
-    const { app, running } = await startApp(paths, fxBinary, telegram);
+    const { app, running, delivered } = await startApp(paths, fxBinary, telegram);
     try {
       telegram.sendUserMessage({ userId: 42, text: "hello over http", firstName: "Ada" });
       const finals = await telegram.waitForCalls("sendRichMessage");
       const drafts = await telegram.waitForCalls("sendRichMessageDraft");
+      await delivered;
       expect(String(finals[0]!.payload.chat_id)).toBe("42");
       expect(finals[0]!.payload.rich_message).toEqual({
         blocks: [{ type: "paragraph", text: "fake streamed text" }],
@@ -94,12 +95,12 @@ describe("tgfx over the local Telegram simulator", () => {
     } finally { state.close(); }
   }, 15_000);
 
-  test("edits the /compact progress message when streaming is disabled", async () => {
+  test("edits the /compact progress message in report mode", async () => {
     const telegram = new FakeTelegram();
     const { paths, fxBinary } = await makeWorkspace({
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: false,
+      output: "report",
     });
     const { app, running } = await startApp(paths, fxBinary, telegram);
     try {

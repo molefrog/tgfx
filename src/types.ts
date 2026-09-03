@@ -2,13 +2,23 @@ import type { Update } from "grammy/types";
 
 export type DecimalId = string;
 export type ChatKind = "private" | "group" | "supergroup" | "channel";
-type RenderMode = "streaming" | "final";
+/**
+ * How a turn reaches Telegram, least to most talkative:
+ *
+ * - `answer`: one message with just the answer, once fx is done;
+ * - `report`: one message with the answer and collapsed tool groups;
+ * - `progress`: a live status line ("Reading files…") while fx works, then
+ *   the answer streams in; the final message is the answer alone;
+ * - `live`: a live draft with prose and every tool call as it happens.
+ *
+ * Groups never see drafts: `progress` and `live` fall back to one message.
+ */
+export const OUTPUT_MODES = ["answer", "report", "progress", "live"] as const;
+export type OutputMode = (typeof OUTPUT_MODES)[number];
 
-export type RendererConfig = {
-  mode: RenderMode;
-  expandStreamingTools: boolean;
-  updateEveryMs: number;
-};
+export function isOutputMode(value: unknown): value is OutputMode {
+  return OUTPUT_MODES.includes(value as OutputMode);
+}
 
 export type AdminCapability =
   | "pins"
@@ -29,9 +39,7 @@ export type TgfxConfig = {
     chatId: DecimalId;
     topicId: DecimalId;
   };
-  streaming: boolean;
-  expandStreamingTools: boolean;
-  updateEveryMs: number;
+  output: OutputMode;
   customIcons: boolean;
 };
 

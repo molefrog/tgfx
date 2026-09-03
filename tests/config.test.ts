@@ -33,21 +33,30 @@ function config(): TgfxConfig {
     activeBotId: "123456",
     access: { userIds: ["42"], chatIds: [] },
     approvals: { chatId: "42", topicId: "0" },
-    streaming: true,
-    expandStreamingTools: true,
-    updateEveryMs: 250,
+    output: "live",
     customIcons: true,
   };
 }
 
+/** The identity half of a config, as a project file stores it before any override. */
+function bare(): Omit<TgfxConfig, "output" | "customIcons"> {
+  const { output: _output, customIcons: _icons, ...rest } = config();
+  return rest;
+}
+
 describe("workspace config", () => {
-  test("round-trips without storing a bot token", async () => {
+  test("lives under the tgfx home, named after the folder, and never stores a bot token", async () => {
     const root = isolate("tgfx-config-");
-    const paths = projectPaths(root);
+    const workspace = join(root, "my project");
+    const paths = projectPaths(workspace);
     await saveConfig(paths, config());
     expect(await loadConfig(paths)).toEqual(config());
-    expect(paths.config).toBe(join(root, ".fx", "telegram", "config.json"));
-    expect(await Bun.file(paths.config).text()).not.toContain("token");
+    expect(paths.config).toMatch(/\/home\/projects\/my-project-[0-9a-f]{12}\.json$/);
+    expect(projectPaths(join(root, "other")).config).not.toBe(paths.config);
+    const written = await Bun.file(paths.config).text();
+    expect(written).toContain(`"workspace": ${JSON.stringify(workspace)}`);
+    expect(written).not.toContain("token");
+    expect(existsSync(join(workspace, ".fx"))).toBeFalse();
   });
 
   test("requires an allowlist and decimal Telegram IDs", () => {
@@ -55,59 +64,78 @@ describe("workspace config", () => {
     expect(() => configSchema.parse({ ...config(), activeBotId: "@bot" })).toThrow();
   });
 
-  test("validates the renderer update interval", () => {
-    expect(configSchema.parse({ ...config(), updateEveryMs: 800 }).updateEveryMs).toBe(800);
-    expect(() => configSchema.parse({ ...config(), updateEveryMs: 100 })).toThrow();
+  test("accepts only a known output mode", () => {
+    expect(configSchema.parse({ ...config(), output: "answer" }).output).toBe("answer");
+    expect(() => configSchema.parse({ ...config(), output: "loud" })).toThrow();
   });
 
-  test("defaults omitted settings: streaming on, tools expanded, icons on", () => {
-    const {
-      streaming: _streaming, expandStreamingTools: _expand, customIcons: _icons, ...bare
-    } = config();
-    const parsed = configSchema.parse(bare);
-    expect(parsed.streaming).toBeTrue();
-    expect(parsed.expandStreamingTools).toBeTrue();
+  test("defaults omitted settings: live output, icons on", () => {
+    const parsed = configSchema.parse(bare());
+    expect(parsed.output).toBe("live");
     expect(parsed.customIcons).toBeTrue();
     expect(configSchema.parse({ ...config(), customIcons: false }).customIcons).toBeFalse();
   });
 
   test("fills missing project settings from global defaults, but the project wins", async () => {
     const root = isolate("tgfx-defaults-");
-    await saveGlobalConfig({
-      version: 1,
-      defaults: { streaming: false, customIcons: false, updateEveryMs: 500 },
-    });
+    await saveGlobalConfig({ version: 1, defaults: { output: "report", customIcons: false } });
     const paths = projectPaths(root);
-    const {
-      streaming: _streaming, expandStreamingTools: _expand,
-      updateEveryMs: _interval, customIcons: _icons, ...bare
-    } = config();
-    mkdirSync(paths.directory, { recursive: true });
-    writeFileSync(paths.config, JSON.stringify(bare));
+    mkdirSync(join(process.env.TGFX_HOME!, "projects"), { recursive: true });
+    writeFileSync(paths.config, JSON.stringify(bare()));
     const inherited = await loadConfig(paths);
-    expect(inherited?.streaming).toBeFalse();
+    expect(inherited?.output).toBe("report");
     expect(inherited?.customIcons).toBeFalse();
-    expect(inherited?.updateEveryMs).toBe(500);
-    expect(inherited?.expandStreamingTools).toBeTrue();
-    writeFileSync(paths.config, JSON.stringify({ ...bare, streaming: true }));
-    expect((await loadConfig(paths))?.streaming).toBeTrue();
+    writeFileSync(paths.config, JSON.stringify({ ...bare(), output: "answer" }));
+    expect((await loadConfig(paths))?.output).toBe("answer");
   });
 
-  test("keeps inherited settings out of the project config on create and update", async () => {
+  test("keeps inherited settings out of the project file on create and update", async () => {
     const root = isolate("tgfx-inherited-defaults-");
     const paths = projectPaths(root);
-    await saveGlobalConfig({ version: 1, defaults: { streaming: false, customIcons: false } });
-    await saveConfig(paths, config(), { preserveInheritedSettings: true });
+    await saveGlobalConfig({ version: 1, defaults: { output: "report", customIcons: false } });
+    await saveConfig(paths, config());
     const created = JSON.parse(await Bun.file(paths.config).text());
-    expect(created.streaming).toBeUndefined();
+    expect(created.output).toBeUndefined();
     expect(created.customIcons).toBeUndefined();
     const resolved = (await loadConfig(paths))!;
-    expect(resolved.streaming).toBeFalse();
+    expect(resolved.output).toBe("report");
     resolved.access.userIds.push("43");
-    await saveConfig(paths, resolved, { preserveInheritedSettings: true });
-    await saveGlobalConfig({ version: 1, defaults: { streaming: true, customIcons: true } });
-    expect((await loadConfig(paths))?.streaming).toBeTrue();
-    expect((await loadConfig(paths))?.customIcons).toBeTrue();
+    await saveConfig(paths, resolved);
+    await saveGlobalConfig({ version: 1, defaults: { output: "live", customIcons: true } });
+    const updated = (await loadConfig(paths))!;
+    expect(updated.access.userIds).toEqual(["42", "43"]);
+    expect(updated.output).toBe("live");
+    expect(updated.customIcons).toBeTrue();
+  });
+
+  test("keeps a project's own override across saves", async () => {
+    const root = isolate("tgfx-override-");
+    const paths = projectPaths(root);
+    mkdirSync(join(process.env.TGFX_HOME!, "projects"), { recursive: true });
+    writeFileSync(paths.config, JSON.stringify({ ...bare(), output: "progress" }));
+    const loaded = (await loadConfig(paths))!;
+    loaded.approvals = { chatId: "-100", topicId: "0" };
+    await saveConfig(paths, loaded);
+    const stored = JSON.parse(await Bun.file(paths.config).text());
+    expect(stored.output).toBe("progress");
+    expect(stored.customIcons).toBeUndefined();
+    expect((await loadConfig(paths))?.approvals.chatId).toBe("-100");
+  });
+
+  test("moves a workspace-local config from an older tgfx into the home, once", async () => {
+    const root = isolate("tgfx-legacy-");
+    const legacyDirectory = join(root, ".fx", "telegram");
+    mkdirSync(legacyDirectory, { recursive: true });
+    writeFileSync(join(legacyDirectory, "config.json"), JSON.stringify({
+      ...bare(), streaming: false, expandStreamingTools: true, updateEveryMs: 250,
+    }));
+    const paths = projectPaths(root);
+    const imported = await loadConfig(paths);
+    expect(imported?.activeBotId).toBe("123456");
+    expect(imported?.output).toBe("report");
+    expect(existsSync(paths.config)).toBeTrue();
+    expect(existsSync(legacyDirectory)).toBeFalse();
+    expect((await loadConfig(paths))?.output).toBe("report");
   });
 
   test("prunes only expired entries inside the bot files directory", async () => {
