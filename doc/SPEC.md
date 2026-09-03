@@ -252,8 +252,10 @@ before polling is visible rather than blank.
 One line per busy route names the chat, the person, and the turn as a glyph
 trace (`⋯` thinking, `·` prose, `▪`/`▫` tool started and finished, `!` waiting
 for approval, `✂` cancelled) with elapsed time, tool count, and the session's
-model. A group route also shows how many messages wait behind its turn. Idle,
-the line collapses to a summary of the last turn.
+model. A group route also shows how many messages wait behind its turn. When
+the turn ends the line stays for 24 hours, showing the outcome and how long
+ago it finished, with running turns sorted above finished ones. After that it
+collapses to a summary of the last turn.
 
 The last line holds the switches: `f` opens a format menu (streaming, custom
 icons) navigated with arrows and space, `p` pauses polling without

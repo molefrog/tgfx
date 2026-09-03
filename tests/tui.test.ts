@@ -108,7 +108,7 @@ describe("live wire status", () => {
     expect(frame().text.split("\n")[1]).not.toContain("approval");
   });
 
-  test("a finished turn folds into the idle summary and sends a packet back", () => {
+  test("a finished turn keeps its line with the outcome and age, and sends a packet back", () => {
     const { store, frame, advance } = scene();
     store.apply({ type: "session", route: alexey, state: "ready" });
     store.apply({ type: "turn", route: alexey, state: "started", who: "Alexey", text: "hi" });
@@ -116,10 +116,42 @@ describe("live wire status", () => {
     advance(400);
     const [wire, routes] = frame().text.split("\n");
     expect(wire).toContain("◀ ✓");
-    expect(routes).toContain("1 session");
     expect(routes).toContain("Alexey");
-    expect(routes).toContain("delivered");
-    expect(routes).toContain("3.2s");
+    expect(routes).toContain("hi");
+    expect(routes).toContain("delivered · 3.2s");
+    expect(routes).toContain("0s ago");
+    expect(routes).not.toContain("session");
+  });
+
+  test("running turns sort above finished ones, newest finished first", () => {
+    const { store, frame, advance } = scene();
+    store.apply({ type: "turn", route: alexey, state: "started", who: "Alexey", text: "first" });
+    store.apply({ type: "turn", route: alexey, state: "finished", outcome: "failed", seconds: 1 });
+    advance(60_000);
+    store.apply({ type: "turn", route: team, state: "started", who: "Ann", text: "second" });
+    store.apply({ type: "turn", route: team, state: "finished", outcome: "delivered", seconds: 1 });
+    const other: RouteLabel = { key: "100:7:0", chat: "Bob", group: false };
+    store.apply({ type: "turn", route: other, state: "started", who: "Bob", text: "busy" });
+    const [, first, second, third] = frame().text.split("\n");
+    expect(first).toContain("Bob");
+    expect(second).toContain("team-fx");
+    expect(third).toContain("Alexey");
+    expect(third).toContain("failed");
+    expect(third).toContain("1m ago");
+  });
+
+  test("a finished line folds into the idle summary after a day", () => {
+    const { store, frame, advance } = scene();
+    store.apply({ type: "session", route: alexey, state: "ready" });
+    store.apply({ type: "turn", route: alexey, state: "started", who: "Alexey", text: "hi" });
+    store.apply({ type: "turn", route: alexey, state: "finished", outcome: "delivered", seconds: 3.2 });
+    advance(24 * 3_600_000 - 1);
+    expect(frame().text.split("\n")[1]).not.toContain("session");
+    advance(2);
+    const [, routes] = frame().text.split("\n");
+    expect(routes).toContain("idle · 1 session");
+    expect(routes).toContain("Alexey");
+    expect(routes).toContain("24h ago");
   });
 
   test("each route line carries its own session's model and follows a picker change", () => {
@@ -136,7 +168,8 @@ describe("live wire status", () => {
     store.apply({ type: "turn", route: alexey, state: "finished", outcome: "delivered", seconds: 2 });
     store.apply({ type: "turn", route: team, state: "finished", outcome: "delivered", seconds: 1 });
     lines = frame().text.split("\n");
-    expect(lines[1]).toContain("last Alexey");
+    expect(lines[1]).toContain("Alexey");
+    expect(lines[1]).toContain("delivered");
     expect(lines[1]).toContain("· anthropic/claude-sonnet-5");
   });
 

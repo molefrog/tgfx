@@ -15,9 +15,10 @@ import {
  * The live wire: `telegram ── tgfx ── fx` as the status view.
  *
  * Three lines, redrawn in place. The left segment shows polling health, the
- * right one the ACP link, packets slide along both, and each busy route gets
- * one line with its turn compressed to a glyph trace. Logs stay hidden until
- * `l` opens a tail beneath.
+ * right one the ACP link, packets slide along both, and each route gets one
+ * line with its turn compressed to a glyph trace. Finished lines stay for a
+ * day so the recent conversations are visible. Logs stay hidden until `l`
+ * opens a tail beneath.
  */
 
 export type TuiControls = {
@@ -36,7 +37,9 @@ export type TuiProps = {
   animate?: boolean;
 };
 
-const MAX_ROUTE_LINES = 3;
+const MAX_ROUTE_LINES = 5;
+/** A finished turn keeps its line this long, then folds into the idle summary. */
+const RECENT_MS = 24 * 3_600_000;
 const LOG_TAIL = 8;
 const SPINNER = ["◐", "◓", "◑", "◒"];
 const TRACE_COLOR: Record<TraceGlyph, string | undefined> = {
@@ -204,7 +207,13 @@ function RouteLine({ route, now }: { route: RouteStatus; now: number }) {
         ))}
       </Text>
       <Box flexGrow={1} />
-      {route.waiting
+      {route.finished
+        ? <Text dimColor>
+            {"  "}
+            <Text color={OUTCOME_COLOR[route.finished.outcome]}>{route.finished.outcome}</Text>
+            {` · ${route.finished.seconds}s · ${tools} ${tools === 1 ? "tool" : "tools"} · ${ago(now - route.finished.at)} ago`}
+          </Text>
+        : route.waiting
         ? <Text color="yellow">{`  ⚑ approval  ${seconds}s`}</Text>
         : <Text dimColor>{`  ${seconds}s · ${tools} ${tools === 1 ? "tool" : "tools"}`}</Text>}
       {route.model && <Text dimColor>{` · ${route.model}`}</Text>}
@@ -212,6 +221,10 @@ function RouteLine({ route, now }: { route: RouteStatus; now: number }) {
     </Box>
   );
 }
+
+const OUTCOME_COLOR: Record<NonNullable<RouteStatus["finished"]>["outcome"], string | undefined> = {
+  delivered: undefined, cancelled: "yellow", failed: "red",
+};
 
 const BOOT_LABEL: Record<BootStep, { doing: string; done: string }> = {
   fx: { doing: "checking fx", done: "fx" },
@@ -242,11 +255,15 @@ function Routes({ store, now }: { store: StatusStore; now: number }) {
   const { routes, boot } = store.snapshot();
   if (boot) return <BootLine boot={boot} now={now} />;
   const running = routes.filter((route) => route.turn === "running").sort((a, b) => a.startedAt - b.startedAt);
-  if (running.length) {
+  const recent = routes
+    .filter((route) => route.turn !== "running" && route.finished && now - route.finished.at < RECENT_MS)
+    .sort((a, b) => b.finished!.at - a.finished!.at);
+  const lines = [...running, ...recent];
+  if (lines.length) {
     return (
       <Box flexDirection="column">
-        {running.slice(0, MAX_ROUTE_LINES).map((route) => <RouteLine key={route.key} route={route} now={now} />)}
-        {running.length > MAX_ROUTE_LINES && <Text dimColor>{`  +${running.length - MAX_ROUTE_LINES} more`}</Text>}
+        {lines.slice(0, MAX_ROUTE_LINES).map((route) => <RouteLine key={route.key} route={route} now={now} />)}
+        {lines.length > MAX_ROUTE_LINES && <Text dimColor>{`  +${lines.length - MAX_ROUTE_LINES} more`}</Text>}
       </Box>
     );
   }
