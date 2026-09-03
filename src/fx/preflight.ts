@@ -1,4 +1,5 @@
 import { redactSecrets } from "../secrets";
+import { withTimeout } from "../timeout";
 
 const MINIMUM_FX_VERSION = [0, 0, 7] as const;
 
@@ -51,13 +52,10 @@ async function run(binary: string, args: string[], workspace: string): Promise<s
     new Response(process.stderr).text(),
     process.exited,
   ]);
-  const [stdout, stderr, exitCode] = await Promise.race([
-    completed,
-    Bun.sleep(15_000).then(() => {
-      process.kill();
-      throw new Error(`fx ${args.join(" ")} did not finish within 15 seconds`);
-    }),
-  ]);
+  const [stdout, stderr, exitCode] = await withTimeout(completed, 15_000, () => {
+    process.kill();
+    throw new Error(`fx ${args.join(" ")} did not finish within 15 seconds`);
+  });
   if (exitCode !== 0) {
     throw new Error(redactSecrets((stderr || stdout).trim() || `fx exited with status ${exitCode}`));
   }

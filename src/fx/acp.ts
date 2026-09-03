@@ -1,6 +1,7 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import { withTimeout } from "../timeout";
 import { VERSION } from "../version";
 
 export type FxSessionInfo = {
@@ -81,10 +82,11 @@ function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS
 
 async function waitForExit(child: ChildProcessWithoutNullStreams, milliseconds: number): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  await Promise.race([
+  await withTimeout(
     new Promise<void>((resolve) => child.once("exit", () => resolve())),
-    Bun.sleep(milliseconds),
-  ]);
+    milliseconds,
+    () => undefined,
+  );
 }
 
 async function terminate(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -127,10 +129,9 @@ export class FxRouteSession {
     if (!this.connectTask) {
       this.connectTask = this.connect().catch((error) => { this.connectionError = error; });
     }
-    return Promise.race([
-      this.ready.promise,
-      Bun.sleep(START_TIMEOUT_MS).then(() => { throw new Error("fx ACP did not initialize within 30 seconds"); }),
-    ]);
+    return withTimeout(this.ready.promise, START_TIMEOUT_MS, () => {
+      throw new Error("fx ACP did not initialize within 30 seconds");
+    });
   }
 
   private async connect(): Promise<void> {
@@ -334,10 +335,11 @@ export class FxRouteSession {
     if (this.closed) return;
     this.closed = true;
     if (options.closeSession && this.context && this.sessionId) {
-      await Promise.race([
+      await withTimeout(
         this.context.request(acp.methods.agent.session.close, { sessionId: this.sessionId }).catch(() => undefined),
-        Bun.sleep(1_000),
-      ]);
+        1_000,
+        () => undefined,
+      );
     }
     this.closeGate.resolve();
     if (this.child) await terminate(this.child);

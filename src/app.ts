@@ -34,6 +34,7 @@ import {
 } from "./telegram/renderer";
 import { redactSecrets } from "./secrets";
 import type { RouteLabel, Settings, StatusEvent, TraceGlyph } from "./status";
+import { withTimeout } from "./timeout";
 import {
   commandFromText,
   groupMigrationFromUpdate,
@@ -374,7 +375,7 @@ export class TgfxApp {
     const queued = Promise.allSettled([...this.queueTails.values()]);
     // Give cooperative ACP cancellation a short head start, then terminate the
     // child processes so Ctrl-C cannot hang behind an unresponsive agent/tool.
-    await Promise.race([queued, Bun.sleep(3_000)]);
+    await withTimeout(queued, 3_000, () => undefined);
     await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
     await queued;
     await Promise.allSettled([...this.stickerTemporaryDirectories].map((directory) =>
@@ -415,7 +416,7 @@ export class TgfxApp {
         }
         this.log(`Telegram poll failed · ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
         this.status({ type: "poll", state: "reconnecting", retryMs: backoff });
-        await Promise.race([Bun.sleep(backoff), this.stopped]);
+        await withTimeout(this.stopped, backoff, () => undefined);
         backoff = Math.min(30_000, backoff * 2);
       }
     }
