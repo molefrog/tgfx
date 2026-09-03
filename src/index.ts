@@ -249,7 +249,6 @@ async function knownWorkspace(project: ProjectPaths): Promise<{ config: TgfxConf
 
 async function runtime(project: ProjectPaths, options: {
   json?: boolean;
-  quiet?: boolean;
   known?: { config: TgfxConfig; token: string };
   /** Startup progress for the live view; each step reports before and after. */
   boot?: (event: Extract<StatusEvent, { type: "boot" }>) => void;
@@ -257,7 +256,6 @@ async function runtime(project: ProjectPaths, options: {
   paths: WorkspacePaths; config: TgfxConfig; token: string; telegram: TelegramApi; bot: BotIdentity;
   fxBinary: string; release: () => Promise<void>;
 }> {
-  const chatty = !options.json && !options.quiet;
   const boot = options.boot ?? (() => undefined);
   const step = async <T,>(name: "fx" | "telegram" | "lock", work: () => Promise<T>, done: (value: T) => string | undefined) => {
     boot({ step: name, state: "running", type: "boot" });
@@ -271,10 +269,8 @@ async function runtime(project: ProjectPaths, options: {
       throw error;
     }
   };
-  if (chatty) banner();
   const fxBinary = process.env.FX_BINARY ?? "fx";
-  const fx = await step("fx", () => inspectFx(fxBinary, project.workspace), (report) => report.report.model);
-  if (chatty) ok(`fx ${fx.version} · ${fx.report.model} · ${fx.report.auth}`);
+  await step("fx", () => inspectFx(fxBinary, project.workspace), (report) => report.report.model);
   let config = options.known?.config ?? await loadConfig(project);
   let token = options.known?.token ?? tokenFromEnvironment();
   let prompted = false;
@@ -368,7 +364,7 @@ async function runCommand(tokens: string[]): Promise<void> {
       });
     }
     const resolved = await runtime(project, {
-      json, quiet: live, ...(known ? { known } : {}), ...(store ? { boot: (event) => store.apply(event) } : {}),
+      json, ...(known ? { known } : {}), ...(store ? { boot: (event) => store.apply(event) } : {}),
     });
     const { release: releaseLock, ...appRuntime } = resolved;
     release = releaseLock;

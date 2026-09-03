@@ -183,7 +183,6 @@ directory is the workspace for the lifetime of the process.
 If the selected bot has no token, tgfx asks for it in a hidden prompt:
 
 ```text
-tgfx 0.1.0
 ◇  Telegram bot token
 │  •••••••••••••••••••••••••••••••••••••••
 ◆  Who may use this workspace bot?
