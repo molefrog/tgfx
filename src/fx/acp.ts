@@ -62,12 +62,17 @@ function modelConfig(options: acp.SessionConfigOption[] | null | undefined): FxM
   };
 }
 
-function rejectPermission(request: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
-  const option = request.options.find((item) => item.kind === "reject_once")
-    ?? request.options.find((item) => item.kind === "reject_always");
+/** The fail-closed answer: fx's reject option, or a cancellation when it offers none. */
+export function rejectedPermission(options: acp.PermissionOption[]): acp.RequestPermissionResponse {
+  const option = options.find((item) => item.kind === "reject_once")
+    ?? options.find((item) => item.kind === "reject_always");
   return option
     ? { outcome: { outcome: "selected", optionId: option.optionId } }
     : { outcome: { outcome: "cancelled" } };
+}
+
+function rejectPermission(request: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
+  return rejectedPermission(request.options);
 }
 
 function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {

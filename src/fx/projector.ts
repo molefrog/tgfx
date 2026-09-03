@@ -131,6 +131,7 @@ function completedToolSummary(tools: ToolState[], changedAt: number): string {
 
 export class AcpProjector {
   private thought = "";
+  private waiting?: string;
   private firstThoughtMessageId?: string;
   private hasThought = false;
   private timeline: TimelineEntry[] = [];
@@ -289,6 +290,21 @@ export class AcpProjector {
     return -1;
   }
 
+  /**
+   * A line the live draft shows while the turn waits on a person, or nothing
+   * once it no longer does. The draft is the only place a streaming chat can
+   * say that the turn is blocked on approval.
+   */
+  setWaiting(text: string | undefined): ProjectorChange {
+    if (this.waiting === text) return "none";
+    this.waiting = text;
+    return "tool";
+  }
+
+  private waitingBlocks(): RichBlock[] {
+    return this.waiting ? [{ type: "paragraph", text: { type: "italic", text: this.waiting } }] : [];
+  }
+
   rich(options: {
     final: boolean;
     expandStreamingTools: boolean;
@@ -302,7 +318,10 @@ export class AcpProjector {
       // the first differing character.
       const waited = now - this.startedAt;
       const suffix = waited >= THINKING_ELAPSED_AFTER_MS ? ` ${elapsedSeconds(this.startedAt, now)}s` : "";
-      return { blocks: [{ type: "thinking", text: [THINKING_CUSTOM_EMOJI, ` Thinking…${suffix}`] }] };
+      return { blocks: [
+        { type: "thinking", text: [THINKING_CUSTOM_EMOJI, ` Thinking…${suffix}`] },
+        ...this.waitingBlocks(),
+      ] };
     }
 
     const blocks = items.flatMap((item, index) => {
@@ -315,7 +334,7 @@ export class AcpProjector {
         live ? now : undefined,
       )];
     });
-    return { blocks };
+    return { blocks: options.final ? blocks : [...blocks, ...this.waitingBlocks()] };
   }
 
   // Consecutive calls that would print the same row fold into one row with a

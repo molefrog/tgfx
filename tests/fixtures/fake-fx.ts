@@ -166,10 +166,16 @@ const app = acp.agent({ name: "fake-fx" })
           toolCallId: "tool-1", title: "Use Telegram", kind: "other", status: "pending",
           rawInput: { action: "test" },
         },
-        options: [
-          { optionId: "allow", name: "Allow once", kind: "allow_once" },
-          { optionId: "reject", name: "Reject", kind: "reject_once" },
-        ],
+        // PERMISSION_ALWAYS mirrors an agent that offers no way to decline.
+        options: text.includes("PERMISSION_ALWAYS")
+          ? [
+            { optionId: "allow", name: "Allow once", kind: "allow_once" },
+            { optionId: "always", name: "Allow always", kind: "allow_always" },
+          ]
+          : [
+            { optionId: "allow", name: "Allow once", kind: "allow_once" },
+            { optionId: "reject", name: "Reject", kind: "reject_once" },
+          ],
       });
       record("permission_result", decision);
     }

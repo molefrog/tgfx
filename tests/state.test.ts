@@ -152,6 +152,24 @@ describe("SQLite operational journal", () => {
     state.close();
   });
 
+  test("remembers an approval's card and lists the bot's open approvals", () => {
+    const state = store();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    state.createInteraction({ id: "fx", botId: "100", routeKey: "100:42:0", kind: "fx_permission", payload: { prompt: "?" }, expiresAt });
+    state.createInteraction({ id: "admin", botId: "100", routeKey: "100:42:0", kind: "telegram_admin:delete", payload: {}, expiresAt });
+    state.createInteraction({ id: "choice", botId: "100", routeKey: "100:42:0", kind: "choice", payload: {}, expiresAt });
+    state.createInteraction({ id: "other-bot", botId: "200", routeKey: "200:42:0", kind: "fx_permission", payload: {}, expiresAt });
+    state.attachInteractionCard("fx", { chatId: "42", messageId: 7 });
+    expect(state.pendingApprovals("100").sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { id: "admin", kind: "telegram_admin:delete" },
+      { id: "fx", kind: "fx_permission", card: { chatId: "42", messageId: 7 } },
+    ]);
+    expect(JSON.parse(state.interaction("fx")!.payload_json)).toEqual({ prompt: "?", card: { chatId: "42", messageId: 7 } });
+    state.resolveInteraction("fx", "allow");
+    expect(state.pendingApprovals("100").map((pending) => pending.id)).toEqual(["admin"]);
+    state.close();
+  });
+
   test("expires only matching pending interactions on a route", () => {
     const state = store();
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
