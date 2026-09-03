@@ -110,7 +110,7 @@ export function helpText(): string {
     line("tgfx", "run fx in this folder (sets up on first run)"),
     line("tgfx --yolo", "run with FX permission checks disabled"),
     line("tgfx access", "who can talk to fx, who approves, saved sessions"),
-    line("tgfx allow <id…>", "add users or chats to the allowlist"),
+    line("tgfx allow [id…]", "add users or chats; no id pairs by QR code"),
     line("tgfx deny <id…>", "remove them"),
     line("tgfx approvals <chat>[/topic]", "route approval cards to a chat"),
     line("tgfx auth [--remove]", "add, rotate, or remove the bot token"),

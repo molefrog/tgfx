@@ -149,6 +149,96 @@ async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promis
   throw new CliError("no matching /start message arrived within two minutes", "run tgfx again to retry");
 }
 
+type Principal = { kind: "user" | "chat"; id: string };
+
+/** Ask for one user or chat ID by hand, as in first-run setup. */
+async function askPrincipal(): Promise<Principal> {
+  const selected = await select({
+    message: "Which Telegram identity may use it?",
+    options: [
+      { value: "user", label: "One Telegram user" },
+      { value: "chat", label: "One group or private chat" },
+    ],
+    ...STDERR,
+  });
+  cancelled(selected);
+  const kind = selected as Principal["kind"];
+  if (kind === "chat") {
+    note(
+      "Every human or anonymous chat-as-sender identity in this chat can invoke fx. Messages from other bots remain ignored.",
+      "Chat-wide access",
+      STDERR,
+    );
+  }
+  const answer = await text({
+    message: kind === "user" ? "Allowed Telegram user ID" : "Allowed Telegram chat ID",
+    placeholder: "123456789",
+    validate: (input) => DECIMAL_ID.test((input ?? "").trim()) ? undefined : "Enter a decimal Telegram ID",
+    ...STDERR,
+  });
+  cancelled(answer);
+  return { kind, id: canonicalId(String(answer)) };
+}
+
+/**
+ * Pick who to allow when `tgfx allow` gets no IDs: pair an account over a
+ * deep link, or type an ID. Pairing polls the bot, so it needs the runtime
+ * lock; a running tgfx would otherwise fight it for updates.
+ */
+async function pickPrincipal(paths: ProjectPaths, config: TgfxConfig): Promise<Principal> {
+  const method = await select({
+    message: "Who should be allowed?",
+    options: [
+      { value: "pair", label: "Connect a Telegram account", hint: "scan a QR code" },
+      { value: "manual", label: "Enter a Telegram ID", hint: "users, groups, and channels" },
+    ],
+    ...STDERR,
+  });
+  cancelled(method);
+  if (method === "manual") return askPrincipal();
+  const { bot, telegram } = await validateToken(await requireToken(config));
+  if (bot.id !== config.activeBotId) {
+    throw new CliError(
+      `this folder is configured for bot ${config.activeBotId}, but the stored token belongs to ${bot.id}`,
+      "run tgfx auth to switch bots",
+    );
+  }
+  let release: () => Promise<void>;
+  try {
+    release = await acquireRuntimeLock(bot.id, paths.workspace);
+  } catch (error) {
+    if (!/already running/.test(error instanceof Error ? error.message : "")) throw error;
+    throw new CliError(
+      "tgfx is running, so pairing cannot poll the bot",
+      "stop tgfx first, or run tgfx allow <id> with the account's Telegram ID",
+    );
+  }
+  try {
+    const pairing = await pairPrivateOwner(bot, telegram);
+    const state = new StateStore(botPaths(bot.id).database);
+    try {
+      state.ensurePollState(bot.id);
+      state.advanceCursor(bot.id, pairing.updateId + 1);
+    } finally { state.close(); }
+    await telegram.sendText(pairing.chatId, `You can now talk to fx in ${paths.workspace}.`);
+    return { kind: "user", id: pairing.userId };
+  } finally {
+    await release();
+  }
+}
+
+/** Add one principal to the allowlist in memory; reports and returns false when already there. */
+function grant(config: TgfxConfig, { kind, id }: Principal): boolean {
+  const list = kind === "chat" ? config.access.chatIds : config.access.userIds;
+  if (list.includes(id)) {
+    warn(`${kind} ${id} is already allowed`);
+    return false;
+  }
+  list.push(id);
+  ok(`allowed ${kind} ${id}${kind === "chat" && Number(id) < 0 ? dim(" · everyone in this chat can invoke fx") : ""}`);
+  return true;
+}
+
 async function createConfig(paths: ProjectPaths, bot: BotIdentity, telegram: TelegramApi): Promise<TgfxConfig> {
   requireInteractive("first-run setup");
   const setup = await select({
@@ -170,31 +260,7 @@ async function createConfig(paths: ProjectPaths, bot: BotIdentity, telegram: Tel
     approvalsChatId = pairing.chatId;
     pairedUpdateId = pairing.updateId;
   } else {
-    const selectedPrincipal = await select({
-      message: "Which Telegram identity may use it?",
-      options: [
-        { value: "user", label: "One Telegram user" },
-        { value: "chat", label: "One group or private chat" },
-      ],
-      ...STDERR,
-    });
-    cancelled(selectedPrincipal);
-    principalKind = selectedPrincipal as "user" | "chat";
-    if (principalKind === "chat") {
-      note(
-        "Every human or anonymous chat-as-sender identity in this chat can invoke fx. Messages from other bots remain ignored.",
-        "Chat-wide access",
-        STDERR,
-      );
-    }
-    const allowed = await text({
-      message: principalKind === "user" ? "Allowed Telegram user ID" : "Allowed Telegram chat ID",
-      placeholder: "6143594",
-      validate: (input) => DECIMAL_ID.test((input ?? "").trim()) ? undefined : "Enter a decimal Telegram ID",
-      ...STDERR,
-    });
-    cancelled(allowed);
-    identifier = String(allowed).trim();
+    ({ kind: principalKind, id: identifier } = await askPrincipal());
     const approvalsAnswer = await text({
       message: "Approvals chat ID (approval cards and failure notices)",
       initialValue: identifier,
@@ -425,21 +491,21 @@ async function allowCommand(tokens: string[]): Promise<void> {
     flags: { chat: "boolean", json: "boolean" },
     positionals: true,
   });
-  if (!positionals.length) {
-    throw new CliError("give at least one Telegram user or chat ID", "example: tgfx allow 6143594");
-  }
-  const ids = positionals.map(canonicalId);
   const paths = projectPaths();
   const config = await requireConfig(paths);
-  for (const id of ids) {
-    const kind = flags.chat || Number(id) < 0 ? "chat" : "user";
-    const list = kind === "chat" ? config.access.chatIds : config.access.userIds;
-    if (list.includes(id)) {
-      warn(`${kind} ${id} is already allowed`);
-      continue;
+  if (positionals.length) {
+    for (const raw of positionals) {
+      const id = canonicalId(raw);
+      grant(config, { kind: flags.chat || Number(id) < 0 ? "chat" : "user", id });
     }
-    list.push(id);
-    ok(`allowed ${kind} ${id}${kind === "chat" && Number(id) < 0 ? dim(" · everyone in this chat can invoke fx") : ""}`);
+  } else {
+    if (!process.stdin.isTTY || !process.stderr.isTTY) {
+      throw new CliError(
+        "give at least one Telegram user or chat ID",
+        "example: tgfx allow 123456789 · in a terminal, plain tgfx allow pairs an account by QR code",
+      );
+    }
+    grant(config, await pickPrincipal(paths, config));
   }
   await saveConfig(paths, config, { preserveInheritedSettings: true });
   process.stderr.write(`  ${dim("saved · restart tgfx to apply")}\n`);
@@ -452,7 +518,7 @@ async function denyCommand(tokens: string[]): Promise<void> {
     positionals: true,
   });
   if (!positionals.length) {
-    throw new CliError("give at least one Telegram user or chat ID", "example: tgfx deny 6143594");
+    throw new CliError("give at least one Telegram user or chat ID", "example: tgfx deny 123456789");
   }
   const ids = positionals.map(canonicalId);
   const paths = projectPaths();

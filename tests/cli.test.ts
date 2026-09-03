@@ -126,6 +126,15 @@ describe("tgfx CLI", () => {
     expect(config?.access.userIds).toEqual(["42", "7"]);
   });
 
+  test("allow without IDs outside a terminal explains instead of prompting", async () => {
+    const paths = await workspace();
+    const result = await tgfx(["allow"], { cwd: paths.workspace });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("at least one Telegram");
+    expect(result.stderr).toContain("QR");
+    expect((await loadConfig(paths))?.access.userIds).toEqual(["42"]);
+  });
+
   test("an empty flag value is rejected", async () => {
     const paths = await workspace();
     const result = await tgfx(["--model="], { cwd: paths.workspace });

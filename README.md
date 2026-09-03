@@ -69,7 +69,7 @@ To turn it off, start with `tgfx --no-icons`.
 ```text
 tgfx           run fx in this folder (sets up on first run)
 tgfx --yolo    same, without fx permission checks
-tgfx allow     let more users or chats talk to the bot
+tgfx allow     let more users or chats talk to the bot (no id: pair by QR code)
 tgfx auth      add, rotate, or remove the bot token
 tgfx doctor    diagnostics: token, chats, rights, fx
 ```

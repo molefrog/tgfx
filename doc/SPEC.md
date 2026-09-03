@@ -265,8 +265,8 @@ The view needs a terminal on both ends and a workspace that is already set up.
 
 ```text
 @my_fx_bot · polling · /Users/me/code/my-project · streaming
-12:04:11 6143594 · turn started
-12:04:19 6143594 · delivered 1 message · 8.2s
+12:04:11 123456789 · turn started
+12:04:19 123456789 · delivered 1 message · 8.2s
 ```
 
 Log lines use stable numeric chat/topic route IDs. `tgfx doctor` resolves live
@@ -416,7 +416,7 @@ The intended commands are deliberately limited. Each is one verb, one idea:
 | --- | --- |
 | `tgfx` | Start in the current directory; onboard if needed. Any other unknown first word is an error, never an implicit start. |
 | `tgfx access` | The read-only map: numeric users and chats that can talk to fx, where approvals go, and saved sessions. |
-| `tgfx allow <id…>` | Add users or chats to the allowlist. Positive IDs are users, negative IDs are chats; `--chat` overrides. |
+| `tgfx allow [id…]` | Add users or chats to the allowlist. Positive IDs are users, negative IDs are chats; `--chat` overrides. Without IDs in a terminal it prompts like first-run setup: pair an account over a QR code deep link, or type an ID. Pairing polls the bot, so tgfx must not be running. |
 | `tgfx deny <id…>` | Remove them. The allowlist can never become empty. |
 | `tgfx approvals <chat>[/topic]` | Route approval cards and failure notices to a chat; with no argument, show the current target. |
 | `tgfx auth [--remove]` | Add, rotate, or remove the Telegram bot token. |
@@ -451,11 +451,11 @@ for secrets and automation, not for a second large configuration system.
   "version": 1,
   "activeBotId": "123456789",
   "access": {
-    "userIds": ["6143594"],
+    "userIds": ["123456789"],
     "chatIds": ["-1002255001"]
   },
   "approvals": {
-    "chatId": "6143594",
+    "chatId": "123456789",
     "topicId": "0"
   },
   "streaming": true,
@@ -633,14 +633,14 @@ Block 1:
     "event_id": "tg:841234",
     "context_ref": "ctx_7qK2",
     "scope": {
-      "chat_id": "6143594",
+      "chat_id": "123456789",
       "kind": "private",
       "topic_id": "0"
     },
     "sender": {
       "kind": "user",
       "ref": "member_Zp4c",
-      "user_id": "6143594",
+      "user_id": "123456789",
       "username": "molefrog",
       "display_name": "Mole Frog"
     },
@@ -681,14 +681,14 @@ is not exposed as an authority the model can reuse elsewhere.
     "event_id": "tg:841240",
     "context_ref": "ctx_R9mA",
     "scope": {
-      "chat_id": "6143594",
+      "chat_id": "123456789",
       "kind": "private",
       "topic_id": "0"
     },
     "sender": {
       "kind": "user",
       "ref": "member_Zp4c",
-      "user_id": "6143594",
+      "user_id": "123456789",
       "username": "molefrog"
     },
     "message": {
@@ -817,14 +817,14 @@ interaction:
     "event_id": "tg:841310",
     "context_ref": "ctx_H3sN",
     "scope": {
-      "chat_id": "6143594",
+      "chat_id": "123456789",
       "kind": "private",
       "topic_id": "0"
     },
     "sender": {
       "kind": "user",
       "ref": "member_Zp4c",
-      "user_id": "6143594"
+      "user_id": "123456789"
     },
     "interaction": {
       "ref": "interaction_Q8fK",
