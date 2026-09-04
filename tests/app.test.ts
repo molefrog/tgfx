@@ -469,7 +469,7 @@ describe("tgfx host pipeline", () => {
     expect(sequence).toEqual(["model-update", "model", "cancelled"]);
   });
 
-  test("exposes /clear, /compact, and /model and uses a Thinking draft while streaming", async () => {
+  test("exposes the built-in commands and uses a Thinking draft while compacting", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-commands-"));
     temporary.push(workspace);
     const paths = testPaths(workspace);
@@ -497,7 +497,6 @@ describe("tgfx host pipeline", () => {
             update(1, 42, "/unknown"),
             update(2, 42, "/status"),
             update(3, 42, "/compact"),
-            update(4, 42, "/clear"),
           ];
         }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -506,7 +505,6 @@ describe("tgfx host pipeline", () => {
       deleteCommands: async () => true as const,
       sendText: async (_chat: string, text: string) => {
         texts.push(text);
-        if (text === "✓ Started a fresh conversation") delivered();
         return { message_id: 700 } as Message.TextMessage;
       },
       sendRichDraft: async (_chat: string, _draftId: number, rich: InputRichMessageWithoutUpload) => {
@@ -515,6 +513,7 @@ describe("tgfx host pipeline", () => {
       },
       sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
         finals.push(rich);
+        delivered();
         return { message_id: 701 } as Message.TextMessage;
       },
       editRich: async () => { throw new Error("streaming compact must not edit a regular message"); },
@@ -530,9 +529,8 @@ describe("tgfx host pipeline", () => {
 
     expect(texts).toContain("Unknown command /unknown.");
     expect(texts).toContain("Unknown command /status.");
-    expect(texts).toContain("✓ Started a fresh conversation");
     const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
-    expect(commands).toEqual(["clear", "compact", "model", "format", "cost"]);
+    expect(commands).toEqual(["stop", "clear", "compact", "model", "format", "cost"]);
     expect(drafts).toEqual([{
       blocks: [{
         type: "thinking",
@@ -550,8 +548,7 @@ describe("tgfx host pipeline", () => {
     expect(events.filter((entry) => entry.event === "prompt").map((entry) => entry.value.prompt)).toEqual([
       [{ type: "text", text: "/compact" }],
     ]);
-    expect(events.filter((entry) => entry.event === "new")).toHaveLength(2);
-    expect(events.filter((entry) => entry.event === "close")).toHaveLength(1);
+    expect(events.filter((entry) => entry.event === "new")).toHaveLength(1);
   });
 
   test("switches the route model through the live /model button flow with custom icons disabled", async () => {

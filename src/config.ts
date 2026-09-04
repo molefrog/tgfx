@@ -95,6 +95,16 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
   await rename(temporary, path);
 }
 
+const pendingWrites = new Map<string, Promise<void>>();
+
+function serializeWrite(path: string, write: () => Promise<void>): Promise<void> {
+  const task = (pendingWrites.get(path) ?? Promise.resolve()).catch(() => undefined).then(write);
+  pendingWrites.set(path, task);
+  return task.finally(() => {
+    if (pendingWrites.get(path) === task) pendingWrites.delete(path);
+  });
+}
+
 /** The parsed file, or undefined when it does not exist. */
 async function readJson<T extends z.ZodType>(path: string, schema: T): Promise<z.output<T> | undefined> {
   let raw: string;
@@ -119,7 +129,9 @@ export async function loadGlobalConfig(): Promise<GlobalConfig> {
 }
 
 export async function saveGlobalConfig(config: GlobalConfig): Promise<void> {
-  await writePrivateJson(join(tgfxHome(), "config.json"), globalSchema.parse(config));
+  const path = join(tgfxHome(), "config.json");
+  const parsed = globalSchema.parse(config);
+  await serializeWrite(path, () => writePrivateJson(path, parsed));
 }
 
 type StoredConfig = z.infer<typeof storedConfigSchema>;
@@ -149,13 +161,19 @@ export async function saveConfig(
   overrides: Partial<ProjectSettings> = {},
 ): Promise<void> {
   const { output, customIcons, ...core } = configSchema.parse(config);
-  const current = await readJson(paths.config, storedConfigSchema);
-  const settings: Record<string, unknown> = { output, customIcons, ...overrides };
-  const persisted: Record<string, unknown> = { ...core };
-  for (const key of Object.keys(settingsSchema.shape)) {
-    if ((current && Object.hasOwn(current, key)) || Object.hasOwn(overrides, key)) persisted[key] = settings[key];
-  }
-  await writePrivateJson(paths.config, storedRecord(paths, storedConfigSchema.parse(persisted)));
+  const changes = { ...overrides };
+  await serializeWrite(paths.config, async () => {
+    const current = await readJson(paths.config, storedConfigSchema);
+    const settings = { output, customIcons, ...changes };
+    const persisted: Record<string, unknown> = { ...core };
+    for (const key of Object.keys(settingsSchema.shape) as Array<keyof ProjectSettings>) {
+      if (Object.hasOwn(changes, key)) persisted[key] = settings[key];
+      else if (current && Object.hasOwn(current, key)) {
+        persisted[key] = Object.keys(changes).length ? current[key] : settings[key];
+      }
+    }
+    await writePrivateJson(paths.config, storedRecord(paths, storedConfigSchema.parse(persisted)));
+  });
 }
 
 export async function pruneBotFiles(files: string, maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<void> {

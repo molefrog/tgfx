@@ -39,7 +39,7 @@ export type BootStep = "fx" | "telegram" | "lock" | "menus" | "polling";
 export const BOOT_STEPS: BootStep[] = ["fx", "telegram", "lock", "menus", "polling"];
 export type BootState = { state: "pending" | "running" | "done" | "failed"; detail?: string };
 
-export type Settings = { output: OutputMode; customIcons: boolean; paused: boolean; yolo: boolean };
+export type Settings = { output: OutputMode; customIcons: boolean; paused: boolean; yolo: boolean; saveError?: string };
 
 export type RouteStatus = RouteLabel & {
   who: string;

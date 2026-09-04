@@ -1289,6 +1289,16 @@ therefore gives each boundary an explicit delivery semantic:
 - Telegram's draft Stop button is best effort. A cancelled prompt is
   acknowledged and marked done; it does not promise to undo an FX command
   already in progress. Stale or mismatched draft IDs cannot cancel a newer turn.
+- `/stop` works in private chats and groups in every reply mode. It cancels the
+  active task and discards already queued requests for that route. `/clear`
+  also replaces the session. Requests received after either command wait for
+  it to finish. An FX prompt that ignores cancellation is terminated after a
+  two-second grace period, followed by the normal process-termination timeout.
+- Control menus and navigation run separately from prompt queues and never
+  replace a running turn's message context. A model chosen during a turn is
+  held for the next turn. Failed sessions are replaced for new requests without
+  replaying the request that failed. Session replacement finishes before the
+  current message receives its capabilities and bootstrap instructions.
 
 ### Outgoing delivery and retries
 

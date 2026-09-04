@@ -415,6 +415,7 @@ export function Tui({ store, controls, columns, now = Date.now, animate = false 
       <Wire store={store} columns={width} now={current} tick={tick} />
       <Routes store={store} now={current} />
       <PatchBay store={store} showLog={showLog} menuOpen={menu.open} />
+      {store.snapshot().settings.saveError && <Text color="red">  {store.snapshot().settings.saveError}</Text>}
       {menu.open && <FormatMenu options={options} cursor={menu.cursor} />}
       {showLog && <LogTail store={store} />}
     </Box>

@@ -115,6 +115,7 @@ export class FxRouteSession {
   private configOptions: acp.SessionConfigOption[] = [];
   private updateListeners = new Set<(update: acp.SessionUpdate) => void | Promise<void>>();
   private closed = false;
+  private disposeTask?: Promise<void>;
   private connectionError?: unknown;
   private stderr = "";
 
@@ -131,12 +132,18 @@ export class FxRouteSession {
   }
 
   async start(): Promise<FxSessionInfo> {
+    if (!this.usable) throw this.connectionError ?? new Error("fx ACP session is closed");
     if (!this.connectTask) {
       this.connectTask = this.connect().catch((error) => { this.connectionError = error; });
     }
     return withTimeout(this.ready.promise, START_TIMEOUT_MS, () => {
       throw new Error("fx ACP did not initialize within 30 seconds");
     });
+  }
+
+  get usable(): boolean {
+    return !this.closed && !this.connectionError
+      && (!this.child || (this.child.exitCode === null && this.child.signalCode === null));
   }
 
   private async connect(): Promise<void> {
@@ -284,17 +291,25 @@ export class FxRouteSession {
     return config;
   }
 
-  async setModel(value: string): Promise<FxModelConfig> {
+  async setModel(value: string, signal?: AbortSignal): Promise<FxModelConfig> {
     const current = await this.modelConfig();
     if (!current.options.some((option) => option.value === value)) {
       throw new Error(`fx ACP does not offer model ${value}`);
     }
     if (!this.context || !this.sessionId) throw new Error("fx ACP session is not ready");
-    const response = await this.context.request(acp.methods.agent.session.setConfigOption, {
-      sessionId: this.sessionId,
-      configId: "model",
-      value,
-    });
+    signal?.throwIfAborted();
+    const onAbort = () => { void this.dispose(); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    let response: acp.SetSessionConfigOptionResponse;
+    try {
+      response = await this.context.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: this.sessionId,
+        configId: "model",
+        value,
+      });
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
     this.configOptions = response.configOptions;
     const updated = modelConfig(this.configOptions);
     if (!updated) throw new Error("fx ACP stopped exposing model selection");
@@ -317,7 +332,11 @@ export class FxRouteSession {
     if (!this.context || !this.sessionId) throw new Error("fx ACP session is not ready");
     if (handlers.signal?.aborted) throw handlers.signal.reason;
     this.currentPermission = handlers.permission;
-    const abort = () => void this.cancel();
+    let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => {
+      void this.cancel();
+      cancelTimer = setTimeout(() => { void this.dispose(); }, 2_000);
+    };
     handlers.signal?.addEventListener("abort", abort, { once: true });
     try {
       return await this.context.request(acp.methods.agent.session.prompt, {
@@ -325,6 +344,7 @@ export class FxRouteSession {
         prompt: blocks,
       });
     } finally {
+      clearTimeout(cancelTimer);
       handlers.signal?.removeEventListener("abort", abort);
       this.currentPermission = undefined;
     }
@@ -336,9 +356,14 @@ export class FxRouteSession {
     }
   }
 
-  async dispose(options: { closeSession?: boolean } = {}): Promise<void> {
-    if (this.closed) return;
+  dispose(options: { closeSession?: boolean } = {}): Promise<void> {
+    return this.disposeTask ??= this.disposeOnce(options);
+  }
+
+  private async disposeOnce(options: { closeSession?: boolean }): Promise<void> {
     this.closed = true;
+    // Also release callers waiting for a handshake that will never finish.
+    if (this.connectTask) this.ready.reject(new Error("fx ACP session is closed"));
     if (options.closeSession && this.context && this.sessionId) {
       await withTimeout(
         this.context.request(acp.methods.agent.session.close, { sessionId: this.sessionId }).catch(() => undefined),

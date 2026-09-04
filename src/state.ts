@@ -552,7 +552,7 @@ export class StateStore {
       .run(now(), key);
   }
 
-  registerInbound(message: InboundMessage): void {
+  registerInbound(message: InboundMessage, activate = true): void {
     const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const senderTelegramId = "id" in message.sender ? message.sender.id : "unknown";
     const existingPrincipal = this.db.query<{ ref: string }, [string, string, string, string, string]>(`
@@ -608,6 +608,7 @@ export class StateStore {
           excerpt: messageExcerpt(message.reply.text_excerpt), now: now(), expires,
         });
       }
+      if (!activate) return;
       this.db.query("UPDATE context_capabilities SET active=0 WHERE route_key=?").run(message.route.key);
       this.db.query(`
         INSERT INTO context_capabilities(

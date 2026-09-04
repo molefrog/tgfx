@@ -136,6 +136,28 @@ describe("workspace config", () => {
     expect((await loadConfig(paths))?.approvals.chatId).toBe("-100");
   });
 
+  test("merges overlapping setting saves without losing either override", async () => {
+    const paths = projectPaths(isolate("tgfx-concurrent-settings-"));
+    const initial = config();
+    await saveConfig(paths, initial);
+    await Promise.all([
+      saveConfig(paths, { ...initial, output: "answer" }, { output: "answer" }),
+      saveConfig(paths, { ...initial, customIcons: false }, { customIcons: false }),
+    ]);
+    const saved = (await loadConfig(paths))!;
+    expect(saved.output).toBe("answer");
+    expect(saved.customIcons).toBeFalse();
+  });
+
+  test("a failed save does not block a later save", async () => {
+    const paths = projectPaths(isolate("tgfx-retry-settings-"));
+    mkdirSync(paths.config, { recursive: true });
+    await expect(saveConfig(paths, config())).rejects.toThrow();
+    rmSync(paths.config, { recursive: true });
+    await saveConfig(paths, config(), { output: "answer" });
+    expect((await loadConfig(paths))?.output).toBe("answer");
+  });
+
   test("prunes only expired entries inside the bot files directory", async () => {
     const root = isolate("tgfx-files-");
     const files = join(root, "files");

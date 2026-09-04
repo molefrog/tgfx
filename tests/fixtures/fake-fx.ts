@@ -56,6 +56,7 @@ const availableModels = [...new Set([
   "openai/gpt-5.5",
 ])];
 let cancelled: (() => void) | undefined;
+let ignoreCancel = false;
 
 const sessionState = () => ({
   modes: {
@@ -120,6 +121,9 @@ const app = acp.agent({ name: "fake-fx" })
     record("prompt", context.params);
     const text = context.params.prompt
       .flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+    if (text.includes("CRASH_AGENT")) process.exit(1);
+    ignoreCancel = text.includes("IGNORE_CANCEL");
+    const wait = text.includes("WAIT") ? new Promise<void>((resolve) => { cancelled = resolve; }) : undefined;
     const rawMarkdown = text.includes("RAW_MARKDOWN");
     const messageChunks = rawMarkdown
       ? ["# Section heading\n\nParagraph with **bold", "** and *italic*."]
@@ -179,12 +183,12 @@ const app = acp.agent({ name: "fake-fx" })
       });
       record("permission_result", decision);
     }
-    if (text.includes("WAIT")) await new Promise<void>((resolve) => { cancelled = resolve; });
+    await wait;
     return { stopReason: "end_turn" as const };
   })
   .onNotification(acp.methods.agent.session.cancel, ({ params }) => {
     record("cancel", params);
-    cancelled?.();
+    if (!ignoreCancel) cancelled?.();
     cancelled = undefined;
   })
   .onRequest(acp.methods.agent.session.close, ({ params }) => {

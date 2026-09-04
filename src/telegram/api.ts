@@ -72,10 +72,10 @@ export class TelegramApi {
 
   getStickerSet(name: string) { return this.call(() => this.api.getStickerSet(name)); }
 
-  async downloadFile(fileId: string): Promise<{ filePath: string; response: Response }> {
-    const file = await this.call(() => this.api.getFile(fileId));
+  async downloadFile(fileId: string, signal?: AbortSignal): Promise<{ filePath: string; response: Response }> {
+    const file = await this.call(() => this.api.getFile(fileId, signal));
     if (!file.file_path) throw new TelegramError("Telegram did not return a downloadable path for this file.");
-    return { filePath: file.file_path, response: await fetch(`${this.fileRoot}/${file.file_path}`) };
+    return { filePath: file.file_path, response: await fetch(`${this.fileRoot}/${file.file_path}`, { signal }) };
   }
 
   async getUpdates(offset: number, timeout = 25, signal?: AbortSignal): Promise<Update[]> {

@@ -29,6 +29,11 @@ async function until(check: () => boolean): Promise<void> {
 }
 
 describe("live wire status", () => {
+  test("shows a failed settings save even when the log is hidden", () => {
+    const { store, frame } = scene();
+    store.apply({ type: "settings", settings: { saveError: "Setting not saved" } });
+    expect(frame().text).toContain("not saved");
+  });
   test("draws the telegram-tgfx-fx wire and waits when nothing is happening", () => {
     const { frame } = scene();
     const { text } = frame();

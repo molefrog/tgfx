@@ -58,6 +58,9 @@ import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type Workspa
 import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
+  command: "stop",
+  description: "Stop the current task and discard queued requests",
+}, {
   command: "clear",
   description: "Start a fresh 𝒇x conversation",
 }, {
@@ -203,7 +206,12 @@ function traceGlyph(update: acp.SessionUpdate): TraceGlyph | undefined {
 export class TgfxApp {
   private readonly state: StateStore;
   private readonly sessions = new Map<string, FxRouteSession>();
+  private readonly sessionStarts = new Map<string, Promise<FxRouteSession>>();
   private readonly queueTails = new Map<string, Promise<void>>();
+  private readonly controls = new Set<Promise<void>>();
+  private readonly pendingModels = new Map<string, string>();
+  private settingsSave = Promise.resolve();
+  private settingsError?: string;
   private readonly activeTurns = new Map<string, AbortController>();
   private readonly activeDraftIds = new Map<string, number>();
   private readonly draftLimiters = new Map<string, PeerDraftLimiter>();
@@ -284,6 +292,7 @@ export class TgfxApp {
       customIcons: this.customIconsEnabled,
       paused: this.resumePolling !== undefined,
       yolo: this.options.permissionMode === "yolo",
+      saveError: this.settingsError,
     };
   }
 
@@ -303,10 +312,12 @@ export class TgfxApp {
   /** A switch flipped in the terminal view becomes this project's own setting. */
   private persistSettings(settings: Partial<ProjectSettings>): void {
     Object.assign(this.config, settings);
-    saveConfig(this.options.paths, this.config, settings).catch((error) => this.log({
-      event: "config.invalid",
-      message: `could not save the setting · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
-    }));
+    this.settingsSave = saveConfig(this.options.paths, this.config, settings).then(() => {
+      this.settingsError = undefined;
+    }, (error) => {
+      this.settingsError = "Setting not saved; changes may be lost on restart.";
+      this.log({ event: "config.invalid", message: `${this.settingsError} ${redactSecrets(error instanceof Error ? error.message : String(error))}` });
+    }).then(() => this.status({ type: "settings", settings: this.settings() }));
   }
 
   /** Paused, tgfx stops asking Telegram for updates; nothing is acknowledged or lost. */
@@ -356,7 +367,7 @@ export class TgfxApp {
         ? String(payload.message.provenance?.media_group_id ?? "")
         : "";
       if (mediaGroupId) this.scheduleAlbum(row.id, row.route_key, mediaGroupId, 0);
-      else this.enqueue(row.id, row.route_key);
+      else if (payload) this.schedule(row.id, row.route_key, payload);
     }
     this.log({
       event: "polling.started",
@@ -408,12 +419,13 @@ export class TgfxApp {
     // finishing one accepted update. Let that code leave the state boundary
     // before taking a queue snapshot or closing SQLite.
     await this.pollTask?.catch(() => undefined);
-    const queued = Promise.allSettled([...this.queueTails.values()]);
+    const queued = Promise.allSettled([...this.queueTails.values(), ...this.controls]);
     // Give cooperative ACP cancellation a short head start, then terminate the
     // child processes so Ctrl-C cannot hang behind an unresponsive agent/tool.
     await withTimeout(queued, 3_000, () => undefined);
     await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
     await queued;
+    await this.settingsSave;
     await Promise.allSettled([...this.stickerTemporaryDirectories].map((directory) =>
       rm(directory, { recursive: true, force: true })
     ));
@@ -477,7 +489,7 @@ export class TgfxApp {
       });
       if (authorized && active && matchesActiveDraft) {
         active.abort(new Error("Stopped from Telegram draft"));
-        await this.sessions.get(key)?.cancel();
+        void this.sessions.get(key)?.cancel();
       }
       return;
     }
@@ -545,13 +557,7 @@ export class TgfxApp {
         this.status({ type: "inbound", route: label, who: senderName(message) });
         const mediaGroupId = String(message.provenance?.media_group_id ?? "");
         if (mediaGroupId) this.scheduleAlbum(id, message.route.key, mediaGroupId);
-        else {
-          const command = commandFromText(message.text, this.options.bot.username);
-          const immediateControl = command?.addressed
-            && (command.name === "model" || command.name === "cost" || command.name === "format");
-          if (immediateControl) await this.dispatch(id);
-          else this.enqueue(id, message.route.key);
-        }
+        else this.schedule(id, message.route.key, { kind: "message", message });
       }
       return;
     }
@@ -578,11 +584,7 @@ export class TgfxApp {
         authorized,
       });
       if (id !== undefined) {
-        const controlCallback = callback.data?.startsWith("fxp:")
-          || callback.data?.startsWith("mcp:")
-          || callback.data?.startsWith(`${REPLY_STYLE_CALLBACK}:`);
-        if (controlCallback) await this.dispatch(id);
-        else this.enqueue(id, route.key);
+        this.schedule(id, route.key, { kind: "callback", update, route });
       }
       return;
     }
@@ -637,6 +639,19 @@ export class TgfxApp {
       updateId: update.update_id,
       authorized: false,
     });
+  }
+
+  private schedule(inboxId: number, key: string, payload: PersistedPayload): void {
+    const command = payload.kind === "message" ? commandFromText(payload.message.text, this.options.bot.username) : undefined;
+    const callback = payload.kind === "callback" ? payload.update.callback_query?.data?.split(":")[0] : undefined;
+    const control = (command?.addressed && ["stop", "clear", "model", "cost", "format"].includes(command.name))
+      || (callback && ["fxp", "mcp", "model", "cost", REPLY_STYLE_CALLBACK].includes(callback));
+    if (!control) {
+      this.enqueue(inboxId, key);
+      return;
+    }
+    const task = this.dispatch(inboxId).finally(() => this.controls.delete(task));
+    this.controls.add(task);
   }
 
   private enqueue(inboxId: number, routeKeyValue: string): void {
@@ -729,14 +744,13 @@ export class TgfxApp {
 
   private async dispatchMessage(row: InboxRow, message: InboundMessage): Promise<void> {
     const invokesAgent = shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id);
-    if (invokesAgent) await this.prepareStickerImages(message);
-    this.state.registerInbound(message);
+    this.state.registerInbound(message, false);
     if (!invokesAgent) return;
     const command = commandFromText(message.text, this.options.bot.username);
     if (command && !command.addressed) return;
 
     if (command) {
-      const known = ["clear", "compact", "model", "cost", "format"];
+      const known = COMMANDS.map((command) => command.command);
       if (!known.includes(command.name)) {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
@@ -747,6 +761,28 @@ export class TgfxApp {
           `Usage: /${command.name}`,
           message.route.topicId,
         );
+        return;
+      }
+      if (command.name === "stop" || command.name === "clear") {
+        const previous = this.queueTails.get(message.route.key);
+        const done = Promise.withResolvers<void>();
+        const barrier = (previous ?? Promise.resolve()).catch(() => undefined).then(() => done.promise);
+        this.queueTails.set(message.route.key, barrier);
+        const active = this.activeTurns.get(message.route.key);
+        const discarded = this.state.discardQueued(message.route.key, row.id);
+        active?.abort(new Error("Stopped from Telegram command"));
+        try {
+          await this.options.telegram.sendText(
+            message.route.chatId,
+            active ? "Stopping the current task…" : discarded ? "Discarded queued requests." : "No task is running.",
+            message.route.topicId,
+          );
+          await previous?.catch(() => undefined);
+          if (command.name === "clear" && !this.stopping) await this.runClear(message.route);
+        } finally {
+          done.resolve();
+          if (this.queueTails.get(message.route.key) === barrier) this.queueTails.delete(message.route.key);
+        }
         return;
       }
       if (command.name === "model") {
@@ -768,31 +804,25 @@ export class TgfxApp {
         this.registerBotMessage(message.route, String(sent.message_id));
         return;
       }
-      if (command.name === "clear") {
-        await this.runClear(message.route);
-        return;
-      }
       await this.runCompact(row, message);
       return;
     }
 
-    const sessionBootstrap = this.sessionBootstrapPending(message.route);
     await this.runTurn(
       row,
       message,
-      makePrompt(message, undefined, await this.adminContext(message.route), sessionBootstrap),
-      { sessionBootstrap },
+      async (sessionBootstrap, signal) => makePrompt(message, undefined, await this.adminContext(message.route, signal), sessionBootstrap),
     );
   }
 
-  private async prepareStickerImages(message: InboundMessage): Promise<void> {
+  private async prepareStickerImages(message: InboundMessage, signal?: AbortSignal): Promise<void> {
     const stickers = message.attachments.filter((attachment) => attachment.kind === "sticker");
     if (!stickers.length) return;
     const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-stickers-"));
     this.stickerTemporaryDirectories.add(temporaryRoot);
     try {
       await Promise.all(stickers.map(async (sticker) => {
-        const file = await this.options.telegram.downloadFile(sticker.fileId);
+        const file = await this.options.telegram.downloadFile(sticker.fileId, signal);
         const fallbackExtension = sticker.mimeType === "application/x-tgsticker"
           ? ".tgs"
           : sticker.mimeType === "video/webm" ? ".webm" : ".webp";
@@ -934,10 +964,10 @@ export class TgfxApp {
     }
   }
 
-  private async adminCapabilities(chatId: string): Promise<AdminCapability[]> {
+  private async adminCapabilities(chatId: string, signal?: AbortSignal): Promise<AdminCapability[]> {
     if (!this.config.access.chatIds.includes(chatId) || Number(chatId) >= 0) return [];
     try {
-      const member = await this.options.telegram.api.getChatMember(chatId, Number(this.options.bot.id));
+      const member = await this.options.telegram.api.getChatMember(chatId, Number(this.options.bot.id), signal);
       return [...adminCapabilitiesForMember(member)];
     } catch {
       return [];
@@ -948,8 +978,8 @@ export class TgfxApp {
     return (await this.adminCapabilities(chatId)).includes(capability);
   }
 
-  private async adminContext(route: Route): Promise<Record<string, unknown> | undefined> {
-    const capabilities = await this.adminCapabilities(route.chatId);
+  private async adminContext(route: Route, signal?: AbortSignal): Promise<Record<string, unknown> | undefined> {
+    const capabilities = await this.adminCapabilities(route.chatId, signal);
     if (!capabilities.length) return undefined;
     return {
       capabilities,
@@ -1050,11 +1080,11 @@ export class TgfxApp {
         selected_options: answer.option_ids.map((index) => poll.options[index]).filter(Boolean),
       },
     };
-    this.state.registerInbound(message);
-    const sessionBootstrap = this.sessionBootstrapPending(message.route);
-    const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
-    envelope.telegram_message.poll = message.provenance;
-    await this.runTurn(row, message, [{ type: "text", text: JSON.stringify(envelope, null, 2) }], { sessionBootstrap });
+    await this.runTurn(row, message, (sessionBootstrap) => {
+      const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
+      envelope.telegram_message.poll = message.provenance;
+      return [{ type: "text", text: JSON.stringify(envelope, null, 2) }];
+    });
   }
 
   private async dispatchCallback(row: InboxRow, update: Update, route: Route): Promise<void> {
@@ -1110,7 +1140,8 @@ export class TgfxApp {
           topic: route.topicId,
         });
       }
-      await this.options.telegram.answerCallback(callback.id, `Reply style: ${REPLY_STYLES[id].name}`);
+      await this.settingsSave;
+      await this.options.telegram.answerCallback(callback.id, this.settingsError ?? `Reply style: ${REPLY_STYLES[id].name}`);
       const view = replyStylePicker(id);
       await this.options.telegram.editText(
         route.chatId,
@@ -1162,7 +1193,15 @@ export class TgfxApp {
           return;
         }
         await this.options.telegram.answerCallback(callback.id, "Changing model");
+        if (this.activeTurns.has(route.key)) {
+          this.pendingModels.set(route.key, model.value);
+          await this.options.telegram.editText(route.chatId, callback.message.message_id,
+            `Model will change to ${model.name} for the next turn.`,
+            { reply_markup: { inline_keyboard: [] } });
+          return;
+        }
         try {
+          this.pendingModels.delete(route.key);
           const updated = await (await this.session(route)).setModel(model.value);
           const selected = updated.options.find((option) => option.value === updated.currentValue) ?? model;
           view = selectedModel(selected);
@@ -1315,14 +1354,14 @@ export class TgfxApp {
         attachments: [],
         raw: update,
       };
-      this.state.registerInbound(message);
-      const sessionBootstrap = this.sessionBootstrapPending(message.route);
-      const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
-      envelope.telegram_message.interaction = { ref: `interaction_${id}`, choice_index: index, label };
-      await this.runTurn(row, message, [
-        { type: "text", text: JSON.stringify(envelope, null, 2) },
-        { type: "text", text: message.text! },
-      ], { sessionBootstrap });
+      await this.runTurn(row, message, (sessionBootstrap) => {
+        const envelope = toEnvelope(message, { sessionBootstrap }) as { telegram_message: Record<string, unknown> };
+        envelope.telegram_message.interaction = { ref: `interaction_${id}`, choice_index: index, label };
+        return [
+          { type: "text", text: JSON.stringify(envelope, null, 2) },
+          { type: "text", text: message.text! },
+        ];
+      });
       return;
     }
     await this.options.telegram.answerCallback(callback.id, "This action is no longer active");
@@ -1340,10 +1379,12 @@ export class TgfxApp {
   }
 
   private async runClear(route: Route): Promise<void> {
+    this.pendingModels.delete(route.key);
     const previous = this.sessions.get(route.key);
+    if (previous) await previous.dispose({ closeSession: true });
+    await this.sessionStarts.get(route.key)?.catch(() => undefined);
     this.sessions.delete(route.key);
     this.state.resetRoute(route.key);
-    if (previous) await previous.dispose({ closeSession: true });
     await this.session(route);
     await this.options.telegram.sendText(route.chatId, "✓ Started a fresh conversation", route.topicId);
     this.log({
@@ -1356,7 +1397,6 @@ export class TgfxApp {
 
   private async runCompact(row: InboxRow, message: InboundMessage): Promise<void> {
     const blocks: acp.ContentBlock[] = [{ type: "text", text: "/compact" }];
-    const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
     const controller = new AbortController();
     const streaming = streamsRoute(this.output, message.route);
@@ -1392,12 +1432,13 @@ export class TgfxApp {
       }
 
       this.state.markInbox(row.id, "running");
-      const session = await this.session(message.route);
+      const session = await this.session(message.route, controller.signal);
       if (controller.signal.aborted) {
         if (this.stopping) throw controller.signal.reason ?? new Error("tgfx stopped");
         await acknowledgeCancellation();
         return;
       }
+      this.state.registerInbound(message);
       await session.prompt(blocks, {
         signal: controller.signal,
         permission: (request) => this.requestPermission(message.route, request, controller.signal),
@@ -1438,84 +1479,82 @@ export class TgfxApp {
     } finally {
       this.activeTurns.delete(message.route.key);
       this.activeDraftIds.delete(message.route.key);
-      if (activeContextRef) this.state.deactivateContext(message.route.key, activeContextRef);
+      this.state.deactivateContext(message.route.key, message.contextRef);
     }
-  }
-
-  // True when the next prompt will be the first turn of a brand-new fx session,
-  // so its envelope should carry the session_bootstrap directive. Peek only —
-  // runTurn clears the flag once the directive-bearing prompt is on its way.
-  private sessionBootstrapPending(route: Route): boolean {
-    return this.pendingSessionBootstrap.has(route.key)
-      || (!this.sessions.has(route.key) && !this.state.route(route.key)?.session_id);
   }
 
   private async runTurn(
     row: InboxRow,
     message: InboundMessage,
-    blocks: acp.ContentBlock[],
-    options?: { sessionBootstrap?: boolean },
+    buildPrompt: (sessionBootstrap: boolean, signal: AbortSignal) => acp.ContentBlock[] | Promise<acp.ContentBlock[]>,
   ): Promise<void> {
-    const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
-    this.state.setLastPrompt(message.route.key, blocks);
-    const session = await this.session(message.route);
-    if (options?.sessionBootstrap) this.pendingSessionBootstrap.delete(message.route.key);
-    const projector = new AcpProjector(await this.mcpToolIcons());
     const controller = new AbortController();
-    const renderer = new TurnRenderer(
-      this.options.telegram,
-      this.state,
-      message.route,
-      this.output,
-      projector,
-      controller.signal,
-      this.draftLimiter(message.route.chatId),
-      {
-        log: (detail) => this.log({
-          event: "draft.failed",
-          message: `${this.label(message.route.chatId, message.route.topicId)} · ${detail}`,
-          chat: message.route.chatId,
-          topic: message.route.topicId,
-        }),
-      },
-    );
     this.activeTurns.set(message.route.key, controller);
-    this.activeDraftIds.set(message.route.key, renderer.draftId);
-    this.activeRenderers.set(message.route.key, { projector, renderer });
     const statusRoute = this.labelFor(message.route);
-    const remove = session.onUpdate((update) => {
-      const glyph = traceGlyph(update);
-      if (glyph) this.status({ type: "turn", route: statusRoute, state: "event", glyph });
-      renderer.changed(projector.apply(update));
-    });
-    renderer.start();
-    this.state.markInbox(row.id, "running");
     const startedAt = performance.now();
     const routeLabel = this.label(message.route.chatId, message.route.topicId);
-    this.log({
-      event: "turn.started",
-      message: `${routeLabel} · turn started`,
-      chat: message.route.chatId,
-      topic: message.route.topicId,
-    });
-    this.status({
-      type: "turn", route: statusRoute, state: "started",
-      who: senderName(message), text: (message.text ?? "").replace(/\s+/g, " ").trim(),
-    });
     let outcome: "delivered" | "cancelled" | "failed" = "failed";
+    let renderer: TurnRenderer | undefined;
+    let remove: (() => void) | undefined;
     try {
+      const session = await this.session(message.route, controller.signal);
+      controller.signal.throwIfAborted();
+      const pendingModel = this.pendingModels.get(message.route.key);
+      if (pendingModel) {
+        const model = await session.setModel(pendingModel, controller.signal);
+        if (this.pendingModels.get(message.route.key) === pendingModel) this.pendingModels.delete(message.route.key);
+        this.status({ type: "model", route: statusRoute, model: model.currentValue });
+      }
+      controller.signal.throwIfAborted();
+      await this.prepareStickerImages(message, controller.signal);
+      this.state.registerInbound(message);
+      const blocks = await buildPrompt(this.pendingSessionBootstrap.has(message.route.key), controller.signal);
+      controller.signal.throwIfAborted();
+      this.state.setLastPrompt(message.route.key, blocks);
+      const projector = new AcpProjector(await this.mcpToolIcons());
+      renderer = new TurnRenderer(
+        this.options.telegram,
+        this.state,
+        message.route,
+        this.output,
+        projector,
+        controller.signal,
+        this.draftLimiter(message.route.chatId),
+        {
+          log: (detail) => this.log({
+            event: "draft.failed",
+            message: `${this.label(message.route.chatId, message.route.topicId)} · ${detail}`,
+            chat: message.route.chatId,
+            topic: message.route.topicId,
+          }),
+        },
+      );
+      this.activeDraftIds.set(message.route.key, renderer.draftId);
+      this.activeRenderers.set(message.route.key, { projector, renderer });
+      remove = session.onUpdate((update) => {
+        const glyph = traceGlyph(update);
+        if (glyph) this.status({ type: "turn", route: statusRoute, state: "event", glyph });
+        renderer!.changed(projector.apply(update));
+      });
+      renderer.start();
+      this.state.markInbox(row.id, "running");
+      this.log({
+        event: "turn.started",
+        message: `${routeLabel} · turn started`,
+        chat: message.route.chatId,
+        topic: message.route.topicId,
+      });
+      this.status({
+        type: "turn", route: statusRoute, state: "started",
+        who: senderName(message), text: (message.text ?? "").replace(/\s+/g, " ").trim(),
+      });
+      controller.signal.throwIfAborted();
+      this.pendingSessionBootstrap.delete(message.route.key);
       await session.prompt(blocks, {
         signal: controller.signal,
         permission: (request) => this.requestPermission(message.route, request, controller.signal),
       });
-      if (controller.signal.aborted) {
-        if (this.stopping) throw controller.signal.reason ?? new Error("tgfx stopped");
-        await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
-        this.state.clearLastPrompt(message.route.key);
-        outcome = "cancelled";
-        this.log({ event: "turn.cancelled", message: `${routeLabel} · turn cancelled`, chat: message.route.chatId });
-        return;
-      }
+      controller.signal.throwIfAborted();
       const messageIds = await renderer.finish({
         botId: this.options.bot.id,
         inboxId: row.id,
@@ -1546,18 +1585,35 @@ export class TgfxApp {
         type: "turn", route: statusRoute, state: "finished", outcome,
         seconds: Number(((performance.now() - startedAt) / 1_000).toFixed(1)),
       });
-      await renderer.abort();
-      remove();
+      await renderer?.abort();
+      remove?.();
       this.activeTurns.delete(message.route.key);
       this.activeDraftIds.delete(message.route.key);
       this.activeRenderers.delete(message.route.key);
-      if (activeContextRef) this.state.deactivateContext(message.route.key, activeContextRef);
+      this.state.deactivateContext(message.route.key, message.contextRef);
     }
   }
 
-  private async session(route: Route): Promise<FxRouteSession> {
+  private async session(route: Route, signal?: AbortSignal): Promise<FxRouteSession> {
+    signal?.throwIfAborted();
+    let task = this.sessionStarts.get(route.key);
+    if (!task) {
+      task = this.openSession(route).finally(() => this.sessionStarts.delete(route.key));
+      this.sessionStarts.set(route.key, task);
+    }
+    const onAbort = () => { void this.sessions.get(route.key)?.dispose(); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try { return await task; }
+    finally { signal?.removeEventListener("abort", onAbort); }
+  }
+
+  private async openSession(route: Route): Promise<FxRouteSession> {
     const existing = this.sessions.get(route.key);
-    if (existing) return existing;
+    if (existing?.usable) return existing;
+    if (existing) {
+      this.sessions.delete(route.key);
+      await existing.dispose();
+    }
     const row = this.state.ensureRoute(route);
     const hadNoSession = !row.session_id;
     const mcpLaunch = this.options.mcpLaunch ?? {

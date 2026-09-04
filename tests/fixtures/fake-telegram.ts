@@ -1,4 +1,5 @@
 import type { Update } from "grammy/types";
+import { withTimeout } from "../../src/timeout";
 
 type RecordedRequest = { method: string; payload: Record<string, any> };
 
@@ -10,6 +11,7 @@ export class FakeTelegram {
 
   private readonly queue: Update[] = [];
   private waiters: Array<() => void> = [];
+  private readonly requestWaiters = new Set<(request: RecordedRequest) => void>();
   private nextUpdateId = 1;
   private nextMessageId = 1000;
   private readonly server: ReturnType<typeof Bun.serve>;
@@ -32,7 +34,7 @@ export class FakeTelegram {
     await this.server.stop(true);
   }
 
-  private push(update: Omit<Update, "update_id">): number {
+  push(update: Omit<Update, "update_id">): number {
     const id = this.nextUpdateId++;
     this.queue.push({ ...update, update_id: id } as Update);
     for (const wake of this.waiters.splice(0)) wake();
@@ -66,13 +68,21 @@ export class FakeTelegram {
   }
 
   async waitForCalls(method: string, count = 1, timeoutMs = 5_000): Promise<RecordedRequest[]> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const seen = this.calls(method);
-      if (seen.length >= count) return seen;
-      await Bun.sleep(20);
+    await this.waitForRequest((request) => request.method === method && this.calls(method).length >= count, timeoutMs);
+    return this.calls(method);
+  }
+
+  async waitForRequest(matches: (request: RecordedRequest) => boolean, timeoutMs = 5_000): Promise<RecordedRequest> {
+    const existing = this.requests.find(matches);
+    if (existing) return existing;
+    const next = Promise.withResolvers<RecordedRequest>();
+    const receive = (request: RecordedRequest) => { if (matches(request)) next.resolve(request); };
+    this.requestWaiters.add(receive);
+    try {
+      return await withTimeout(next.promise, timeoutMs, () => { throw new Error("Telegram request timed out"); });
+    } finally {
+      this.requestWaiters.delete(receive);
     }
-    throw new Error(`timed out waiting for ${count} ${method} call(s); saw ${this.calls(method).length}`);
   }
 
   private message(chatId: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -91,6 +101,7 @@ export class FakeTelegram {
     let payload: Record<string, any> = {};
     try { payload = await request.json() as Record<string, any>; } catch { /* empty body */ }
     this.requests.push({ method, payload });
+    for (const receive of this.requestWaiters) receive({ method, payload });
     const ok = (result: unknown) => Response.json({ ok: true, result });
     switch (method) {
       case "getMe":
