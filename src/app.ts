@@ -32,6 +32,7 @@ import {
   streamsRoute,
   TurnRenderer,
 } from "./telegram/renderer";
+import { REPLY_STYLE_CALLBACK, replyStylePicker } from "./telegram/reply-style";
 import { redactSecrets } from "./secrets";
 import type { RouteLabel, Settings, StatusEvent, TraceGlyph } from "./status";
 import { withTimeout } from "./timeout";
@@ -52,7 +53,7 @@ import type {
   SenderIdentity,
   TgfxConfig,
 } from "./types";
-import { routeKey } from "./types";
+import { isOutputMode, REPLY_STYLES, routeKey } from "./types";
 import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type WorkspacePaths } from "./config";
 import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
@@ -65,6 +66,9 @@ const COMMANDS: BotCommand[] = [{
 }, {
   command: "model",
   description: "Choose the 𝒇x model",
+}, {
+  command: "format",
+  description: "Choose how 𝒇x replies",
 }, {
   command: "cost",
   description: "Show local 𝒇x usage and spend",
@@ -544,7 +548,7 @@ export class TgfxApp {
         else {
           const command = commandFromText(message.text, this.options.bot.username);
           const immediateControl = command?.addressed
-            && (command.name === "model" || command.name === "cost");
+            && (command.name === "model" || command.name === "cost" || command.name === "format");
           if (immediateControl) await this.dispatch(id);
           else this.enqueue(id, message.route.key);
         }
@@ -575,7 +579,8 @@ export class TgfxApp {
       });
       if (id !== undefined) {
         const controlCallback = callback.data?.startsWith("fxp:")
-          || callback.data?.startsWith("mcp:");
+          || callback.data?.startsWith("mcp:")
+          || callback.data?.startsWith(`${REPLY_STYLE_CALLBACK}:`);
         if (controlCallback) await this.dispatch(id);
         else this.enqueue(id, route.key);
       }
@@ -731,7 +736,8 @@ export class TgfxApp {
     if (command && !command.addressed) return;
 
     if (command) {
-      if (command.name !== "clear" && command.name !== "compact" && command.name !== "model" && command.name !== "cost") {
+      const known = ["clear", "compact", "model", "cost", "format"];
+      if (!known.includes(command.name)) {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
@@ -749,6 +755,17 @@ export class TgfxApp {
       }
       if (command.name === "cost") {
         await this.openCostReport(message);
+        return;
+      }
+      if (command.name === "format") {
+        const view = replyStylePicker(this.output);
+        const sent = await this.options.telegram.sendText(
+          message.route.chatId,
+          view.text,
+          message.route.topicId,
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
+        );
+        this.registerBotMessage(message.route, String(sent.message_id));
         return;
       }
       if (command.name === "clear") {
@@ -1077,6 +1094,30 @@ export class TgfxApp {
           route.topicId,
         );
       }
+      return;
+    }
+    if (kind === REPLY_STYLE_CALLBACK && id) {
+      if (!isOutputMode(id)) {
+        await this.options.telegram.answerCallback(callback.id, "Unknown reply style");
+        return;
+      }
+      if (id !== this.output) {
+        this.setOutput(id);
+        this.log({
+          event: "settings.output_changed",
+          message: `${this.label(route.chatId, route.topicId)} · reply style · ${id}`,
+          chat: route.chatId,
+          topic: route.topicId,
+        });
+      }
+      await this.options.telegram.answerCallback(callback.id, `Reply style: ${REPLY_STYLES[id].name}`);
+      const view = replyStylePicker(id);
+      await this.options.telegram.editText(
+        route.chatId,
+        callback.message.message_id,
+        view.text,
+        { parse_mode: "HTML", reply_markup: view.replyMarkup },
+      ).catch(() => undefined);
       return;
     }
     if (kind === "model" && id && value) {

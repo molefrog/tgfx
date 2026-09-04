@@ -242,14 +242,14 @@ describe("live wire status", () => {
     const { view, text } = frame();
     expect(text).not.toContain("● on");
     view.stdin.write("f");
-    await until(() => (view.lastFrame() ?? "").includes("▸ output"));
+    await until(() => (view.lastFrame() ?? "").includes("▸ style"));
     const lines = view.lastFrame()!.split("\n");
     expect(lines[2]).toContain("f format ▾");
-    expect(lines[3]).toMatch(/▸ output\s+live\s+live draft/);
+    expect(lines[3]).toMatch(/▸ style\s+Live with activity\s+Stream the answer/);
     expect(lines[4]).toMatch(/icons\s+● on\s+custom emoji/);
     expect(lines[5]).toContain("←→ change");
     view.stdin.write("");
-    await until(() => !(view.lastFrame() ?? "").includes("output"));
+    await until(() => !(view.lastFrame() ?? "").includes("style"));
     view.unmount();
   });
 
@@ -263,19 +263,19 @@ describe("live wire status", () => {
       setPaused: (on) => flips.push(`pause:${on}`),
     });
     view.stdin.write("f");
-    await until(() => (view.lastFrame() ?? "").includes("▸ output"));
+    await until(() => (view.lastFrame() ?? "").includes("▸ style"));
     view.stdin.write("[B");
     await until(() => (view.lastFrame() ?? "").includes("▸ icons"));
     view.stdin.write(" ");
     await until(() => flips.length === 1);
     view.stdin.write("[A");
-    await until(() => (view.lastFrame() ?? "").includes("▸ output"));
+    await until(() => (view.lastFrame() ?? "").includes("▸ style"));
     view.stdin.write("[C");
     await until(() => flips.length === 2);
     view.stdin.write("[D");
     await until(() => flips.length === 3);
     expect(flips).toEqual(["icons:false", "output:answer", "output:live"]);
-    await until(() => /▸ output\s+live/.test(view.lastFrame() ?? ""));
+    await until(() => /▸ style\s+Live with activity/.test(view.lastFrame() ?? ""));
     view.stdin.write("p");
     await until(() => flips.length === 4);
     expect(flips[3]).toBe("pause:true");

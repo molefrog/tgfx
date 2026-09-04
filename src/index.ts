@@ -466,7 +466,7 @@ async function runCommand(tokens: string[]): Promise<void> {
     await release?.();
     view?.unmount();
     if (json) log({ event: "stopped", message: "stopped" });
-    else ok("stopped");
+    else process.stderr.write(`${green("☞")} bye!\n`);
   }
 }
 

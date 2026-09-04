@@ -260,7 +260,7 @@ the turn ends the line stays for 24 hours, showing the outcome and how long
 ago it finished, with running turns sorted above finished ones. After that it
 collapses to a summary of the last turn.
 
-The last line holds the switches: `f` opens a format menu (output mode, custom
+The last line holds the switches: `f` opens a format menu (reply style, custom
 icons) navigated with arrows, whose changes apply to the next turn and are
 saved as this project's own settings, `p` pauses polling without
 acknowledging anything, `l` shows a tail of the log beneath, and `q` quits.
@@ -381,6 +381,7 @@ tgfx currently exposes four Telegram slash commands:
 | `/clear` | Start a fresh FX conversation for the active route and make it current. |
 | `/compact` | Compact the active route's FX conversation. |
 | `/model` | Choose a model from the live FX ACP model catalog. |
+| `/format` | Choose the reply style: a card listing the four output modes with a 2×2 button grid, the current one ticked. A tap applies to the next turn and is saved as this project's setting; the card is stateless, so an old one keeps working. |
 | `/cost` | Show FX's local usage and spend over 24-hour, 7-day, or 30-day windows. |
 
 Other commands advertised by ACP `available_commands_update` are recorded but
@@ -395,7 +396,7 @@ The Telegram command surface is explicit rather than a generic ACP projection.
 1. tgfx authorizes the Telegram sender and route before interpreting any
    command. Telegram's visible command menu is discoverability, not an access
    control boundary.
-2. Only `/clear`, `/compact`, `/model`, and `/cost` are accepted. Every other slash
+2. Only `/clear`, `/compact`, `/model`, `/format`, and `/cost` are accepted. Every other slash
    command receives an unknown command response and is never downgraded into an
    ordinary model prompt.
 3. `/clear` closes the loaded route session, resets that route's session
@@ -425,7 +426,7 @@ The Telegram command surface is explicit rather than a generic ACP projection.
    `✓ Conversation compacted`.
 
 tgfx uses Telegram `setMyCommands` with a chat-specific scope for each allowed
-chat. It installs only the explicit `/clear`, `/compact`, `/model`, and `/cost` list
+chat. It installs only the explicit `/clear`, `/compact`, `/model`, `/format`, and `/cost` list
 without overwriting the bot's default or BotFather-managed command list. On a
 clean handoff it removes the chat-scoped list it owned, revealing any broader
 Telegram configuration underneath. The menu is available before an FX session
@@ -456,7 +457,7 @@ stays clean.
 | --- | --- | --- |
 | `--model <id>` | FX default/session model | Pass `<id>` directly as `fx acp --model <id>` for this run. The value is not saved by tgfx. |
 | `--yolo` | off (FX auto mode) | Disable FX permission checks for this process through `FX_PERMISSION_MODE=yolo`. tgfx's Telegram-admin approval layer remains active. |
-| `--output <mode>` | `live` | How a turn reaches Telegram: `answer` (one message, the answer alone), `report` (one message, the answer with collapsed tool groups), `progress` (a live status line, then the answer streams in), or `live` (a live draft with every tool call). Groups always get one message. |
+| `--output <mode>` | `live` | How a turn reaches Telegram, shown in menus as the reply style: `answer` (Final answer: one message, the answer alone), `report` (Final with activity: one message, the answer with collapsed tool groups), `progress` (Live answer: a live status line, then the answer streams in), or `live` (Live with activity: a live draft with every tool call). Groups always get one message. |
 | `--no-icons` | off (`customIcons` true) | Plain buttons and tool rows instead of the `tgfx icons` custom emoji set. |
 | `--no-tui` | off | Print the plain append-only log instead of the live status view. |
 | `--json` | off | Emit terminal events as JSON Lines with a typed `event` field. |

@@ -532,7 +532,7 @@ describe("tgfx host pipeline", () => {
     expect(texts).toContain("Unknown command /status.");
     expect(texts).toContain("✓ Started a fresh conversation");
     const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
-    expect(commands).toEqual(["clear", "compact", "model", "cost"]);
+    expect(commands).toEqual(["clear", "compact", "model", "format", "cost"]);
     expect(drafts).toEqual([{
       blocks: [{
         type: "thinking",
@@ -1291,5 +1291,33 @@ describe("fx permission cards", () => {
     try {
       expect(state.interaction("stale")?.state).toBe("expired");
     } finally { state.close(); }
+  });
+});
+
+describe("/format", () => {
+  test("sends the reply-style card and a button switches the output for the next turn", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "report" });
+    h.deliver([update(1, 42, "/format")]);
+    const card = await h.until<SentText>((event) => event.kind === "sendText" && buttons(event).some((button) => button.callback_data.startsWith("fmt:")), "format card");
+    expect(card.chat).toBe("42");
+    expect(card.markup?.inline_keyboard.map((row) => row.length)).toEqual([2, 2]);
+    expect(buttons(card).find((button) => button.callback_data === "fmt:report")?.text).toStartWith("✓");
+
+    h.deliver([callbackUpdate(2, OWN_CHAT, 42, "fmt:progress", card.messageId)]);
+    const edited = await h.until<EditedText>((event) => event.kind === "editText" && event.messageId === card.messageId, "card update");
+    expect(edited.text).toContain("✓ <b>Live answer</b>");
+    expect(h.app.settings().output).toBe("progress");
+    expect(h.answers()).toContain("Reply style: Live answer");
+    while ((await loadConfig(h.paths))?.output !== "progress") await Bun.sleep(10);
+    await h.stop();
+  });
+
+  test("rejects an unknown style without changing anything", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "report" });
+    h.deliver([callbackUpdate(1, OWN_CHAT, 42, "fmt:loud", 500)]);
+    await h.until((event) => event.kind === "answer", "callback answer");
+    expect(h.answers()).toEqual(["Unknown reply style"]);
+    expect(h.app.settings().output).toBe("report");
+    await h.stop();
   });
 });

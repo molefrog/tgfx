@@ -7,7 +7,7 @@ Telegram. Works with your locally installed 𝒇x, and provides as much latest T
 
 - [x] Rich replies: markdown, tables, code blocks, spoilers, TeX math
 - [x] Live streaming while the agent works, renders tool calls nicely
-- [x] Four output modes, from a quiet answer to a live status line or the full tool log
+- [x] Four reply styles (`/format`), from a quiet final answer to a live draft with tool activity
 - [x] Can work in DMs and groups
 - [x] Can send stickers and send reactions
 - [x] Interactive model picker (`/model`)
@@ -50,17 +50,17 @@ QR code or tap a link. To change or remove the token later, run `tgfx auth`.
 Everything tgfx remembers about a folder lives under `~/.fx/telegram/`; nothing
 is written into the project.
 
-## Output modes
+## Reply style
 
-Pick how answers reach Telegram with `--output <mode>` for one run, or press
-`f` in the running terminal to switch for the next turn and save the choice
-for this project:
+Pick how answers reach Telegram with `--output <mode>` for one run, press
+`f` in the running terminal, or send `/format` to the bot and tap a button.
+Either way the choice applies to the next turn and is saved for this project:
 
 ```text
-answer     one message with just the answer
-report     responds with the answer and the full tool call log (collapsed)
-progress   a live status line ("Reading files…"), then the answer streams in
-live       a live draft with every tool call as it happens (default)
+answer     Final answer         send the answer when the turn finishes
+report     Final with activity  send the answer with collapsed tool activity
+progress   Live answer          show live status, then stream the final answer
+live       Live with activity   stream the answer and tool activity as they happen (default)
 ```
 
 Groups always get one message. Set a machine-wide default in

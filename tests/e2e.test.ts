@@ -117,6 +117,7 @@ describe("tgfx over the local Telegram simulator", () => {
         { command: "clear", description: "Start a fresh 𝒇x conversation" },
         { command: "compact", description: "Compact the 𝒇x conversation" },
         { command: "model", description: "Choose the 𝒇x model" },
+        { command: "format", description: "Choose how 𝒇x replies" },
         { command: "cost", description: "Show local 𝒇x usage and spend" },
       ]);
     } finally {

@@ -10,7 +10,7 @@ import {
   type StatusStore,
   type TraceGlyph,
 } from "../status";
-import { OUTPUT_MODES, type OutputMode } from "../types";
+import { OUTPUT_MODES, REPLY_STYLES, type OutputMode } from "../types";
 
 /**
  * The live wire: `telegram ── tgfx ── fx` as the status view.
@@ -313,13 +313,6 @@ function PatchBay({ store, showLog, menuOpen }: { store: StatusStore; showLog: b
   );
 }
 
-const OUTPUT_HINT: Record<OutputMode, string> = {
-  answer: "one message with just the answer",
-  report: "responds with the answer and the full tool call log",
-  progress: "live status line, then the answer streams in",
-  live: "live draft with every tool call",
-};
-
 /**
  * How answers look in Telegram. Values show only while the menu is open; each
  * option cycles through its values, so a switch is a two-value select.
@@ -339,8 +332,8 @@ function formatOptions(store: StatusStore, controls: TuiControls): FormatOption[
   const { settings } = store.snapshot();
   return [
     {
-      name: "output", value: settings.output, values: OUTPUT_MODES, label: settings.output, on: true,
-      hint: OUTPUT_HINT[settings.output],
+      name: "style", value: settings.output, values: OUTPUT_MODES, label: REPLY_STYLES[settings.output].name, on: true,
+      hint: REPLY_STYLES[settings.output].hint,
       set: (value) => controls.setOutput(value as OutputMode),
     },
     {
@@ -365,7 +358,7 @@ function FormatMenu({ options, cursor }: { options: FormatOption[]; cursor: numb
         <Box key={option.name}>
           <Text color="cyan">{index === cursor ? "    ▸ " : "      "}</Text>
           <Text bold={index === cursor}>{option.name.padEnd(9)}</Text>
-          <Text color={option.on ? "green" : undefined} dimColor={!option.on}>{option.label.padEnd(9)}</Text>
+          <Text color={option.on ? "green" : undefined} dimColor={!option.on}>{option.label.padEnd(20)}</Text>
           <Text dimColor>{`  ${option.hint}`}</Text>
         </Box>
       ))}
