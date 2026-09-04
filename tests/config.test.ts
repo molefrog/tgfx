@@ -122,22 +122,6 @@ describe("workspace config", () => {
     expect((await loadConfig(paths))?.approvals.chatId).toBe("-100");
   });
 
-  test("moves a workspace-local config from an older tgfx into the home, once", async () => {
-    const root = isolate("tgfx-legacy-");
-    const legacyDirectory = join(root, ".fx", "telegram");
-    mkdirSync(legacyDirectory, { recursive: true });
-    writeFileSync(join(legacyDirectory, "config.json"), JSON.stringify({
-      ...bare(), streaming: false, expandStreamingTools: true, updateEveryMs: 250,
-    }));
-    const paths = projectPaths(root);
-    const imported = await loadConfig(paths);
-    expect(imported?.activeBotId).toBe("123456");
-    expect(imported?.output).toBe("report");
-    expect(existsSync(paths.config)).toBeTrue();
-    expect(existsSync(legacyDirectory)).toBeFalse();
-    expect((await loadConfig(paths))?.output).toBe("report");
-  });
-
   test("prunes only expired entries inside the bot files directory", async () => {
     const root = isolate("tgfx-files-");
     const files = join(root, "files");

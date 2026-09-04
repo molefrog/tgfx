@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -23,11 +23,6 @@ const coreSchema = z.object({
 });
 /** A project file: identity plus only the settings that override the defaults. */
 const storedConfigSchema = coreSchema.extend(settingsSchema.partial().shape);
-/** Before 0.2 the project file lived in the workspace and had a streaming switch. */
-const legacyConfigSchema = coreSchema.extend({
-  streaming: z.boolean().optional(),
-  customIcons: z.boolean().optional(),
-});
 const globalSchema = z.object({
   version: z.literal(1).default(1),
   defaults: settingsSchema.partial().default({}),
@@ -134,24 +129,8 @@ function storedRecord(paths: ProjectPaths, stored: StoredConfig): Record<string,
   return { version, workspace: paths.workspace, activeBotId, access, approvals, ...settings };
 }
 
-/** Moves a workspace-local project file to its new home, once. */
-async function importLegacyConfig(paths: ProjectPaths): Promise<StoredConfig | undefined> {
-  const legacyPath = join(paths.workspace, ".fx", "telegram", "config.json");
-  const legacy = await readJson(legacyPath, legacyConfigSchema);
-  if (!legacy) return undefined;
-  const { streaming, ...rest } = legacy;
-  const stored = storedConfigSchema.parse({
-    ...rest,
-    ...(streaming === undefined ? {} : { output: streaming ? "live" : "report" }),
-  });
-  await writePrivateJson(paths.config, storedRecord(paths, stored));
-  await unlink(legacyPath).catch(() => undefined);
-  await rmdir(dirname(legacyPath)).catch(() => undefined);
-  return stored;
-}
-
 export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | undefined> {
-  const stored = await readJson(paths.config, storedConfigSchema) ?? await importLegacyConfig(paths);
+  const stored = await readJson(paths.config, storedConfigSchema);
   if (!stored) return undefined;
   const { defaults } = await loadGlobalConfig();
   return configSchema.parse({ ...defaults, ...stored });

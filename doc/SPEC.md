@@ -460,8 +460,7 @@ folder plus a hash of its full path, and machine-wide defaults for the settings
 live in `~/.fx/telegram/config.json`; the project file wins where both set a
 value. Command-line flags win for the current run. Environment variables are
 reserved for secrets and automation, not for a second large configuration
-system. A project file written into the workspace by an older tgfx is moved to
-its new place on the next load.
+system.
 
 ```json
 {
