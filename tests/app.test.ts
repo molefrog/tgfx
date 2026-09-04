@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import type { InputRichMessageWithoutUpload, Message, Update } from "grammy/types";
 import { TgfxApp } from "../src/app";
 import type { StatusEvent } from "../src/status";
-import { workspacePaths, type WorkspacePaths } from "../src/config";
+import { loadConfig, saveConfig, workspacePaths, type WorkspacePaths } from "../src/config";
 import { StateStore } from "../src/state";
 import type { TelegramApi } from "../src/telegram/api";
 import type { OutputMode, TgfxConfig } from "../src/types";
@@ -119,6 +119,31 @@ describe("tgfx host pipeline", () => {
       expect(state.activeContext("100:42:0")).toBeUndefined();
       expect(state.route("100:42:0")?.last_prompt_json).toBeNull();
     } finally { state.close(); }
+  });
+
+  test("saves a switch flipped in the terminal view as the project's own setting", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-settings-"));
+    temporary.push(workspace);
+    const paths = testPaths(workspace);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" }, output: "live", customIcons: true,
+    };
+    await saveConfig(paths, config);
+    const telegram = { deleteCommands: async () => true as const } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary: "fx", log: () => undefined,
+    });
+    app.setOutput("progress");
+    expect(app.settings().output).toBe("progress");
+    const deadline = Date.now() + 2_000;
+    while ((await loadConfig(paths))?.output !== "progress") {
+      if (Date.now() > deadline) throw new Error("the setting was not saved");
+      await Bun.sleep(5);
+    }
+    expect(JSON.parse(await readFile(paths.config, "utf8")).customIcons).toBeUndefined();
+    await app.stop();
   });
 
   test("uses the model-picker custom icon flag for MCP and FX tool rows", async () => {

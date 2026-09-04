@@ -53,7 +53,7 @@ import type {
   TgfxConfig,
 } from "./types";
 import { routeKey } from "./types";
-import { pruneBotFiles, saveConfig, tgfxHome, type WorkspacePaths } from "./config";
+import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type WorkspacePaths } from "./config";
 import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
@@ -287,11 +287,22 @@ export class TgfxApp {
   setOutput(output: OutputMode): void {
     this.output = output;
     this.status({ type: "settings", settings: this.settings() });
+    this.persistSettings({ output });
   }
 
   setCustomIcons(on: boolean): void {
     this.customIconsEnabled = on;
     this.status({ type: "settings", settings: this.settings() });
+    this.persistSettings({ customIcons: on });
+  }
+
+  /** A switch flipped in the terminal view becomes this project's own setting. */
+  private persistSettings(settings: Partial<ProjectSettings>): void {
+    Object.assign(this.config, settings);
+    saveConfig(this.options.paths, this.config, settings).catch((error) => this.log({
+      event: "config.invalid",
+      message: `could not save the setting · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+    }));
   }
 
   /** Paused, tgfx stops asking Telegram for updates; nothing is acknowledged or lost. */

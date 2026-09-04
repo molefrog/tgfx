@@ -52,8 +52,9 @@ is written into the project.
 
 ## Output modes
 
-Pick how answers reach Telegram with `--output <mode>`, or press `f` in the
-running terminal to switch for the next turn:
+Pick how answers reach Telegram with `--output <mode>` for one run, or press
+`f` in the running terminal to switch for the next turn and save the choice
+for this project:
 
 ```text
 answer     one message with just the answer

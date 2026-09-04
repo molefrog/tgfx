@@ -108,6 +108,20 @@ describe("workspace config", () => {
     expect(updated.customIcons).toBeTrue();
   });
 
+  test("makes a setting the project's own when asked, leaving the rest inherited", async () => {
+    const root = isolate("tgfx-take-over-");
+    const paths = projectPaths(root);
+    await saveGlobalConfig({ version: 1, defaults: { output: "report", customIcons: false } });
+    await saveConfig(paths, config(), { output: "progress" });
+    const stored = JSON.parse(await Bun.file(paths.config).text());
+    expect(stored.output).toBe("progress");
+    expect(stored.customIcons).toBeUndefined();
+    await saveGlobalConfig({ version: 1, defaults: { output: "answer", customIcons: true } });
+    const loaded = (await loadConfig(paths))!;
+    expect(loaded.output).toBe("progress");
+    expect(loaded.customIcons).toBeTrue();
+  });
+
   test("keeps a project's own override across saves", async () => {
     const root = isolate("tgfx-override-");
     const paths = projectPaths(root);

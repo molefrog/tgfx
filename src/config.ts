@@ -123,6 +123,7 @@ export async function saveGlobalConfig(config: GlobalConfig): Promise<void> {
 }
 
 type StoredConfig = z.infer<typeof storedConfigSchema>;
+export type ProjectSettings = z.infer<typeof settingsSchema>;
 
 function storedRecord(paths: ProjectPaths, stored: StoredConfig): Record<string, unknown> {
   const { version, activeBotId, access, approvals, ...settings } = stored;
@@ -139,15 +140,20 @@ export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | unde
 /**
  * Writes the project's identity. Settings stay where they came from: a key the
  * project file already overrides is kept up to date, everything else keeps
- * inheriting the machine-wide defaults.
+ * inheriting the machine-wide defaults. `overrides` names settings the project
+ * takes over from now on, as when they are changed in the terminal view.
  */
-export async function saveConfig(paths: ProjectPaths, config: TgfxConfig): Promise<void> {
+export async function saveConfig(
+  paths: ProjectPaths,
+  config: TgfxConfig,
+  overrides: Partial<ProjectSettings> = {},
+): Promise<void> {
   const { output, customIcons, ...core } = configSchema.parse(config);
   const current = await readJson(paths.config, storedConfigSchema);
-  const settings: Record<string, unknown> = { output, customIcons };
+  const settings: Record<string, unknown> = { output, customIcons, ...overrides };
   const persisted: Record<string, unknown> = { ...core };
   for (const key of Object.keys(settingsSchema.shape)) {
-    if (current && Object.hasOwn(current, key)) persisted[key] = settings[key];
+    if ((current && Object.hasOwn(current, key)) || Object.hasOwn(overrides, key)) persisted[key] = settings[key];
   }
   await writePrivateJson(paths.config, storedRecord(paths, storedConfigSchema.parse(persisted)));
 }

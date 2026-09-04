@@ -261,7 +261,8 @@ ago it finished, with running turns sorted above finished ones. After that it
 collapses to a summary of the last turn.
 
 The last line holds the switches: `f` opens a format menu (output mode, custom
-icons) navigated with arrows, `p` pauses polling without
+icons) navigated with arrows, whose changes apply to the next turn and are
+saved as this project's own settings, `p` pauses polling without
 acknowledging anything, `l` shows a tail of the log beneath, and `q` quits.
 `✓ yolo` appears when FX permission checks are off for this run.
 
@@ -483,7 +484,9 @@ system.
 Settings are flat keys; `access` and `approvals` stay structured because they
 are. Omitted settings inherit the machine-wide defaults (`{ "defaults": {
 "output": "live", "customIcons": true } }`), and commands that change access or
-approvals keep those settings omitted. The draft update rate is not a setting:
+approvals keep those settings omitted. The format menu in the running terminal
+is how a project gets its own values: a switch flipped there is written to the
+project file. The draft update rate is not a setting:
 tgfx stays inside Telegram's per-peer draft limits on its own.
 
 The token does not belong in this file. Allowlist and approvals-target IDs do:
