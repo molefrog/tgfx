@@ -336,10 +336,24 @@ export class FxRouteSession {
     };
     handlers.signal?.addEventListener("abort", abort, { once: true });
     try {
-      return await this.context.request(acp.methods.agent.session.prompt, {
+      const response = await this.context.request(acp.methods.agent.session.prompt, {
         sessionId: this.sessionId,
         prompt: blocks,
       });
+      // FX also uses older names for these ACP stop reasons. Neither spelling
+      // means the task completed, even if it streamed a success-looking reply.
+      const reason: string = response.stopReason;
+      if (reason !== "end_turn") {
+        const detail = reason === "max_tokens" || reason === "max_output_tokens"
+          ? "reached its response limit"
+          : reason === "max_turn_requests" || reason === "max_model_turns"
+            ? "reached its turn limit"
+            : reason === "refusal" || reason === "refused"
+              ? "could not complete the request"
+              : reason === "cancelled" ? "was cancelled" : `stopped (${reason})`;
+        throw new Error(`FX ${detail}. The request may be unfinished.`);
+      }
+      return response;
     } finally {
       clearTimeout(cancelTimer);
       handlers.signal?.removeEventListener("abort", abort);

@@ -122,10 +122,11 @@ const app = acp.agent({ name: "fake-fx" })
     const text = context.params.prompt
       .flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
     if (text.includes("CRASH_AGENT")) process.exit(1);
+    const forcedStopReason = text.match(/STOP_REASON=(\w+)/)?.[1];
     ignoreCancel = text.includes("IGNORE_CANCEL");
     const wait = text.includes("WAIT") ? new Promise<void>((resolve) => { cancelled = resolve; }) : undefined;
     const rawMarkdown = text.includes("RAW_MARKDOWN");
-    const messageChunks = rawMarkdown
+    const messageChunks = forcedStopReason ? ["Done."] : rawMarkdown
       ? ["# Section heading\n\nParagraph with **bold", "** and *italic*."]
       : ["fake streamed text"];
     for (const chunk of messageChunks) {
@@ -184,7 +185,7 @@ const app = acp.agent({ name: "fake-fx" })
       record("permission_result", decision);
     }
     await wait;
-    return { stopReason: "end_turn" as const };
+    return { stopReason: (forcedStopReason ?? "end_turn") as acp.StopReason };
   })
   .onNotification(acp.methods.agent.session.cancel, ({ params }) => {
     record("cancel", params);

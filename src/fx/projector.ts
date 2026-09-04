@@ -386,7 +386,7 @@ export class AcpProjector {
     const all = this.projected();
     const items: ProjectedItem[] = answerOnly(options.output) ? this.answer(all, !options.final) : all;
     if (!items.length) {
-      if (options.final) return { blocks: [{ type: "paragraph", text: "Done." }] };
+      if (options.final) return { blocks: [] };
       // Only ever append to the placeholder: clients type draft changes in from
       // the first differing character.
       const waited = now - this.startedAt;
@@ -482,6 +482,6 @@ export class AcpProjector {
       });
       return [completedToolSummary(item.tools, this.changedAt), ...rows].join("\n");
     });
-    return parts.filter(Boolean).join("\n\n") || "Done.";
+    return parts.filter(Boolean).join("\n\n");
   }
 }

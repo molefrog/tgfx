@@ -32,6 +32,20 @@ async function events(path: string): Promise<Array<{ event: string; value: any }
 }
 
 describe("FX ACP transport", () => {
+  test.each(["max_tokens", "max_output_tokens", "max_turn_requests", "max_model_turns", "refusal", "refused", "cancelled"])(
+    "rejects an unfinished prompt with stop reason %s",
+    async (reason) => {
+      const fake = await fakeBinary();
+      const session = new FxRouteSession({ workspace: fake.directory, binary: fake.binary });
+      try {
+        await expect(session.prompt([{ type: "text", text: `STOP_REASON=${reason}` }]))
+          .rejects.toThrow("unfinished");
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
   test("does not expose Telegram host credentials to FX or its shell tools", () => {
     expect(sanitizeFxEnvironment({
       PATH: "/bin",

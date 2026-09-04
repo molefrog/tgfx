@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { AcpProjector } from "../src/fx/projector";
-import type { OutputMode } from "../src/types";
+import { OUTPUT_MODES, type OutputMode } from "../src/types";
 
 type RichBlock = NonNullable<InputRichMessageWithoutUpload["blocks"]>[number];
 type DetailsBlock = Extract<RichBlock, { type: "details" }>;
@@ -628,7 +628,19 @@ describe("ordered ACP projector", () => {
     expect(rendered(blocks)).not.toContain("Let me check.");
     expect(final(projector, "progress")).toEqual(blocks);
     expect(projector.plainFinal("answer")).toBe("First.\n\nSecond.");
-    expect(final(new AcpProjector(), "answer")).toEqual([{ type: "paragraph", text: "Done." }]);
+  });
+
+  test.each([...OUTPUT_MODES])("keeps empty final output empty in %s mode", (output) => {
+    const projector = new AcpProjector();
+    expect(final(projector, output)).toEqual([]);
+    expect(projector.plainFinal(output)).toBe("");
+  });
+
+  test("preserves an actual assistant acknowledgement", () => {
+    const projector = new AcpProjector();
+    say(projector, "Done.");
+    expect(final(projector, "answer")).toEqual([{ type: "paragraph", text: "Done." }]);
+    expect(projector.plainFinal("answer")).toBe("Done.");
   });
 
   test("progress mode names each new activity at once, and only waits before going idle", () => {

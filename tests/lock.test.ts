@@ -36,7 +36,7 @@ describe("runtime lock", () => {
     const release = await acquireRuntimeLock("100", join(root, "workspace-a"));
     try {
       await expect(acquireRuntimeLock("100", join(root, "workspace-b")))
-        .rejects.toThrow("workspace-a");
+        .rejects.toMatchObject({ hint: expect.stringContaining("workspace-a") });
     } finally {
       await release();
     }

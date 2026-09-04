@@ -8,6 +8,22 @@ import { AcpProjector } from "../src/fx/projector";
 import { AdaptiveDraftScheduler, PeerDraftLimiter } from "../src/telegram/draft-scheduler";
 import { createDraftId, isRetryableTelegramError, recoverOutbox, splitTelegramText, streamsRoute, TurnRenderer } from "../src/telegram/renderer";
 import { TelegramApi, TelegramError } from "../src/telegram/api";
+import { FakeTelegram } from "./fixtures/fake-telegram";
+
+async function deliveryContext() {
+  const directory = await mkdtemp(join(tmpdir(), "tgfx-delivery-"));
+  const state = new StateStore(join(directory, "state.sqlite"));
+  const telegram = new FakeTelegram();
+  const api = new TelegramApi("100:test", telegram.url);
+  const route = { key: "100:42:0", botId: "100", chatId: "42", topicId: "0", chatKind: "private" as const };
+  state.ensurePollState(route.botId);
+  state.ensureRoute(route);
+  return { state, telegram, api, route, async close() {
+    state.close();
+    await telegram.stop();
+    await rm(directory, { recursive: true, force: true });
+  } };
+}
 
 async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -75,6 +91,22 @@ describe("Telegram renderer boundaries", () => {
       summary: "Ran 1 command",
       blocks: [{ type: "paragraph", text: ["Running command", " ", { type: "code", text: "bun test" }] }],
     }]);
+  });
+
+  test.each(["empty", "tool-only"])("skips final delivery and outbox for %s output without prose", async (kind) => {
+    const h = await deliveryContext();
+    try {
+      const projector = new AcpProjector();
+      if (kind === "tool-only") projector.apply({
+        sessionUpdate: "tool_call", toolCallId: "reaction", name: "mcp_telegram_set_reaction",
+        title: "Reacting", status: "completed", rawInput: { emoji: "👍" },
+      });
+      const renderer = new TurnRenderer(h.api, h.state, h.route, "answer", projector);
+
+      expect(await renderer.finish({ botId: "100", inboxId: 1, effectKey: "final:100:1" })).toEqual([]);
+      expect(h.telegram.requests).toHaveLength(0);
+      expect(h.state.db.query("SELECT id FROM telegram_outbox").all()).toHaveLength(0);
+    } finally { await h.close(); }
   });
 
   test("splits final messages without truncation or broken surrogate pairs", () => {
@@ -252,12 +284,14 @@ describe("Telegram renderer boundaries", () => {
     const state = {
       createOutbox: () => 1, markOutbox: () => undefined, registerBotMessage: () => undefined,
     } as unknown as StateStore;
+    const projector = new AcpProjector();
+    projector.apply({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Task complete." } });
     const renderer = new TurnRenderer(
       api,
       state,
       { key: "1:-2:5", botId: "1", chatId: "-2", topicId: "5", chatKind: "supergroup" },
       "report",
-      new AcpProjector(),
+      projector,
       undefined,
       new PeerDraftLimiter(),
       { typingMs: 5 },
@@ -436,5 +470,23 @@ describe("Telegram renderer boundaries", () => {
       state.close();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  test.each(["missing", "blank", "empty rich"])("fails recovery when stored reply content is %s", async (kind) => {
+    const h = await deliveryContext();
+    try {
+      h.state.createOutbox({
+        effectKey: "final:100:1", botId: "100", routeKey: h.route.key, kind: "rich_final",
+        payload: { chatId: "42", topicId: "0",
+          ...(kind === "blank" ? { plain: " \n" } : kind === "empty rich" ? { rich: { blocks: [] } } : {}),
+        },
+      });
+
+      expect(await recoverOutbox(h.api, h.state)).toEqual({ sent: 0, failed: 1 });
+      expect(h.telegram.requests).toHaveLength(0);
+      const row = h.state.db.query<{ status: string; error: string }, []>("SELECT status,error FROM telegram_outbox").get()!;
+      expect(row.status).toBe("failed");
+      expect(row.error).toContain("no content");
+    } finally { await h.close(); }
   });
 });

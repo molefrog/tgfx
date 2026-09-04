@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig, projectPaths, saveConfig, type ProjectPaths } from "../src/config";
+import { acquireRuntimeLock } from "../src/lock";
 import { FakeTelegram } from "./fixtures/fake-telegram";
 
 const temporary: string[] = [];
@@ -81,6 +82,42 @@ describe("tgfx CLI", () => {
     expect(result.stderr).toContain("isn't set up yet");
     expect(result.stderr).toContain("run tgfx once");
     expect(result.stderr).not.toContain("    at ");
+  });
+
+  test("an already running bot reports its holder once without a goodbye or polling", async () => {
+    const paths = await workspace();
+    const binary = join(paths.workspace, "fx");
+    await Bun.write(binary, [
+      `#!${process.execPath}`,
+      'if (process.argv[2] === "--version") console.log("0.0.7");',
+      'else if (process.argv[2] === "doctor" && process.argv[3] === "--json") {',
+      '  console.log(JSON.stringify({ fail_count: 0, warn_count: 0, model: "test", auth: "ready", workspace: process.cwd(), checks: [] }));',
+      '} else process.exit(1);',
+      "",
+    ].join("\n"));
+    await chmod(binary, 0o755);
+    const release = await acquireRuntimeLock("100", paths.workspace);
+    const telegram = new FakeTelegram();
+    try {
+      const result = await tgfx([], {
+        cwd: paths.workspace,
+        env: {
+          FX_BINARY: binary,
+          TELEGRAM_BOT_TOKEN: "100:cli-test-token",
+          TGFX_INTERNAL_TELEGRAM_API_ROOT: telegram.url,
+        },
+      });
+      const output = result.stdout + result.stderr;
+      expect(result.exitCode).toBe(1);
+      expect(output.match(/already running/g)).toHaveLength(1);
+      expect(result.stderr).toContain(String(process.pid));
+      expect(result.stderr).toContain(paths.workspace);
+      expect(output).not.toContain("bye!");
+      expect(telegram.calls("getUpdates")).toHaveLength(0);
+    } finally {
+      await release();
+      await telegram.stop();
+    }
   });
 
   test("unknown flags are rejected, not ignored", async () => {

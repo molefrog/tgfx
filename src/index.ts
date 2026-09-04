@@ -409,7 +409,8 @@ async function runCommand(tokens: string[]): Promise<void> {
   const store = live ? new StatusStore({ yolo: Boolean(flags.yolo) }) : undefined;
   const log = store ? (event: TgfxLogEvent) => store.logLine(event.message) : createLogger(json);
   let app: TgfxApp | undefined;
-  let view: { unmount(): void } | undefined;
+  let view: { unmount(clear?: boolean): Promise<void> } | undefined;
+  let completed = false;
   let release: (() => Promise<void>) | undefined;
   const shutdown = () => void app?.stop();
   process.once("SIGINT", shutdown);
@@ -459,14 +460,17 @@ async function runCommand(tokens: string[]): Promise<void> {
     });
     store?.apply({ type: "settings", settings: app.settings() });
     await app.run();
+    completed = true;
   } finally {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
     await app?.stop();
     await release?.();
-    view?.unmount();
-    if (json) log({ event: "stopped", message: "stopped" });
-    else process.stderr.write(`${green("☞")} bye!\n`);
+    await view?.unmount(!completed);
+    if (completed) {
+      if (json) log({ event: "stopped", message: "stopped" });
+      else process.stderr.write(`${green("☞")} bye!\n`);
+    }
   }
 }
 

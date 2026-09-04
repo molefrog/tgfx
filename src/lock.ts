@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { CliError } from "./cli/ui";
 import { botPaths } from "./config";
 
 type LockInfo = {
@@ -19,7 +20,7 @@ function busy(error: unknown): boolean {
 async function holderHint(path: string): Promise<string> {
   try {
     const info = JSON.parse(await readFile(path, "utf8")) as LockInfo;
-    return ` (pid ${info.pid}, workspace ${info.workspace})`;
+    return `pid ${info.pid} · ${info.workspace}`;
   } catch {
     return "";
   }
@@ -47,7 +48,7 @@ export async function acquireRuntimeLock(botId: string, workspace: string): Prom
   } catch (error) {
     db.close();
     if (!busy(error)) throw error;
-    throw new Error(`tgfx is already running for bot ${botId}${await holderHint(paths.lockInfo)}`);
+    throw new CliError(`tgfx is already running for bot ${botId}`, await holderHint(paths.lockInfo));
   }
   await chmod(paths.lock, 0o600).catch(() => undefined);
   const info: LockInfo = { pid: process.pid, botId, workspace, startedAt: new Date().toISOString() };

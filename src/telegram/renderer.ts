@@ -187,6 +187,7 @@ export class TurnRenderer {
   async finish(input: { botId: string; inboxId: number; effectKey: string }): Promise<string[]> {
     await this.stopDrafts("draft finalized");
     const rich = this.projector.rich({ final: true, output: this.output });
+    if (!rich.blocks?.length) return [];
     const plain = this.projector.plainFinal(this.output);
     const outboxId = this.state.createOutbox({
       effectKey: input.effectKey,
@@ -272,6 +273,10 @@ export async function recoverOutbox(
     };
     try {
       state.markOutbox(row.id, "sending");
+      const plain = payload.plain ?? payload.text;
+      if (!payload.rich?.blocks?.length && !plain?.trim()) {
+        throw new Error("Stored Telegram reply has no content.");
+      }
       if (payload.rich) {
         try {
           const message = await retryTelegram(() => api.sendRich(payload.chatId, payload.rich!, payload.topicId));
@@ -285,7 +290,8 @@ export async function recoverOutbox(
         }
       }
       const ids: string[] = [];
-      for (const part of splitTelegramText(payload.plain ?? payload.text ?? "Done.")) {
+      if (!plain?.trim()) throw new Error("Stored Telegram reply has no content.");
+      for (const part of splitTelegramText(plain)) {
         const message = await retryTelegram(() => api.sendText(payload.chatId, part, payload.topicId));
         const id = String(message.message_id);
         register(id, part);

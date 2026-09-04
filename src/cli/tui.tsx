@@ -423,12 +423,19 @@ export function Tui({ store, controls, columns, now = Date.now, animate = false 
 }
 
 /** Mounts the view on stderr so stdout stays clean for `--json` style output. */
-export function startTui(props: Omit<TuiProps, "animate">): { unmount(): void } {
+export function startTui(props: Omit<TuiProps, "animate">): { unmount(clear?: boolean): Promise<void> } {
   const instance = render(<Tui {...props} animate />, {
     stdout: process.stderr,
     stdin: process.stdin,
     exitOnCtrlC: false,
     patchConsole: false,
   });
-  return { unmount: () => instance.unmount() };
+  return { unmount: async (clear = false) => {
+    if (clear) {
+      await instance.waitUntilRenderFlush();
+      instance.clear();
+    }
+    instance.unmount();
+    await instance.waitUntilExit();
+  } };
 }

@@ -158,6 +158,23 @@ test("a new request replaces a crashed agent without replaying the failed reques
   } finally { await h.close(); }
 });
 
+test("an unfinished FX response reports failure and the next request still works", async () => {
+  const h = await harness({ output: "answer" });
+  try {
+    const id = h.send("STOP_REASON=max_output_tokens");
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("unfinished"));
+    expect(h.state.db.query("SELECT status FROM telegram_inbox WHERE update_id = ?").get(id))
+      .toEqual({ status: "failed" });
+    expect(h.telegram.calls("sendRichMessage")).toHaveLength(0);
+    h.send("hello");
+    await h.status("finished", 2);
+    const events = await h.events();
+    expect(events.filter(e => e.event === "prompt")).toHaveLength(2);
+    expect(events.filter(e => e.event === "initialize")).toHaveLength(1);
+    expect(h.telegram.calls("sendRichMessage")).toHaveLength(1);
+  } finally { await h.close(); }
+});
+
 test("a recovered clear command does not wait on its own queue", async () => {
   const h = await harness({ recoveredClear: true });
   try {
