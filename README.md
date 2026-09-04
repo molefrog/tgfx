@@ -58,7 +58,7 @@ for this project:
 
 ```text
 answer     one message with just the answer
-report     one message: the answer, then what fx did (collapsed)
+report     responds with the answer and the full tool call log (collapsed)
 progress   a live status line ("Reading files…"), then the answer streams in
 live       a live draft with every tool call as it happens (default)
 ```

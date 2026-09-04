@@ -315,7 +315,7 @@ function PatchBay({ store, showLog, menuOpen }: { store: StatusStore; showLog: b
 
 const OUTPUT_HINT: Record<OutputMode, string> = {
   answer: "one message with just the answer",
-  report: "one message: the answer, then what fx did",
+  report: "responds with the answer and the full tool call log",
   progress: "live status line, then the answer streams in",
   live: "live draft with every tool call",
 };
