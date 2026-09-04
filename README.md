@@ -5,6 +5,8 @@ Telegram. Works with your locally installed 𝒇x, and provides as much latest T
 
 ## Features
 
+<img src="doc/assets/tgfx-primary.webp" alt="tgfx in Telegram: rich replies, a model picker, stickers, and a transcribed voice message" width="240" align="right">
+
 - [x] Rich replies: markdown, tables, code blocks, spoilers, TeX math
 - [x] Live streaming while the agent works, renders tool calls nicely
 - [x] Four reply styles (`/format`), from a quiet final answer to a live draft with tool activity
@@ -17,6 +19,7 @@ Telegram. Works with your locally installed 𝒇x, and provides as much latest T
 - [x] Bots can be group admins: pin messages, moderate, and more
 - [x] Custom emoji icons for tool calls and popular MCPs ([see below](#custom-icons))
 - [x] Agent can see attached file, images, **voice messages** and even **video messages**!
+- [ ] `soon` Supports forwarded messages
 
 ## Install
 
@@ -26,16 +29,12 @@ token from [@BotFather](https://t.me/BotFather).
 Why we depend on Bun? We use it to keep everything minimal and fast,
 reusing as much of Bun's built-ins as possible (SQLite, image compression etc.).
 
-Pre-built binaries are coming soon: a self-contained executable that runs
-without Bun, in case you don't want to install it.
-
 ```bash
 # 1. Install the package
 bun add --global @molefrog/tgfx
 
 # 2. Grab a bot token from @BotFather, then run tgfx in your project folder.
 #    It walks you through authorization on the first run.
-cd my-project
 tgfx
 ```
 
@@ -90,14 +89,9 @@ How to pick a reply style:
 { "defaults": { "output": "progress" } }
 ```
 
-## MCP
-
-𝒇x doesn't inherit MCP servers from your config automatically in ACP mode that Telegram channel uses.
-We're working on adding this soon! 
-
 ## Custom icons
 
-<img src="doc/assets/custom-icons.png" alt="Tool calls rendered with custom emoji icons" width="305" align="right">
+<img src="doc/assets/custom-icons.png" alt="Tool calls rendered with custom emoji icons" width="340" align="right">
 
 The bot renders tool calls nicely with the
 [tgfx icons](https://t.me/addemoji/ai_provider_labs_by_fxharness_bot) premium custom
@@ -106,6 +100,11 @@ servers (GitHub, Notion, Slack, Figma, and friends). The model picker uses
 provider logos (OpenAI, Anthropic, etc.) from the same pack.
 
 To turn it off, start with `tgfx --no-icons`.
+
+## MCP
+
+𝒇x doesn't inherit MCP servers from your config automatically in ACP mode that Telegram channel uses.
+We're working on adding this soon! 
 
 ## Commands
 
