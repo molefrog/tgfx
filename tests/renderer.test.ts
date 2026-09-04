@@ -300,8 +300,8 @@ describe("Telegram renderer boundaries", () => {
         sessionUpdate: "tool_call", toolCallId: "read", name: "read_file", title: "Reading", status: "pending",
         rawInput: { path: "a.ts" },
       } as never));
-      now = 3_000;
       await waitFor(() => drafts.length === 2);
+      now = 3_000;
       const [block] = drafts[1]!.blocks!;
       expect(block?.type).toBe("thinking");
       expect(JSON.stringify(block)).toContain("Reading files…");

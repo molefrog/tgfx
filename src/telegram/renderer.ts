@@ -74,7 +74,7 @@ export type TurnRendererOptions = {
    * frames arrive, and a frame that repeats after a long silence resets the
    * whole block. While a tool group is the newest thing on screen, re-render
    * this often so its elapsed counter grows at the tail and nothing before it
-   * is redrawn.
+   * is redrawn. Progress mode ticks faster: its frames are one short line.
    */
   heartbeatMs?: number;
   keepaliveMs?: number;
@@ -83,6 +83,7 @@ export type TurnRendererOptions = {
 };
 
 const HEARTBEAT_MS = 3_000;
+const PROGRESS_HEARTBEAT_MS = 1_000;
 /** Telegram clears the status after about five seconds, so renew it before then. */
 const TYPING_MS = 4_000;
 
@@ -152,7 +153,7 @@ export class TurnRenderer {
     this.drafts.start(this.frame());
     this.heartbeat = setInterval(() => {
       if (!this.stopped) this.drafts.offer(this.frame(), "normal");
-    }, this.options.heartbeatMs ?? HEARTBEAT_MS);
+    }, this.options.heartbeatMs ?? (this.output === "progress" ? PROGRESS_HEARTBEAT_MS : HEARTBEAT_MS));
   }
 
   changed(change: ProjectorChange): void {

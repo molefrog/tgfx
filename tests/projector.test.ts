@@ -646,26 +646,24 @@ describe("ordered ACP projector", () => {
     expect(final(new AcpProjector(), "answer")).toEqual([{ type: "paragraph", text: "Done." }]);
   });
 
-  test("progress mode names the activity, holds each phrase, and streams prose after the last tool", () => {
+  test("progress mode names each new activity at once, and only waits before going idle", () => {
     let now = 0;
     const projector = new AcpProjector({}, () => now);
     say(projector, "Let me look.");
     expect(draft(projector, "progress")).toEqual([{ type: "paragraph", text: "Let me look." }]);
 
     call(projector, "read", "read_file", { path: "a.ts" });
-    expect(draft(projector, "progress")).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Thinking…"] }]);
-    now = 3_000;
     expect(draft(projector, "progress")).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Reading files…"] }]);
     complete(projector, "read");
+    now = 1_000;
     call(projector, "run", "shell", { action: "run", command: "bun test" });
-    now = 4_000;
-    expect(rendered(draft(projector, "progress"))).toContain("Reading files…");
-    now = 6_000;
-    expect(draft(projector, "progress")).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Running commands… 6s"] }]);
+    expect(rendered(draft(projector, "progress"))).toContain("Running commands…");
     complete(projector, "run");
-    projector.apply(update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hmm" } }));
-    now = 9_000;
-    expect(rendered(draft(projector, "progress"))).toContain("Thinking… 9s");
+    now = 2_000;
+    expect(projector.apply(update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hmm" } }))).toBe("none");
+    expect(rendered(draft(projector, "progress"))).toContain("Running commands…");
+    now = 6_000;
+    expect(draft(projector, "progress")).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Thinking… 6s"] }]);
 
     say(projector, "All green.", "answer");
     expect(draft(projector, "progress")).toEqual([{ type: "paragraph", text: "All green." }]);
@@ -675,8 +673,10 @@ describe("ordered ACP projector", () => {
   test("names the activity from the ACP kind when fx sends no tool name", () => {
     let now = 0;
     const projector = new AcpProjector({}, () => now);
-    projector.apply(update({ sessionUpdate: "tool_call", toolCallId: "t1", title: "Running", kind: "execute", status: "pending" }));
-    now = 3_000;
+    // No row yet (unnamed, still pending), but the progress line has news.
+    expect(projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "t1", title: "Running", kind: "execute", status: "pending",
+    }))).toBe("status");
     expect(rendered(draft(projector, "progress"))).toContain("Running commands…");
     complete(projector, "t1");
     expect(details(final(projector, "report")[0]).summary).toBe("Ran 1 command");

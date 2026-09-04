@@ -43,7 +43,8 @@ type ProjectedItem =
   | { type: "assistant"; markdown: string; blocks: RichBlock[] }
   | { type: "tools"; tools: ToolState[] };
 
-export type ProjectorChange = "none" | "text" | "boundary" | "tool";
+/** `status`: only the progress line changed, so a live draft has nothing new. */
+export type ProjectorChange = "none" | "text" | "boundary" | "tool" | "status";
 
 type ToolUpdate = Extract<acp.SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>;
 
@@ -57,10 +58,11 @@ const THINKING_CUSTOM_EMOJI = {
 /** The thinking placeholder starts counting only once a wait is noticeable. */
 const THINKING_ELAPSED_AFTER_MS = 5_000;
 const THINKING = "Thinking…";
+const WORKING = "Working…";
 /**
- * In progress mode the status line names what fx is up to, roughly. A phrase
- * stays on screen at least this long, so a burst of short tool calls reads as
- * one activity instead of a flicker.
+ * In progress mode the status line names what fx is up to, roughly. A new
+ * activity shows at once; falling back to an idle phrase waits this long, so
+ * the gap between one tool finishing and the next starting is not a flicker.
  */
 const PROGRESS_HOLD_MS = 2_500;
 const PROGRESS_PHRASES: Record<ToolActivity, string> = {
@@ -90,7 +92,11 @@ function answerOnly(output: OutputMode): boolean {
 
 function progressPhrase(tool: ToolState): string {
   const { activity } = describeTool(tool);
-  return activity ? PROGRESS_PHRASES[activity] : "Working…";
+  return activity ? PROGRESS_PHRASES[activity] : WORKING;
+}
+
+function idlePhrase(text: string): boolean {
+  return text === THINKING || text === WORKING;
 }
 
 function elapsedSeconds(from: number, to: number): number {
@@ -193,6 +199,14 @@ export class AcpProjector {
 
   apply(update: acp.SessionUpdate): ProjectorChange {
     this.changedAt = this.clock();
+    const shown = this.phase.text;
+    const change = this.applyUpdate(update);
+    // Settle the progress line now, so a later update is not blamed for this one's news.
+    const line = this.progressLine(this.changedAt);
+    return change === "none" && line !== shown ? "status" : change;
+  }
+
+  private applyUpdate(update: acp.SessionUpdate): ProjectorChange {
     switch (update.sessionUpdate) {
       case "agent_message_chunk": {
         if (update.content.type !== "text") return "none";
@@ -343,8 +357,9 @@ export class AcpProjector {
   }
 
   private progressLine(now: number): string {
-    if (this.phase.text !== this.wantedPhrase && now - this.phase.since >= PROGRESS_HOLD_MS) {
-      this.phase = { text: this.wantedPhrase, since: now };
+    const wanted = this.wantedPhrase;
+    if (wanted !== this.phase.text && (!idlePhrase(wanted) || now - this.phase.since >= PROGRESS_HOLD_MS)) {
+      this.phase = { text: wanted, since: now };
     }
     return this.phase.text;
   }

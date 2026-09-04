@@ -338,9 +338,12 @@ sees depends on the output mode:
   grows with prose and open tool groups as FX responds. When the turn finishes,
   the draft becomes a permanent rich message with collapsed tool groups.
 - `progress`: the placeholder stays and names what FX is doing, roughly
-  (`Reading files…`, `Running commands…`, `Thinking…`), changing at most every
-  few seconds and never showing arguments. Prose that follows the last tool
-  streams in as the answer. The final message is the answer alone.
+  (`Reading files…`, `Running commands…`, `Thinking…`), never showing
+  arguments. A new activity shows as soon as FX starts it; the line only waits
+  a couple of seconds before falling back to `Thinking…`, so the gap between
+  two tools does not flicker. Its elapsed counter ticks every second. Prose
+  that follows the last tool streams in as the answer. The final message is
+  the answer alone.
 - `report`: the "typing…" status until the turn ends, then the same final
   message `live` produces: the answer with collapsed tool groups.
 - `answer`: the "typing…" status until the turn ends, then the answer alone.
