@@ -1,25 +1,29 @@
 # 𝒕𝒈(𝒇x)
 
 Chat with a Vercel [𝒇x](https://github.com/vercel-labs/fx) coding agent from
-Telegram. Works with your locally installed 𝒇x, and provides as much latest Telegram features as possible.
+Telegram. Works with your locally installed 𝒇x and supports as many of the latest Telegram features as possible.
 
 ## Features
 
 <img src="doc/assets/tgfx-primary.webp" alt="tgfx in Telegram: rich replies, a model picker, stickers, and a transcribed voice message" width="240" align="right">
 
+Most Telegram adapters for popular harnesses only scratch the surface of what Telegram can do.
+Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way you would from its TUI.
+
 - [x] Rich replies: markdown, tables, code blocks, spoilers, TeX math
 - [x] Live streaming while the agent works, renders tool calls nicely
 - [x] Four reply styles (`/format`), from a quiet final answer to a live draft with tool activity
 - [x] Can work in DMs and groups
-- [x] Can send stickers and send reactions
+- [x] Can send stickers and reactions
 - [x] Interactive model picker (`/model`)
 - [x] Conversation compaction (`/compact`) and fresh starts (`/clear`)
 - [x] Cost reports (`/cost`)
 - [x] Approval cards for destructive actions
 - [x] Bots can be group admins: pin messages, moderate, and more
 - [x] Custom emoji icons for tool calls and popular MCPs ([see below](#custom-icons))
-- [x] Agent can see attached file, images, **voice messages** and even **video messages**!
+- [x] The agent can see attached files, images, **voice messages** and even **video messages**!
 - [ ] `soon` Supports forwarded messages
+- [ ] `soon` Talking to [other bots](https://telegram.org/blog/ai-bot-revolution-11-new-features#bot-to-bot-communication)
 
 ## Install
 
