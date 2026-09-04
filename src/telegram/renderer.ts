@@ -78,14 +78,19 @@ export type TurnRendererOptions = {
    */
   heartbeatMs?: number;
   keepaliveMs?: number;
+  /** How often a turn without a draft renews Telegram's "typing…" status. */
+  typingMs?: number;
 };
 
 const HEARTBEAT_MS = 3_000;
+/** Telegram clears the status after about five seconds, so renew it before then. */
+const TYPING_MS = 4_000;
 
 export class TurnRenderer {
   private stopped = false;
   private visibleOutput = false;
   private heartbeat?: ReturnType<typeof setInterval>;
+  private typing?: ReturnType<typeof setInterval>;
   readonly draftId = createDraftId();
   private readonly draftAbort = new AbortController();
   private readonly drafts: AdaptiveDraftScheduler<InputRichMessageWithoutUpload>;
@@ -131,7 +136,19 @@ export class TurnRenderer {
   }
 
   start(): void {
-    if (!this.streaming || this.stopped) return;
+    if (this.stopped) return;
+    if (!this.streaming) {
+      // Nothing shows until the final message, so say that someone is working on it.
+      const type = () => {
+        if (this.stopped) return;
+        Promise.resolve()
+          .then(() => this.api.sendTyping(this.route.chatId, this.route.topicId, this.draftAbort.signal))
+          .catch(() => undefined);
+      };
+      type();
+      this.typing = setInterval(type, this.options.typingMs ?? TYPING_MS);
+      return;
+    }
     this.drafts.start(this.frame());
     this.heartbeat = setInterval(() => {
       if (!this.stopped) this.drafts.offer(this.frame(), "normal");
@@ -150,7 +167,9 @@ export class TurnRenderer {
   private stopDrafts(reason: string): Promise<void> {
     this.stopped = true;
     clearInterval(this.heartbeat);
+    clearInterval(this.typing);
     this.heartbeat = undefined;
+    this.typing = undefined;
     this.draftAbort.abort(new Error(reason));
     return this.drafts.stop();
   }

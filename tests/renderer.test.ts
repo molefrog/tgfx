@@ -242,6 +242,36 @@ describe("Telegram renderer boundaries", () => {
     }
   });
 
+  test("keeps the typing status on for a turn without a draft until the final message goes out", async () => {
+    const calls: string[] = [];
+    const api = {
+      sendTyping: async (chatId: string, topicId: string) => { calls.push(`typing:${chatId}/${topicId}`); return true as const; },
+      sendRichDraft: async () => { throw new Error("report mode must not send a draft"); },
+      sendRich: async () => { calls.push("final"); return { message_id: 7 }; },
+    } as unknown as TelegramApi;
+    const state = {
+      createOutbox: () => 1, markOutbox: () => undefined, registerBotMessage: () => undefined,
+    } as unknown as StateStore;
+    const renderer = new TurnRenderer(
+      api,
+      state,
+      { key: "1:-2:5", botId: "1", chatId: "-2", topicId: "5", chatKind: "supergroup" },
+      "report",
+      new AcpProjector(),
+      undefined,
+      new PeerDraftLimiter(),
+      { typingMs: 5 },
+    );
+    renderer.start();
+    await waitFor(() => calls.length >= 3);
+    expect(calls[0]).toBe("typing:-2/5");
+    await renderer.finish({ botId: "1", inboxId: 1, effectKey: "final:1:1" });
+    const settled = calls.length;
+    expect(calls.at(-1)).toBe("final");
+    await Bun.sleep(20);
+    expect(calls).toHaveLength(settled);
+  });
+
   test("progress mode drafts a status line, never tool rows", async () => {
     const directory = await mkdtemp(join(tmpdir(), "tgfx-progress-"));
     const state = new StateStore(join(directory, "state.sqlite"));

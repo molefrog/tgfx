@@ -131,8 +131,8 @@ Telegram Bot API:
     originating chat shows that work is waiting.
 12. With default settings, a private chat sees a live rich draft containing
     structured prose and ordered groups of completed tools. A group, or any chat
-    in the `answer` or `report` output mode, waits for one permanent rich
-    response.
+    in the `answer` or `report` output mode, sees Telegram's "typing…" status
+    until one permanent rich response arrives.
     Tool rows stay compact and never include tool results. Telegram's Stop button
     cancels the active FX turn only when its draft ID matches the route's current draft.
 13. The next message in the same chat and topic continues the same FX route and
@@ -341,11 +341,15 @@ sees depends on the output mode:
   (`Reading files…`, `Running commands…`, `Thinking…`), changing at most every
   few seconds and never showing arguments. Prose that follows the last tool
   streams in as the answer. The final message is the answer alone.
-- `report`: nothing until the turn ends, then the same final message `live`
-  produces: the answer with collapsed tool groups.
-- `answer`: nothing until the turn ends, then the answer alone. Narration
-  before a tool call, and a tool call after the answer (a reaction, a sent
-  file), are left out.
+- `report`: the "typing…" status until the turn ends, then the same final
+  message `live` produces: the answer with collapsed tool groups.
+- `answer`: the "typing…" status until the turn ends, then the answer alone.
+  Narration before a tool call, and a tool call after the answer (a reaction, a
+  sent file), are left out.
+
+Whenever a turn has no draft, in these two modes and in every group, the chat
+shows the bot as typing from the moment the turn starts until its message
+arrives or it is cancelled.
 
 In a group, tgfx reacts only to `/compact`, a reply to the bot, or a configured
 mention. It does not read normal

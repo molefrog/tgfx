@@ -68,6 +68,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) {
           firstPoll = false;
@@ -165,6 +166,7 @@ describe("tgfx host pipeline", () => {
       const permanent = new Promise<void>((resolve) => { delivered = resolve; });
       const telegram = {
         getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
         getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
           if (firstPoll) { firstPoll = false; return [update(1, 42, "MCP_TOOL FX_TOOL")]; }
           return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -230,6 +232,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) { firstPoll = false; return [stickerUpdate as Update]; }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -286,6 +289,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         poll += 1;
         if (poll === 1) return [update(1, 42, "first message")];
@@ -339,6 +343,7 @@ describe("tgfx host pipeline", () => {
     const cancellation = new Promise<void>((resolve) => { cancelled = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -414,6 +419,7 @@ describe("tgfx host pipeline", () => {
     const cancellation = new Promise<void>((resolve) => { cancelled = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) { phase = 1; return [update(1, 42, "WAIT")]; }
         if (phase === 1) {
@@ -483,6 +489,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) {
           firstPoll = false;
@@ -588,6 +595,7 @@ describe("tgfx host pipeline", () => {
     } as Update);
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -679,6 +687,7 @@ describe("tgfx host pipeline", () => {
     const callbackAnswers: string[] = [];
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -758,6 +767,7 @@ describe("tgfx host pipeline", () => {
     const completed = new Promise<void>((resolve) => { edited = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) {
           firstPoll = false;
@@ -825,6 +835,7 @@ describe("tgfx host pipeline", () => {
     const markupEdits: unknown[] = [];
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -903,6 +914,7 @@ describe("tgfx status feed", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) { firstPoll = false; return [update(1, 42, "hello")]; }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -959,6 +971,7 @@ describe("tgfx status feed", () => {
     const first = new Promise<void>((resolve) => { firstPolled = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         polls++;
         if (!resumed) pollsBeforeResume++;
@@ -1078,6 +1091,7 @@ async function permissionHarness(options: {
   const polling = Promise.withResolvers<void>();
   const telegram = {
     getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
     getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
       polling.resolve();
       while (!queue.length) {
