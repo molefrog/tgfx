@@ -140,6 +140,8 @@ export class StatusStore {
         break;
       }
       case "turn": {
+        const previous = this.routes.get(event.route.key);
+        const labelChanged = previous?.chat !== event.route.chat || previous?.group !== event.route.group;
         const route = this.route(event.route);
         if (event.state === "started") {
           Object.assign(route, {
@@ -149,7 +151,10 @@ export class StatusStore {
           this.packets.push({ at: now, label: `▶ ${event.who}`, segment: "right", direction: "in" });
         } else if (event.state === "event") {
           const last = route.trace.at(-1);
-          if (last === event.glyph && now - route.lastGlyphAt < GLYPH_MERGE_MS) break;
+          if (last === event.glyph && now - route.lastGlyphAt < GLYPH_MERGE_MS) {
+            if (!labelChanged) return;
+            break;
+          }
           route.trace.push(event.glyph);
           if (route.trace.length > TRACE_LENGTH) route.trace.splice(0, route.trace.length - TRACE_LENGTH);
           route.lastGlyphAt = now;

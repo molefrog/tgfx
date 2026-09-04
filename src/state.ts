@@ -122,6 +122,9 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
   UNIQUE(bot_id, chat_id, message_id)
 );
 
+CREATE INDEX IF NOT EXISTS telegram_messages_route_recent
+  ON telegram_messages(route_key, CAST(message_id AS INTEGER) DESC);
+
 CREATE TABLE IF NOT EXISTS telegram_inbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   bot_id TEXT NOT NULL,

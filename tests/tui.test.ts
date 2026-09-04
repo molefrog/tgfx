@@ -284,6 +284,31 @@ describe("live wire status", () => {
 });
 
 describe("status store", () => {
+  test("does not notify the view when a repeated glyph is suppressed", () => {
+    const store = new StatusStore({}, () => 0);
+    const event = { type: "turn", route: alexey, state: "event", glyph: "·" } as const;
+    store.apply(event);
+    let notifications = 0;
+    const unsubscribe = store.subscribe(() => notifications++);
+    const revision = store.revision;
+    store.apply(event);
+    unsubscribe();
+    expect(notifications).toBe(0);
+    expect(store.revision).toBe(revision);
+  });
+
+  test("notifies the view when a suppressed glyph carries a renamed chat", () => {
+    const store = new StatusStore({}, () => 0);
+    const event = { type: "turn", route: alexey, state: "event", glyph: "·" } as const;
+    store.apply(event);
+    let notifications = 0;
+    const unsubscribe = store.subscribe(() => notifications++);
+    store.apply({ ...event, route: { ...alexey, chat: "New name" } });
+    unsubscribe();
+    expect(notifications).toBe(1);
+    expect(store.snapshot().routes[0]!.chat).toBe("New name");
+  });
+
   test("merges a repeated glyph inside the merge window and keeps it after", () => {
     let now = 0;
     const store = new StatusStore({}, () => now);
