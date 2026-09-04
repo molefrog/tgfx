@@ -126,10 +126,7 @@ export class FxRouteSession {
     permissionMode?: FxPermissionMode;
     previousSessionId?: string;
     mcp?: McpOptions;
-    onUpdate?: (update: acp.SessionUpdate) => void | Promise<void>;
-  }) {
-    if (options.onUpdate) this.updateListeners.add(options.onUpdate);
-  }
+  }) {}
 
   async start(): Promise<FxSessionInfo> {
     if (!this.usable) throw this.connectionError ?? new Error("fx ACP session is closed");

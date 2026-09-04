@@ -1397,7 +1397,6 @@ export class TgfxApp {
 
   private async runCompact(row: InboxRow, message: InboundMessage): Promise<void> {
     const blocks: acp.ContentBlock[] = [{ type: "text", text: "/compact" }];
-    this.state.setLastPrompt(message.route.key, blocks);
     const controller = new AbortController();
     const streaming = streamsRoute(this.output, message.route);
     const draftId = streaming ? createDraftId() : undefined;
@@ -1406,7 +1405,6 @@ export class TgfxApp {
     const routeLabel = this.label(message.route.chatId, message.route.topicId);
     const acknowledgeCancellation = async () => {
       await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
-      this.state.clearLastPrompt(message.route.key);
       this.log({ event: "turn.cancelled", message: `${routeLabel} · compact cancelled`, chat: message.route.chatId });
     };
 
@@ -1467,7 +1465,6 @@ export class TgfxApp {
         );
         this.registerBotMessage(message.route, String(completed.message_id));
       }
-      this.state.clearLastPrompt(message.route.key);
       this.log({ event: "turn.delivered", message: `${routeLabel} · conversation compacted`, chat: message.route.chatId });
     } catch (error) {
       if (controller.signal.aborted) {
@@ -1510,7 +1507,6 @@ export class TgfxApp {
       this.state.registerInbound(message);
       const blocks = await buildPrompt(this.pendingSessionBootstrap.has(message.route.key), controller.signal);
       controller.signal.throwIfAborted();
-      this.state.setLastPrompt(message.route.key, blocks);
       const projector = new AcpProjector(await this.mcpToolIcons());
       renderer = new TurnRenderer(
         this.options.telegram,
@@ -1560,7 +1556,6 @@ export class TgfxApp {
         inboxId: row.id,
         effectKey: `final:${this.options.bot.id}:${row.id}`,
       });
-      this.state.clearLastPrompt(message.route.key);
       outcome = "delivered";
       const seconds = ((performance.now() - startedAt) / 1_000).toFixed(1);
       this.log({
@@ -1574,7 +1569,6 @@ export class TgfxApp {
       if (controller.signal.aborted) {
         if (this.stopping) throw error;
         await this.options.telegram.sendText(message.route.chatId, "𝒇x turn cancelled.", message.route.topicId);
-        this.state.clearLastPrompt(message.route.key);
         outcome = "cancelled";
         this.log({ event: "turn.cancelled", message: `${routeLabel} · turn cancelled`, chat: message.route.chatId });
         return;
@@ -1652,10 +1646,6 @@ export class TgfxApp {
             ...this.config.access.userIds,
           ]),
         },
-      },
-      onUpdate: async (update) => {
-        if (update.sessionUpdate !== "available_commands_update") return;
-        this.state.setCommands(route.key, update.availableCommands);
       },
     });
     this.sessions.set(route.key, session);

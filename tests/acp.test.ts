@@ -49,8 +49,8 @@ describe("FX ACP transport", () => {
     const session = new FxRouteSession({
       workspace: fake.directory,
       binary: fake.binary,
-      onUpdate: (update) => { updates.push(update); },
     });
+    session.onUpdate((update) => { updates.push(update); });
     try {
       await session.start();
       await session.prompt([{ type: "text", text: "RAW_MARKDOWN" }]);
@@ -79,8 +79,8 @@ describe("FX ACP transport", () => {
       model: "pinned-model",
       previousSessionId: "saved-session",
       mcp: { command: "tgfx", args: ["mcp"], env: { ROUTE: "route-1" } },
-      onUpdate: (update) => { updates.push(update); },
     });
+    session.onUpdate((update) => { updates.push(update); });
     try {
       const info = await session.start();
       expect(info).toEqual({

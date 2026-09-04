@@ -23,7 +23,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "bun build --target=bun --minify --sourcemap=linked --external react-devtools-core src/index.ts --outdir dist --entry-naming=tgfx.js",
+    "build": "bun build --target=bun --minify --sourcemap=linked --splitting --external react-devtools-core src/index.ts --outdir dist --entry-naming=tgfx.js",
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "check": "bunx tsc --noEmit",

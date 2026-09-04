@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig, projectPaths, saveConfig, type ProjectPaths } from "../src/config";
@@ -38,7 +38,7 @@ async function tgfx(args: string[], options: { cwd: string; env?: Record<string,
 }
 
 async function workspace(): Promise<ProjectPaths> {
-  const root = await mkdtemp(join(tmpdir(), "tgfx-cli-ws-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "tgfx-cli-ws-")));
   temporary.push(root);
   process.env.TGFX_HOME = join(root, "tgfx-home");
   const paths = projectPaths(root);

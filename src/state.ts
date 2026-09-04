@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import type { InboundMessage, Route } from "./types";
 
 type InboxStatus = "received" | "dispatching" | "running" | "done" | "failed" | "interrupted" | "discarded";
-type OutboxStatus = "pending" | "sending" | "sent" | "failed" | "abandoned";
+type OutboxStatus = "pending" | "sending" | "sent" | "failed";
 
 /** The Telegram message that carries an interaction's buttons. */
 export type InteractionCard = { chatId: string; messageId: number };
@@ -28,8 +28,6 @@ export type RouteRow = {
   chat_kind: Route["chatKind"];
   session_id: string | null;
   generation: number;
-  dynamic_commands_json: string;
-  last_prompt_json: string | null;
   updated_at: string;
 };
 
@@ -91,8 +89,6 @@ CREATE TABLE IF NOT EXISTS routes (
   chat_kind TEXT NOT NULL,
   session_id TEXT,
   generation INTEGER NOT NULL DEFAULT 1,
-  dynamic_commands_json TEXT NOT NULL DEFAULT '[]',
-  last_prompt_json TEXT,
   updated_at TEXT NOT NULL
 );
 
@@ -239,6 +235,15 @@ export class StateStore {
     if (!messageColumns.some((column) => column.name === "excerpt")) {
       this.db.exec("ALTER TABLE telegram_messages ADD COLUMN excerpt TEXT");
     }
+    // Remove unused caches from journals created by earlier versions.
+    const routeColumns = this.db.query<{ name: string }, []>(
+      "SELECT name FROM pragma_table_info('routes')",
+    ).all();
+    for (const name of ["last_prompt_json", "dynamic_commands_json"]) {
+      if (routeColumns.some((column) => column.name === name)) {
+        this.db.exec(`ALTER TABLE routes DROP COLUMN ${name}`);
+      }
+    }
   }
 
   close(): void { this.db.close(); }
@@ -287,8 +292,7 @@ export class StateStore {
       }
       const timestamp = now();
       this.db.query(`
-        UPDATE routes SET session_id=NULL, generation=generation+1,
-          dynamic_commands_json='[]', last_prompt_json=NULL, updated_at=?
+        UPDATE routes SET session_id=NULL, generation=generation+1, updated_at=?
       `).run(timestamp);
       const discarded = this.db.query(`
         UPDATE telegram_inbox SET status='discarded', payload_json=NULL,
@@ -358,17 +362,8 @@ export class StateStore {
   recoverInbox(): { received: InboxRow[]; interrupted: number } {
     return this.db.transaction(() => {
       // Delivery is the terminal proof for a turn. A process can die after the
-      // outbox commit but before the adjacent inbox/prompt cleanup; reconcile
+      // outbox commit but before the adjacent inbox cleanup; reconcile
       // that tiny window instead of asking the user to rerun delivered work.
-      this.db.query(`
-        UPDATE routes SET last_prompt_json=NULL,updated_at=$now
-        WHERE route_key IN (
-          SELECT telegram_inbox.route_key FROM telegram_inbox
-          JOIN telegram_outbox ON telegram_outbox.inbox_id=telegram_inbox.id
-          WHERE telegram_inbox.status IN ('dispatching','running')
-            AND telegram_outbox.status='sent'
-        )
-      `).run({ now: now() });
       this.db.query(`
         UPDATE telegram_inbox SET status='done',payload_json=NULL,error=NULL,updated_at=$now
         WHERE status IN ('dispatching','running')
@@ -436,13 +431,6 @@ export class StateStore {
     return result.changes;
   }
 
-  discardInterrupted(routeKey: string): number {
-    return this.db.query(`
-      UPDATE telegram_inbox SET status='discarded',payload_json=NULL,updated_at=$now
-      WHERE route_key=$routeKey AND status IN ('interrupted','failed')
-    `).run({ routeKey, now: now() }).changes;
-  }
-
   ensureRoute(route: Route): RouteRow {
     this.db.query(`
       INSERT INTO routes(route_key, bot_id, chat_id, topic_id, chat_kind, updated_at)
@@ -477,15 +465,9 @@ export class StateStore {
           throw new Error(`Cannot migrate Telegram route ${route.route_key}: ${newKey} already exists.`);
         }
         this.db.query(`
-          INSERT INTO routes(
-            route_key,bot_id,chat_id,topic_id,chat_kind,session_id,generation,
-            dynamic_commands_json,last_prompt_json,updated_at
-          ) VALUES ($newKey,$bot,$chat,$topic,'supergroup',$session,$generation,$commands,$prompt,$now)
-        `).run({
-          newKey, bot: botId, chat: newChatId, topic: route.topic_id,
-          session: route.session_id, generation: route.generation,
-          commands: route.dynamic_commands_json, prompt: route.last_prompt_json, now: now(),
-        });
+          UPDATE routes SET route_key=?,chat_id=?,chat_kind='supergroup',updated_at=?
+          WHERE route_key=?
+        `).run(newKey, newChatId, now(), route.route_key);
         for (const table of [
           "telegram_principals", "telegram_inbox", "telegram_outbox",
           "telegram_interactions", "managed_pins", "effect_ledger",
@@ -496,7 +478,6 @@ export class StateStore {
           .run(newKey, newChatId, route.route_key);
         this.db.query("UPDATE context_capabilities SET route_key=?,chat_id=? WHERE route_key=?")
           .run(newKey, newChatId, route.route_key);
-        this.db.query("DELETE FROM routes WHERE route_key=?").run(route.route_key);
         migrated.push({ oldKey: route.route_key, newKey });
       }
       return migrated;
@@ -508,7 +489,6 @@ export class StateStore {
       this.db.query(`
         UPDATE routes SET session_id=$session,
           generation=generation+CASE WHEN $replaced THEN 1 ELSE 0 END,
-          last_prompt_json=CASE WHEN $replaced THEN NULL ELSE last_prompt_json END,
           updated_at=$now WHERE route_key=$key
       `).run({ session: sessionId, replaced: replacedPrevious ? 1 : 0, now: now(), key });
       if (replacedPrevious) this.expireRouteCapabilities(key);
@@ -518,8 +498,7 @@ export class StateStore {
   resetRoute(key: string): void {
     this.db.transaction(() => {
       this.db.query(`
-        UPDATE routes SET session_id=NULL, generation=generation+1,
-          dynamic_commands_json='[]', last_prompt_json=NULL, updated_at=$now WHERE route_key=$key
+        UPDATE routes SET session_id=NULL, generation=generation+1, updated_at=$now WHERE route_key=$key
       `).run({ key, now: now() });
       this.expireRouteCapabilities(key);
     })();
@@ -535,21 +514,6 @@ export class StateStore {
       .run(timestamp, routeKey);
     this.db.query("UPDATE telegram_interactions SET state='expired',updated_at=? WHERE route_key=? AND state='pending'")
       .run(timestamp, routeKey);
-  }
-
-  setCommands(key: string, commands: unknown[]): void {
-    this.db.query("UPDATE routes SET dynamic_commands_json=?, updated_at=? WHERE route_key=?")
-      .run(JSON.stringify(commands), now(), key);
-  }
-
-  setLastPrompt(key: string, prompt: unknown): void {
-    this.db.query("UPDATE routes SET last_prompt_json=?, updated_at=? WHERE route_key=?")
-      .run(JSON.stringify(prompt), now(), key);
-  }
-
-  clearLastPrompt(key: string): void {
-    this.db.query("UPDATE routes SET last_prompt_json=NULL, updated_at=? WHERE route_key=?")
-      .run(now(), key);
   }
 
   registerInbound(message: InboundMessage, activate = true): void {
@@ -782,30 +746,22 @@ export class StateStore {
     ).get(input.effectKey)!.id;
   }
 
-  recoverableOutbox(options: { routeKey?: string; includeFailed?: boolean } = {}): Array<{
+  recoverableOutbox(): Array<{
     id: number; effect_key: string; bot_id: string; route_key: string;
     inbox_id: number | null; kind: string; payload_json: string; status: OutboxStatus; attempts: number;
   }> {
-    return this.db.query<any, { route: string | null; failed: number }>(`
+    return this.db.query<any, []>(`
       SELECT * FROM telegram_outbox
-      WHERE (status IN ('pending','sending') OR ($failed=1 AND status='failed'))
-        AND ($route IS NULL OR route_key=$route)
+      WHERE status IN ('pending','sending')
       ORDER BY id
-    `).all({ route: options.routeKey ?? null, failed: options.includeFailed ? 1 : 0 });
-  }
-
-  abandonOutbox(routeKey: string, reason: string): number {
-    return this.db.query(`
-      UPDATE telegram_outbox SET status='abandoned',payload_json='{}',error=$reason,updated_at=$now
-      WHERE route_key=$route AND status IN ('pending','sending','failed')
-    `).run({ route: routeKey, reason, now: now() }).changes;
+    `).all();
   }
 
   markOutbox(id: number, status: OutboxStatus, messageId?: string, error?: string): void {
     this.db.query(`
       UPDATE telegram_outbox SET status=$status,
         attempts=CASE WHEN $status='sending' THEN attempts+1 ELSE attempts END,
-        payload_json=CASE WHEN $status IN ('sent','abandoned') THEN '{}' ELSE payload_json END,
+        payload_json=CASE WHEN $status='sent' THEN '{}' ELSE payload_json END,
         telegram_message_id=COALESCE($message,telegram_message_id), error=$error, updated_at=$now
       WHERE id=$id
     `).run({ id, status, message: messageId ?? null, error: error ?? null, now: now() });

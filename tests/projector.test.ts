@@ -521,21 +521,6 @@ describe("ordered ACP projector", () => {
     expect(rendered(final(projector))).not.toContain("omitted startup details");
   });
 
-  test("retains the dynamic slash command catalog", () => {
-    const projector = new AcpProjector();
-    projector.apply(update({
-      sessionUpdate: "available_commands_update",
-      availableCommands: [
-        { name: "status", description: "Show status" },
-        { name: "model", description: "Switch model", input: { hint: "model" } },
-      ],
-    }));
-    expect(projector.snapshot().commands).toEqual([
-      { name: "status", description: "Show status" },
-      { name: "model", description: "Switch model", input: { hint: "model" } },
-    ]);
-  });
-
   test("redacts split secrets across streamed prose and compact tool rows", () => {
     const projector = new AcpProjector();
     const token = `123456789:${"A".repeat(30)}`;

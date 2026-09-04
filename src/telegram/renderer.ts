@@ -250,11 +250,10 @@ export class TurnRenderer {
 export async function recoverOutbox(
   api: TelegramApi,
   state: StateStore,
-  options: { routeKey?: string; includeFailed?: boolean } = {},
 ): Promise<{ sent: number; failed: number }> {
   let sent = 0;
   let failed = 0;
-  for (const row of state.recoverableOutbox(options)) {
+  for (const row of state.recoverableOutbox()) {
     const payload = JSON.parse(row.payload_json) as {
       chatId: string; topicId: string; rich?: InputRichMessageWithoutUpload; plain?: string; text?: string;
     };

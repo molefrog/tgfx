@@ -118,7 +118,6 @@ describe("tgfx host pipeline", () => {
       });
       expect(state.messageReferenceByTelegramId("100", "42", "500")?.owned_by_bot).toBe(1);
       expect(state.activeContext("100:42:0")).toBeUndefined();
-      expect(state.route("100:42:0")?.last_prompt_json).toBeNull();
     } finally { state.close(); }
   });
 
@@ -393,7 +392,6 @@ describe("tgfx host pipeline", () => {
       expect(state.nextOffset("100")).toBe(3);
       expect(state.db.query("SELECT count(*) AS count FROM telegram_inbox WHERE status='done'").get()).toEqual({ count: 1 });
       expect(state.activeContext("100:42:0")).toBeUndefined();
-      expect(state.route("100:42:0")?.last_prompt_json).toBeNull();
     } finally { state.close(); }
   });
 

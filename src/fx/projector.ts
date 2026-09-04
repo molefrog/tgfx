@@ -35,7 +35,6 @@ export type TimelineSnapshot = {
   prose: string;
   thought: string;
   tools: ToolState[];
-  commands: Array<{ name: string; description: string; input?: { hint: string } }>;
   changedAt: number;
 };
 
@@ -181,7 +180,6 @@ export class AcpProjector {
   private hasThought = false;
   private timeline: TimelineEntry[] = [];
   private tools = new Map<string, ToolState>();
-  private commands: TimelineSnapshot["commands"] = [];
   private readonly startedAt: number;
   private changedAt: number;
   /** What the progress line should say, and what it says until the hold expires. */
@@ -243,13 +241,6 @@ export class AcpProjector {
       case "tool_call":
       case "tool_call_update":
         return this.patchTool(update) ? "tool" : "none";
-      case "available_commands_update":
-        this.commands = update.availableCommands.map((command) => ({
-          name: command.name,
-          description: command.description,
-          ...(command.input ? { input: command.input } : {}),
-        }));
-        return "none";
       default:
         return "none";
     }
@@ -294,7 +285,6 @@ export class AcpProjector {
       prose: redactSecrets(this.timeline.flatMap((entry) => entry.type === "assistant" ? [entry.markdown] : []).join("")),
       thought: redactSecrets(this.thought),
       tools: [...this.tools.values()],
-      commands: [...this.commands],
       changedAt: this.changedAt,
     };
   }

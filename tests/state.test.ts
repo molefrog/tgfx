@@ -38,6 +38,33 @@ function inbound(): InboundMessage {
 }
 
 describe("SQLite operational journal", () => {
+  test("removes unused route caches from an older journal while preserving its work", () => {
+    const state = store();
+    const route = inbound().route;
+    state.ensureRoute(route);
+    state.setRouteSession(route.key, "saved-session");
+    const savedRoute = state.route(route.key);
+    const id = state.ingestUpdate({
+      botId: "100", updateId: 7, routeKey: route.key, authorized: true, payload: { prompt: "pending" },
+    })!;
+    state.db.exec(`
+      ALTER TABLE routes ADD COLUMN last_prompt_json TEXT;
+      ALTER TABLE routes ADD COLUMN dynamic_commands_json TEXT NOT NULL DEFAULT '[]';
+      UPDATE routes SET last_prompt_json='["unused prompt"]', dynamic_commands_json='["unused command"]';
+    `);
+    state.close();
+
+    const reopened = new StateStore(state.path);
+    try {
+      expect(reopened.route(route.key)).toEqual(savedRoute);
+      expect(reopened.route(route.key)).not.toHaveProperty("last_prompt_json");
+      expect(reopened.route(route.key)).not.toHaveProperty("dynamic_commands_json");
+      expect(reopened.recoverInbox().received.map((row) => row.id)).toEqual([id]);
+      expect(JSON.parse(reopened.inbox(id)!.payload_json)).toEqual({ prompt: "pending" });
+      expect(reopened.nextOffset("100")).toBe(8);
+    } finally { reopened.close(); }
+  });
+
   test("advances unauthorized updates without retaining payload", () => {
     const state = store();
     state.ingestUpdate({ botId: "100", updateId: 4, authorized: false, payload: { secret: true } });
@@ -58,23 +85,20 @@ describe("SQLite operational journal", () => {
     state.close();
   });
 
-  test("surfaces interrupted work and lets retry or discard resolve it", () => {
+  test("surfaces interrupted work without dispatching it again", () => {
     const state = store();
     const id = state.ingestUpdate({
       botId: "100", updateId: 8, routeKey: "100:42:0", authorized: true, payload: { prompt: "work" },
     })!;
     expect(state.claimInbox(id)).toBeTrue();
-    expect(state.recoverInbox().interrupted).toBe(1);
+    expect(state.recoverInbox()).toEqual({ received: [], interrupted: 1 });
     expect(state.inbox(id)?.status).toBe("interrupted");
-    expect(state.discardInterrupted("100:42:0")).toBe(1);
-    expect(state.inbox(id)?.status).toBe("discarded");
     state.close();
   });
 
   test("reconciles a sent final with its inbox after a crash between commits", () => {
     const state = store();
     state.ensureRoute({ key: "100:42:0", botId: "100", chatId: "42", topicId: "0", chatKind: "private" });
-    state.setLastPrompt("100:42:0", [{ type: "text", text: "done" }]);
     const id = state.ingestUpdate({
       botId: "100", updateId: 9, routeKey: "100:42:0", authorized: true, payload: { prompt: "done" },
     })!;
@@ -91,7 +115,19 @@ describe("SQLite operational journal", () => {
 
     expect(state.recoverInbox().interrupted).toBe(0);
     expect(state.inbox(id)).toMatchObject({ status: "done", payload_json: null });
-    expect(state.route("100:42:0")?.last_prompt_json).toBeNull();
+    state.close();
+  });
+
+  test("keeps failed deliveries for inspection without retrying them on startup", () => {
+    const state = store();
+    const payload = { chatId: "42", topicId: "0", plain: "undelivered answer" };
+    const id = state.createOutbox({
+      effectKey: "final:100:9", botId: "100", routeKey: "100:42:0", kind: "rich_final", payload,
+    });
+    state.markOutbox(id, "failed", undefined, "delivery failed");
+    expect(state.recoverableOutbox()).toEqual([]);
+    expect(state.db.query("SELECT payload_json FROM telegram_outbox WHERE id=?").get(id))
+      .toEqual({ payload_json: JSON.stringify(payload) });
     state.close();
   });
 
@@ -194,7 +230,6 @@ describe("SQLite operational journal", () => {
     const state = store();
     state.ensureRoute({ key: "100:42:0", botId: "100", chatId: "42", topicId: "0", chatKind: "private" });
     state.setRouteSession("100:42:0", "sess-a");
-    state.setLastPrompt("100:42:0", { text: "pending" });
     const id = state.ingestUpdate({
       botId: "100", updateId: 15, routeKey: "100:42:0", authorized: true, payload: { prompt: "work" },
     })!;
@@ -216,7 +251,6 @@ describe("SQLite operational journal", () => {
     const route = state.route("100:42:0")!;
     expect(route.session_id).toBeNull();
     expect(route.generation).toBe(2);
-    expect(route.last_prompt_json).toBeNull();
     expect(state.inbox(id)).toMatchObject({ status: "discarded", payload_json: null });
     expect(state.interaction("pending-approval")?.state).toBe("expired");
     // Telegram-side facts survive the move: cursor and undelivered replies.
