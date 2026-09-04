@@ -52,19 +52,39 @@ is written into the project.
 
 ## Reply style
 
-Pick how answers reach Telegram with `--output <mode>` for one run, press
-`f` in the running terminal, or send `/format` to the bot and tap a button.
-Either way the choice applies to the next turn and is saved for this project:
+𝒕𝒈(𝒇x) has four reply styles, depending on whether you want the answer
+streamed and whether you want to see the full history of tool calls.
 
-```text
-answer     Final answer         send the answer when the turn finishes
-report     Final with activity  send the answer with collapsed tool activity
-progress   Live answer          show live status, then stream the final answer
-live       Live with activity   stream the answer and tool activity as they happen (default)
-```
+By default, it streams the text using Telegram's new
+[live message drafts](https://telegram.org/blog/ai-bot-revolution-11-new-features#streaming-text-for-bots).
+Tool calls are rendered as collapsible groups, in the order they happen.
 
-Groups always get one message. Set a machine-wide default in
-`~/.fx/telegram/config.json`:
+<table>
+  <tr>
+    <th align="center">Live with activity</th>
+    <th align="center">Live answer</th>
+    <th align="center">No streaming</th>
+  </tr>
+  <tr>
+    <td><img src="doc/assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="280"></td>
+    <td><img src="doc/assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="280"></td>
+    <td><img src="doc/assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="280"></td>
+  </tr>
+  <tr>
+    <td align="center"><code>live</code> (default)<br>Stream the answer and tool activity as they happen</td>
+    <td align="center"><code>progress</code><br>Show live status drafts, then stream the final answer</td>
+    <td align="center"><code>answer</code><br>Send the answer only when the full turn finishes</td>
+  </tr>
+</table>
+
+There is also **Final with activity** (`report`): the final answer with the
+tool activity collapsed underneath it. Groups always get one message.
+
+How to pick a reply style:
+
+- Start 𝒕𝒈(𝒇x) with `--output <mode>` for one run
+- Press <kbd>f</kbd> in the running terminal, or send `/format` to the bot and tap a button
+- Set a machine-wide default in `~/.fx/telegram/config.json`:
 
 ```json
 { "defaults": { "output": "progress" } }
