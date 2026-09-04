@@ -178,11 +178,21 @@ export class TelegramApi {
     return this.call(() => this.api.deleteMyCommands({ scope: { type: "chat", chat_id: chatId } }));
   }
 
-  async sendFile(chatId: string, path: string, filename: string, caption?: string, topicId = "0") {
-    return this.call(() => this.api.sendDocument(chatId, new InputFile(path, filename), {
-        ...(caption ? { caption } : {}),
-        ...(topicId === "0" ? {} : { message_thread_id: Number(topicId) }),
-      }));
+  async sendMedia(
+    kind: "document" | "photo" | "voice" | "video_note",
+    chatId: string, path: string, filename: string, caption?: string, topicId = "0",
+  ) {
+    const file = new InputFile(path, filename);
+    const topic = topicId === "0" ? {} : { message_thread_id: Number(topicId) };
+    const options = { ...topic, ...(caption ? { caption } : {}) };
+    return this.call(async () => {
+      switch (kind) {
+        case "photo": return this.api.sendPhoto(chatId, file, options);
+        case "voice": return this.api.sendVoice(chatId, file, options);
+        case "video_note": return this.api.sendVideoNote(chatId, file, topic);
+        case "document": return this.api.sendDocument(chatId, file, options);
+      }
+    });
   }
 
   async sendSticker(

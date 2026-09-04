@@ -155,10 +155,44 @@ describe("Telegram input normalization", () => {
       text: undefined,
       new_chat_title: "Renamed group",
     }))).toBeUndefined();
-    expect(normalizeMessageUpdate(bot, update({
-      text: undefined,
-      location: { latitude: 55.6761, longitude: 12.5683 },
-    }))).toBeUndefined();
+  });
+
+  test("exposes a location pin without needing text or an attachment", () => {
+    const location = { latitude: 55.6761, longitude: 12.5683 };
+    const message = normalizeMessageUpdate(bot, update({ text: undefined, location }))!;
+    expect(toEnvelope(message).telegram_message.location).toEqual(location);
+  });
+
+  test("preserves live location details on edited pins", () => {
+    const location = { latitude: 0, longitude: 0, horizontal_accuracy: 12, live_period: 900, heading: 180, proximity_alert_radius: 50 };
+    const original = update({ text: undefined, location, edit_date: 1_787_478_500 });
+    const message = normalizeMessageUpdate(bot, { update_id: 12, edited_message: original.message } as Update)!;
+    expect(toEnvelope(message).telegram_message).toMatchObject({ event: "message.edited", location });
+  });
+
+  test("exposes the name and address of a venue pin", () => {
+    const venue = { title: "Cafe", address: "1 Main St", location: { latitude: 1, longitude: 2 }, google_place_id: "place-1" };
+    const message = normalizeMessageUpdate(bot, update({ text: undefined, venue }))!;
+    expect(toEnvelope(message).telegram_message).toMatchObject({ location: venue.location, venue });
+  });
+
+  test("includes the pin when a user replies to a location message", () => {
+    const location = { latitude: 1, longitude: 2 };
+    const reply = update({ text: undefined, location }).message;
+    const message = normalizeMessageUpdate(bot, update({ reply_to_message: reply }))!;
+    expect(toEnvelope(message).telegram_message.reply?.location).toEqual(location);
+  });
+
+  test.each([
+    { type: "user", date: 123, sender_user: { id: 7, first_name: "Grace", is_bot: false } },
+    { type: "hidden_user", date: 123, sender_user_name: "Grace" },
+    { type: "chat", date: 123, sender_chat: { id: -7, type: "supergroup", title: "Team" }, author_signature: "Editor" },
+    { type: "channel", date: 123, chat: { id: -8, type: "channel", title: "News" }, message_id: 9 },
+  ])("marks forwarded $type messages and preserves their source", (origin) => {
+    const message = normalizeMessageUpdate(bot, update({ forward_origin: origin }))!;
+    expect(toEnvelope(message).telegram_message).toMatchObject({
+      forwarded: true, provenance: { forward_origin: origin }, sender: { user_id: "42" },
+    });
   });
 
   test("keeps supported media-only messages", () => {

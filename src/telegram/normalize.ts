@@ -157,10 +157,11 @@ export function normalizeMessageUpdate(
   const attachments = attachmentRefs(message);
   const replyAttachments = replyMessage ? attachmentRefs(replyMessage).map((attachment) => attachment.kind) : [];
   const replyText = replyMessage?.text ?? replyMessage?.caption;
-  // Service messages, locations, contacts, venue updates, and arbitrary polls
-  // are acknowledged by the poll cursor but are not disguised as user prompts.
-  // Supported media-only messages still pass because they have an attachment.
-  if (text === undefined && attachments.length === 0) return undefined;
+  const replyLocation = replyMessage?.location ?? replyMessage?.venue?.location;
+  const location = message.location ?? message.venue?.location;
+  // Service messages, contacts, and arbitrary polls are acknowledged by the
+  // poll cursor but are not disguised as user prompts.
+  if (text === undefined && attachments.length === 0 && !location) return undefined;
   const provenance: Record<string, unknown> = {};
   if (message.forward_origin) provenance.forward_origin = message.forward_origin;
   if (message.media_group_id) provenance.media_group_id = message.media_group_id;
@@ -186,6 +187,8 @@ export function normalizeMessageUpdate(
     timestamp: new Date(message.date * 1000),
     ...(text === undefined ? {} : { text, textKind: message.text === undefined ? "caption" as const : "text" as const }),
     attachments,
+    ...(location ? { location } : {}),
+    ...(message.venue ? { venue: message.venue } : {}),
     ...(replyMessage ? {
       reply: {
         message_ref: replyRef!,
@@ -196,6 +199,8 @@ export function normalizeMessageUpdate(
             : {}),
         ...(replyText ? { text_excerpt: replyText.slice(0, 1_000) } : {}),
         ...(replyAttachments.length ? { attachment_kinds: [...new Set(replyAttachments)] } : {}),
+        ...(replyLocation ? { location: replyLocation } : {}),
+        ...(replyMessage.venue ? { venue: replyMessage.venue } : {}),
       },
     } : {}),
     ...(Object.keys(provenance).length ? { provenance } : {}),
@@ -245,7 +250,7 @@ export function toEnvelope(message: InboundMessage, options: { sessionBootstrap?
     telegram_message: {
       version: 1 as const,
       source: "tgfx:telegram" as const,
-      instructions: "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), polls, group admin actions and more. Use search.",
+      instructions: "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), photos (`send_photo`), voice messages (`send_voice`), circular videos (`send_video_note`), polls, group admin actions and more. Use search.",
       ...(options.sessionBootstrap ? { session_bootstrap: SESSION_BOOTSTRAP_INSTRUCTIONS } : {}),
       event: message.event,
       event_id: `tg:${message.updateId}`,
@@ -268,6 +273,9 @@ export function toEnvelope(message: InboundMessage, options: { sessionBootstrap?
           : {}),
       },
       ...(message.textKind ? { text_kind: message.textKind } : {}),
+      ...(message.location ? { location: message.location } : {}),
+      ...(message.venue ? { venue: message.venue } : {}),
+      ...(message.provenance?.forward_origin ? { forwarded: true } : {}),
       attachments: message.attachments.map((attachment) => ({
         ref: attachment.ref,
         kind: attachment.kind,
@@ -325,7 +333,7 @@ export function commandFromText(text: string | undefined, botUsername?: string):
 
 export function shouldInvokeAgent(message: InboundMessage, botUsername?: string, botId?: string): boolean {
   if (message.route.chatKind === "private") return true;
-  const command = commandFromText(message.text, botUsername);
+  const command = message.provenance?.forward_origin ? undefined : commandFromText(message.text, botUsername);
   if (command?.addressed) return true;
   const rawMessage = message.raw.message ?? message.raw.edited_message;
   const entities = rawMessage?.entities ?? rawMessage?.caption_entities ?? [];

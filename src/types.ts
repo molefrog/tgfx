@@ -1,4 +1,4 @@
-import type { Update } from "grammy/types";
+import type { Location, Update, Venue } from "grammy/types";
 
 export type DecimalId = string;
 export type ChatKind = "private" | "group" | "supergroup" | "channel";
@@ -146,6 +146,9 @@ type TelegramEnvelope = {
       media_group_id?: string;
     };
     text_kind?: "text" | "caption";
+    location?: Location;
+    venue?: Venue;
+    forwarded?: true;
     attachments: Array<{
       ref: string;
       kind: AttachmentKind;
@@ -175,6 +178,8 @@ type TelegramEnvelope = {
       sender_name?: string;
       text_excerpt?: string;
       attachment_kinds?: AttachmentKind[];
+      location?: Location;
+      venue?: Venue;
     };
     provenance?: Record<string, unknown>;
     response_target: { kind: "automatic_reply" };
@@ -192,6 +197,8 @@ export type InboundMessage = {
   timestamp: Date;
   text?: string;
   textKind?: "text" | "caption";
+  location?: Location;
+  venue?: Venue;
   attachments: AttachmentRef[];
   reply?: TelegramEnvelope["telegram_message"]["reply"];
   provenance?: Record<string, unknown>;

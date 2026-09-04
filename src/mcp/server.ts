@@ -326,23 +326,32 @@ export async function runTelegramMcpServer(): Promise<void> {
     return { downloaded: true, path, bytes, mime_type: attachment.mimeType };
   })));
 
-  server.registerTool("send_file", {
-    title: "Send workspace file",
-    description: "Upload a file from the current workspace or the bot's downloads directory to the current Telegram chat.",
+  for (const media of [
+    { name: "send_file", kind: "document", title: "Send workspace file", maxMB: 50,
+      description: "Send as a document, preserving the original file. Use send_photo for an inline image." },
+    { name: "send_photo", kind: "photo", title: "Send Telegram photo", maxMB: 10,
+      description: "Send an image as a photo displayed in the chat. Use a JPEG or PNG; width plus height must not exceed 10000 and the aspect ratio must not exceed 20. Use send_file to preserve the original file." },
+    { name: "send_voice", kind: "voice", title: "Send Telegram voice message", maxMB: 50,
+      description: "Send audio as a playable voice message. Supply OGG encoded with Opus, MP3, or M4A. This uploads an existing recording; it does not generate speech or convert audio." },
+    { name: "send_video_note", kind: "video_note", title: "Send Telegram circular video", maxMB: 50,
+      description: "Send a circular video message (video note). Supply a square MPEG4 video up to 60 seconds long. Prepare the video before calling; this tool does not crop or convert it. Video notes have no caption." },
+  ] as const) server.registerTool(media.name, {
+    title: media.title,
+    description: `${media.description} Upload from the current workspace or the bot's downloads directory to the current Telegram chat/topic. Maximum ${media.maxMB} MB.`,
     inputSchema: {
       path: z.string().describe("Absolute path or workspace-relative path"),
-      caption: z.string().max(1024).optional(),
+      ...(media.kind === "video_note" ? {} : { caption: z.string().max(1024).optional() }),
       filename: z.string().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async (args) => result(await perform("telegram_send_file", args, async () => {
+  }, async (args) => result(await perform(`telegram_${media.name}`, args, async () => {
     const current = context();
     const resolvedPath = await sendablePath(args.path);
     const info = await stat(resolvedPath);
     if (!info.isFile()) throw new Error("Only a regular workspace file may be sent.");
-    if (info.size > 50 * 1024 * 1024) throw new Error("This file exceeds Telegram's 50 MB cloud upload limit.");
-    const sent = await telegram.sendFile(
-      current.chat_id, resolvedPath, safeName(args.filename ?? basename(resolvedPath)), args.caption, current.topic_id,
+    if (info.size > media.maxMB * 1024 * 1024) throw new Error(`This file exceeds Telegram's ${media.maxMB} MB cloud upload limit.`);
+    const sent = await telegram.sendMedia(
+      media.kind, current.chat_id, resolvedPath, safeName(args.filename ?? basename(resolvedPath)), args.caption, current.topic_id,
     );
     const reference = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
     state.registerBotMessage({

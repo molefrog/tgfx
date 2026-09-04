@@ -22,7 +22,9 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 - [x] Bots can be group admins: pin messages, moderate, and more
 - [x] Custom emoji icons for tool calls and popular MCPs ([see below](#custom-icons))
 - [x] The agent can see attached files, images, **voice messages** and even **video messages**!
-- [ ] `soon` Supports forwarded messages
+- [x] Location pins and venue details
+- [x] Forwarded messages arriving together get one response, with their original sources preserved
+- [x] Send photos, voice messages, and circular video messages
 - [ ] `soon` Talking to [other bots](https://telegram.org/blog/ai-bot-revolution-11-new-features#bot-to-bot-communication)
 
 ## Install

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
@@ -62,13 +62,15 @@ type CoreContext = {
   workspace: string;
   home: string;
   files: string;
-  requests: Array<{ method: string; body: string }>;
+  database: string;
+  routeKey: string;
+  requests: Array<{ method: string; body: string; fields?: Record<string, FormDataEntryValue> }>;
   maxActiveGetFiles: () => number;
   call: (name: string, args: Json) => Promise<Json>;
   close: () => Promise<void>;
 };
 
-async function coreContext(): Promise<CoreContext> {
+async function coreContext(topicId = "0"): Promise<CoreContext> {
   const workspace = await mkdtemp(join(tmpdir(), "tgfx-mcp-actions-"));
   temporary.push(workspace);
   const home = join(workspace, "tgfx-home");
@@ -79,7 +81,7 @@ async function coreContext(): Promise<CoreContext> {
   const inbound: InboundMessage = {
     updateId: 1,
     event: "message.created",
-    route: { key: "100:42:0", botId: "100", chatId: "42", topicId: "0", chatKind: "private" },
+    route: { key: `100:42:${topicId}`, botId: "100", chatId: "42", topicId, chatKind: "private" },
     sender: { kind: "user", id: "42", ref: "usr_current", displayName: "Ada", isBot: false },
     messageId: "7",
     messageRef: "msg_current",
@@ -104,7 +106,7 @@ async function coreContext(): Promise<CoreContext> {
   await writeFile(join(workspace, "custom.png"), ONE_PIXEL_PNG);
 
   let nextMessageId = 100;
-  const requests: Array<{ method: string; body: string }> = [];
+  const requests: CoreContext["requests"] = [];
   let activeGetFiles = 0;
   let maxActiveGetFiles = 0;
   const token = "100:offline-test-token";
@@ -114,8 +116,10 @@ async function coreContext(): Promise<CoreContext> {
       const url = new URL(request.url);
       if (url.pathname.startsWith(`/file/bot${token}/`)) return new Response("hello");
       const method = url.pathname.split("/").at(-1)!;
+      const fields = request.headers.get("content-type")?.startsWith("multipart/form-data")
+        ? Object.fromEntries(await request.clone().formData()) : undefined;
       const body = await request.text();
-      requests.push({ method, body });
+      requests.push({ method, body, fields });
       const message = {
         message_id: nextMessageId++, date: Math.floor(Date.now() / 1000),
         chat: { id: 42, type: "private", first_name: "Ada" },
@@ -156,7 +160,7 @@ async function coreContext(): Promise<CoreContext> {
       ...process.env,
       TGFX_MCP_TOKEN: token,
       TGFX_MCP_BOT_ID: "100",
-      TGFX_MCP_ROUTE_KEY: "100:42:0",
+      TGFX_MCP_ROUTE_KEY: inbound.route.key,
       TGFX_MCP_WORKSPACE: workspace,
       TGFX_MCP_HOME: home,
       TGFX_MCP_DATABASE: database,
@@ -179,6 +183,8 @@ async function coreContext(): Promise<CoreContext> {
     workspace,
     home,
     files,
+    database,
+    routeKey: inbound.route.key,
     requests,
     maxActiveGetFiles: () => maxActiveGetFiles,
     call: (name, args) => client.request("tools/call", { name, arguments: args }),
@@ -191,6 +197,71 @@ async function coreContext(): Promise<CoreContext> {
 }
 
 describe("Telegram MCP actions", () => {
+  const media = [
+    { tool: "send_photo", method: "sendPhoto", field: "photo", filename: "photo.png", maxMB: 10 },
+    { tool: "send_voice", method: "sendVoice", field: "voice", filename: "voice.ogg", maxMB: 50 },
+    { tool: "send_video_note", method: "sendVideoNote", field: "video_note", filename: "circle.mp4", maxMB: 50 },
+  ];
+
+  test.each(media)("uploads $tool using its native Telegram method and current topic", async ({ tool, method, field, filename }) => {
+    const context = await coreContext("77");
+    try {
+      const bytes = tool === "send_photo" ? ONE_PIXEL_PNG : Buffer.from("prepared media bytes");
+      await Bun.write(join(context.workspace, filename), bytes);
+      const caption = tool === "send_video_note" ? undefined : "Here it is";
+      const response = await context.call(tool, { path: filename, ...(caption ? { caption } : {}) });
+      expect(response.structuredContent).toMatchObject({ sent: true });
+      const fields = context.requests.find((r) => r.method === method)!.fields!;
+      expect(fields.chat_id).toBe("42");
+      expect(fields.message_thread_id).toBe("77");
+      expect(fields.caption as string | undefined).toBe(caption);
+      const upload = fields[(fields[field] as string).replace("attach://", "")] as File;
+      expect(upload.name).toBe(filename);
+      expect(Buffer.from(await upload.arrayBuffer())).toEqual(bytes);
+      const state = new StateStore(context.database);
+      try {
+        expect(state.messageReference(response.structuredContent.message_ref, context.routeKey))
+          .toMatchObject({ owned_by_bot: 1, topic_id: "77" });
+      } finally { state.close(); }
+    } finally { await context.close(); }
+  });
+
+  test("deduplicates each media send without confusing photos with file uploads", async () => {
+    const context = await coreContext();
+    try {
+      for (const { tool, method } of media) {
+        const args = { path: "custom.png" };
+        const first = await context.call(tool, args);
+        expect((await context.call(tool, args)).structuredContent).toEqual(first.structuredContent);
+        expect(context.requests.filter((r) => r.method === method)).toHaveLength(1);
+      }
+      expect((await context.call("send_file", { path: "custom.png" })).structuredContent.sent).toBeTrue();
+      expect(context.requests.filter((r) => r.method === "sendDocument")).toHaveLength(1);
+    } finally { await context.close(); }
+  });
+
+  test.each(media)("refuses oversized $tool uploads before contacting Telegram", async ({ tool, filename, maxMB }) => {
+    const context = await coreContext();
+    try {
+      const path = join(context.workspace, filename);
+      await Bun.write(path, "");
+      await truncate(path, maxMB * 1024 * 1024 + 1);
+      expect((await context.call(tool, { path })).isError).toBeTrue();
+      expect(context.requests).toHaveLength(0);
+    } finally { await context.close(); }
+  });
+
+  test.each(media)("keeps $tool uploads inside the allowed file scope", async ({ tool, filename }) => {
+    const context = await coreContext();
+    try {
+      const path = join(context.workspace, filename);
+      await symlink(context.database, path);
+      expect((await context.call(tool, { path })).isError).toBeTrue();
+      expect((await context.call(tool, { path: context.workspace })).isError).toBeTrue();
+      expect(context.requests).toHaveLength(0);
+    } finally { await context.close(); }
+  });
+
   test("executes the scoped core tools and deduplicates a completed effect", async () => {
     const context = await coreContext();
     const { call, requests } = context;

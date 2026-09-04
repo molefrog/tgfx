@@ -194,7 +194,19 @@ A reference to audio or an image does not mean it has been transcribed or
 visually inspected. tgfx sends text and file metadata through ACP; interpretation
 of downloaded media depends on fx and its available tools.
 
-Contacts, locations, venues, unrelated service messages, and arbitrary inbound
+Location pins include coordinates, accuracy and live-location details when
+available. Venue pins also include the place name and address. Replies to pins
+retain the location too.
+
+Consecutive forwards from the same sender in the same chat/topic are collected
+until one second passes without another forward, or a different message arrives.
+Telegram provides no forwarding-batch ID, so this quiet period is a heuristic.
+One FX prompt contains the ordered messages, each marked as forwarded with its
+own source, text, and attachments. Forwarded albums participate in the same
+batch. Forwarded slash commands are quoted content, not bot controls. Queued
+batches survive restart and are discarded by `/stop` or `/clear`.
+
+Contacts, unrelated service messages, and arbitrary inbound
 polls do not become prompts. Choice clicks and supported poll votes created by
 tgfx tools arrive as later, authorized events and can start new turns. Join
 requests are retained for a later explicit group task; they do not wake fx.
@@ -219,6 +231,9 @@ against the same route, with their own expiry. A reset invalidates old refs.
 | `set_reaction` | Set one emoji reaction on the current message or an earlier referenced message. |
 | `download_attachment` | Download an attachment from the active context and return its local path. Maximum: 20 MiB. |
 | `send_file` | Send a regular file from the workspace or this bot's download directory. Maximum: 50 MiB. |
+| `send_photo` | Display a JPEG or PNG as a photo in the chat, with an optional caption. Maximum: 10 MiB. |
+| `send_voice` | Send OGG/Opus, MP3 or M4A as a voice message, with an optional caption. Maximum: 50 MiB. |
+| `send_video_note` | Send a square MPEG4 video up to 60 seconds as a circular video message, without a caption. Maximum: 50 MiB. |
 | `get_sticker_pack` | Read pack metadata and sendable file IDs, optionally downloading previews. Results are paginated. |
 | `send_sticker_by_id` | Send an existing sticker by its Telegram file ID. |
 | `send_sticker_file` | Upload a local sticker; raster images are converted to a bounded WebP. |
@@ -229,6 +244,9 @@ Upload paths are resolved before use. They must stay inside the workspace or
 the bot's downloads; private tgfx settings and state cannot be sent through
 these tools. Downloads use private directories, bounded writes, and safe
 filenames. Bot tokens and download URLs are not returned to the model.
+Photo, voice and video-note tools upload prepared media; they do not generate
+speech or transcode video. All sends stay in the active chat/topic and return a
+message reference.
 
 Two read-only MCP resources support the conversation:
 
