@@ -88,8 +88,8 @@ function Cells({ cells: list }: { cells: Cell[] }) {
 function Wire({ store, columns, now, tick }: { store: StatusStore; columns: number; now: number; tick: number }) {
   const { poll, routes, packets, settings, boot, bot } = store.snapshot();
   const left = `${bot ?? "telegram"} `;
-  const middle = " tgfx ";
-  const right = " fx";
+  const middle = " 𝒕𝒈(𝒇x) ";
+  const right = " 𝒇x";
   const running = routes.filter((route) => route.turn === "running");
   const suffix = running.length > 1 ? ` ×${running.length}` : "";
   const fixed = [...left].length + 1 + [...middle].length + 1 + 1 + [...right].length + [...suffix].length;

@@ -33,7 +33,7 @@ describe("live wire status", () => {
     const { frame } = scene();
     const { text } = frame();
     const [wire, routes, bay] = text.split("\n");
-    expect(wire).toMatch(/telegram ●[─·]+ tgfx ┈+ ● fx/);
+    expect(wire).toMatch(/telegram ●[─·]+ 𝒕𝒈\(𝒇x\) ┈+ ● 𝒇x/);
     expect(routes).toContain("waiting for a message");
     expect(bay).toMatch(/f format\s+p pause ○.*l log ○.*q quit/);
     expect(text).not.toContain("live");
@@ -57,7 +57,7 @@ describe("live wire status", () => {
     advance(600);
     const wire = frame().text.split("\n")[0]!;
     expect(wire.indexOf("▶ Alexey")).toBeGreaterThan(0);
-    expect(wire.indexOf("▶ Alexey")).toBeLessThan(wire.indexOf("tgfx"));
+    expect(wire.indexOf("▶ Alexey")).toBeLessThan(wire.indexOf("𝒕𝒈(𝒇x)"));
   });
 
   test("a running turn gets a route line with its glyph trace and tool count", () => {
@@ -69,7 +69,7 @@ describe("live wire status", () => {
       store.apply({ type: "turn", route: alexey, state: "event", glyph });
     }
     const [wire, route] = frame().text.split("\n");
-    expect(wire).toMatch(/[◐◓◑◒] fx/);
+    expect(wire).toMatch(/[◐◓◑◒] 𝒇x/);
     expect(route).toContain("Alexey");
     expect(route).toContain("fix the flaky");
     expect(route).toContain("⋯·▪▫");
@@ -90,7 +90,7 @@ describe("live wire status", () => {
     store.apply({ type: "turn", route: alexey, state: "started", who: "Alexey", text: "one" });
     store.apply({ type: "turn", route: team, state: "started", who: "Ivan", text: "two" });
     const lines = frame().text.split("\n");
-    expect(lines[0]).toContain("fx ×2");
+    expect(lines[0]).toContain("𝒇x ×2");
     expect(lines[1]).toContain("Alexey");
     expect(lines[2]).toContain("team-fx");
     expect(lines.length).toBe(4);
@@ -102,7 +102,7 @@ describe("live wire status", () => {
     store.apply({ type: "turn", route: alexey, state: "event", glyph: "!" });
     store.apply({ type: "turn", route: alexey, state: "waiting", waiting: true });
     const [wire, route] = frame().text.split("\n");
-    expect(wire).toContain("! fx");
+    expect(wire).toContain("! 𝒇x");
     expect(route).toContain("approval");
     store.apply({ type: "turn", route: alexey, state: "waiting", waiting: false });
     expect(frame().text.split("\n")[1]).not.toContain("approval");
@@ -186,7 +186,7 @@ describe("live wire status", () => {
     const { store, frame, advance } = scene();
     store.apply({ type: "boot", step: "fx", state: "running" });
     let [wire, line] = frame().text.split("\n");
-    expect(wire).toMatch(/telegram ○┈+ tgfx ┈+ [◐◓◑◒] fx$/);
+    expect(wire).toMatch(/telegram ○┈+ 𝒕𝒈\(𝒇x\) ┈+ [◐◓◑◒] 𝒇x$/);
     expect(line).toContain("starting · checking fx");
 
     store.apply({ type: "boot", step: "fx", state: "done", detail: "zai/glm-5.3-flash" });
@@ -195,13 +195,13 @@ describe("live wire status", () => {
     store.apply({ type: "boot", step: "menus", state: "running" });
     advance(1_800);
     [wire, line] = frame().text.split("\n");
-    expect(wire).toMatch(/^@moi_bot ●┈+ tgfx ┈+ ● fx$/);
+    expect(wire).toMatch(/^@moi_bot ●┈+ 𝒕𝒈\(𝒇x\) ┈+ ● 𝒇x$/);
     expect(line).toContain("fx ✓ · bot ✓ · lock ✓ · installing menus  1.8s");
 
     store.apply({ type: "boot", step: "menus", state: "done" });
     store.apply({ type: "boot", step: "polling", state: "done" });
     [wire, line] = frame().text.split("\n");
-    expect(wire).toMatch(/^@moi_bot ●[─·]+ tgfx/);
+    expect(wire).toMatch(/^@moi_bot ●[─·]+ 𝒕𝒈\(𝒇x\)/);
     expect(line).toContain("idle");
   });
 
