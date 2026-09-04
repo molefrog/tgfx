@@ -32,6 +32,7 @@ import {
   streamsRoute,
   TurnRenderer,
 } from "./telegram/renderer";
+import { REPLY_STYLE_CALLBACK, replyStylePicker } from "./telegram/reply-style";
 import { redactSecrets } from "./secrets";
 import type { RouteLabel, Settings, StatusEvent, TraceGlyph } from "./status";
 import { withTimeout } from "./timeout";
@@ -47,13 +48,13 @@ import type {
   AdminCapability,
   BotIdentity,
   InboundMessage,
-  RendererConfig,
+  OutputMode,
   Route,
   SenderIdentity,
   TgfxConfig,
 } from "./types";
-import { routeKey } from "./types";
-import { pruneBotFiles, saveConfig, tgfxHome, type WorkspacePaths } from "./config";
+import { isOutputMode, REPLY_STYLES, routeKey } from "./types";
+import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type WorkspacePaths } from "./config";
 import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
@@ -65,6 +66,9 @@ const COMMANDS: BotCommand[] = [{
 }, {
   command: "model",
   description: "Choose the 𝒇x model",
+}, {
+  command: "format",
+  description: "Choose how 𝒇x replies",
 }, {
   command: "cost",
   description: "Show local 𝒇x usage and spend",
@@ -214,6 +218,7 @@ export class TgfxApp {
   private resumePolling?: () => void;
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
+  private output: OutputMode;
   private customIconsEnabled: boolean;
   private iconStickers?: Promise<ReadonlyArray<{ custom_emoji_id?: string }> | undefined>;
   private pollTask?: Promise<void>;
@@ -234,13 +239,15 @@ export class TgfxApp {
     /** How long an approval card stays answerable. Default: five minutes. */
     permissionTimeoutMs?: number;
     mcpLaunch?: { command: string; args: string[] };
-    renderer?: Partial<RendererConfig>;
+    /** Run-time overrides of the configured settings, from flags or the terminal view. */
+    output?: OutputMode;
     customIcons?: boolean;
     log?: (event: TgfxLogEvent) => void;
     /** Live status for the terminal view; distinct from the log. */
     status?: (event: StatusEvent) => void;
   }) {
     this.config = options.config;
+    this.output = options.output ?? options.config.output;
     this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
     this.state = new StateStore(options.paths.database);
     this.state.ensurePollState(options.bot.id);
@@ -273,7 +280,7 @@ export class TgfxApp {
   /** The switches the terminal view can flip while the process runs. */
   settings(): Settings {
     return {
-      streaming: this.rendererConfig.mode === "streaming",
+      output: this.output,
       customIcons: this.customIconsEnabled,
       paused: this.resumePolling !== undefined,
       yolo: this.options.permissionMode === "yolo",
@@ -281,14 +288,25 @@ export class TgfxApp {
   }
 
   /** Applies to the next turn; a running turn keeps the mode it started with. */
-  setStreaming(on: boolean): void {
-    this.options.renderer = { ...this.options.renderer, mode: on ? "streaming" : "final" };
+  setOutput(output: OutputMode): void {
+    this.output = output;
     this.status({ type: "settings", settings: this.settings() });
+    this.persistSettings({ output });
   }
 
   setCustomIcons(on: boolean): void {
     this.customIconsEnabled = on;
     this.status({ type: "settings", settings: this.settings() });
+    this.persistSettings({ customIcons: on });
+  }
+
+  /** A switch flipped in the terminal view becomes this project's own setting. */
+  private persistSettings(settings: Partial<ProjectSettings>): void {
+    Object.assign(this.config, settings);
+    saveConfig(this.options.paths, this.config, settings).catch((error) => this.log({
+      event: "config.invalid",
+      message: `could not save the setting · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+    }));
   }
 
   /** Paused, tgfx stops asking Telegram for updates; nothing is acknowledged or lost. */
@@ -342,29 +360,20 @@ export class TgfxApp {
     }
     this.log({
       event: "polling.started",
-      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.rendererConfig.mode}`,
+      message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.output}`,
       bot: this.options.bot.id,
       workspace: this.options.paths.workspace,
-      renderer: this.rendererConfig.mode,
+      output: this.output,
     });
     this.status({ type: "boot", step: "polling", state: "done" });
     this.pollTask = this.poll();
     await Promise.race([this.pollTask, this.stopped]);
   }
 
-  private get rendererConfig(): RendererConfig {
-    return {
-      mode: this.config.streaming ? "streaming" : "final",
-      expandStreamingTools: this.config.expandStreamingTools,
-      updateEveryMs: this.config.updateEveryMs,
-      ...this.options.renderer,
-    };
-  }
-
   private draftLimiter(chatId: string): PeerDraftLimiter {
     let limiter = this.draftLimiters.get(chatId);
     if (!limiter) {
-      limiter = new PeerDraftLimiter({ minGapMs: this.rendererConfig.updateEveryMs });
+      limiter = new PeerDraftLimiter();
       this.draftLimiters.set(chatId, limiter);
     }
     return limiter;
@@ -539,7 +548,7 @@ export class TgfxApp {
         else {
           const command = commandFromText(message.text, this.options.bot.username);
           const immediateControl = command?.addressed
-            && (command.name === "model" || command.name === "cost");
+            && (command.name === "model" || command.name === "cost" || command.name === "format");
           if (immediateControl) await this.dispatch(id);
           else this.enqueue(id, message.route.key);
         }
@@ -570,7 +579,8 @@ export class TgfxApp {
       });
       if (id !== undefined) {
         const controlCallback = callback.data?.startsWith("fxp:")
-          || callback.data?.startsWith("mcp:");
+          || callback.data?.startsWith("mcp:")
+          || callback.data?.startsWith(`${REPLY_STYLE_CALLBACK}:`);
         if (controlCallback) await this.dispatch(id);
         else this.enqueue(id, route.key);
       }
@@ -726,7 +736,8 @@ export class TgfxApp {
     if (command && !command.addressed) return;
 
     if (command) {
-      if (command.name !== "clear" && command.name !== "compact" && command.name !== "model" && command.name !== "cost") {
+      const known = ["clear", "compact", "model", "cost", "format"];
+      if (!known.includes(command.name)) {
         await this.options.telegram.sendText(message.route.chatId, `Unknown command /${command.name}.`, message.route.topicId);
         return;
       }
@@ -744,6 +755,17 @@ export class TgfxApp {
       }
       if (command.name === "cost") {
         await this.openCostReport(message);
+        return;
+      }
+      if (command.name === "format") {
+        const view = replyStylePicker(this.output);
+        const sent = await this.options.telegram.sendText(
+          message.route.chatId,
+          view.text,
+          message.route.topicId,
+          { parse_mode: "HTML", reply_markup: view.replyMarkup },
+        );
+        this.registerBotMessage(message.route, String(sent.message_id));
         return;
       }
       if (command.name === "clear") {
@@ -952,7 +974,7 @@ export class TgfxApp {
     this.config.access.chatIds = replaceId(this.config.access.chatIds);
     if (this.config.approvals.chatId === oldChatId) this.config.approvals.chatId = newChatId;
     try {
-      await saveConfig(this.options.paths, this.config, { preserveInheritedSettings: true });
+      await saveConfig(this.options.paths, this.config);
     } catch (error) {
       this.log({
         event: "config.invalid",
@@ -1072,6 +1094,30 @@ export class TgfxApp {
           route.topicId,
         );
       }
+      return;
+    }
+    if (kind === REPLY_STYLE_CALLBACK && id) {
+      if (!isOutputMode(id)) {
+        await this.options.telegram.answerCallback(callback.id, "Unknown reply style");
+        return;
+      }
+      if (id !== this.output) {
+        this.setOutput(id);
+        this.log({
+          event: "settings.output_changed",
+          message: `${this.label(route.chatId, route.topicId)} · reply style · ${id}`,
+          chat: route.chatId,
+          topic: route.topicId,
+        });
+      }
+      await this.options.telegram.answerCallback(callback.id, `Reply style: ${REPLY_STYLES[id].name}`);
+      const view = replyStylePicker(id);
+      await this.options.telegram.editText(
+        route.chatId,
+        callback.message.message_id,
+        view.text,
+        { parse_mode: "HTML", reply_markup: view.replyMarkup },
+      ).catch(() => undefined);
       return;
     }
     if (kind === "model" && id && value) {
@@ -1313,7 +1359,7 @@ export class TgfxApp {
     const activeContextRef = this.state.activeContext(message.route.key)?.context_ref;
     this.state.setLastPrompt(message.route.key, blocks);
     const controller = new AbortController();
-    const streaming = streamsRoute(this.rendererConfig, message.route);
+    const streaming = streamsRoute(this.output, message.route);
     const draftId = streaming ? createDraftId() : undefined;
     this.activeTurns.set(message.route.key, controller);
     if (draftId !== undefined) this.activeDraftIds.set(message.route.key, draftId);
@@ -1420,7 +1466,7 @@ export class TgfxApp {
       this.options.telegram,
       this.state,
       message.route,
-      this.rendererConfig,
+      this.output,
       projector,
       controller.signal,
       this.draftLimiter(message.route.chatId),

@@ -3,6 +3,7 @@ import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { redactSecrets } from "../secrets";
 import { fxToolIconForTool, mcpIconForTool, type McpIconMap } from "../telegram/mcp-icons";
 import { markdownToRichBlocks, type RichBlock } from "../telegram/rich-markdown";
+import type { OutputMode } from "../types";
 import {
   activitySummary,
   describeTool,
@@ -21,6 +22,8 @@ export type ToolState = {
   name: string;
   /** The agent's own label, used only for tools we do not know by name. */
   title: string;
+  /** ACP's coarse kind (read, execute, search…), the activity hint when the name is missing. */
+  kind?: string;
   status: string;
   /** `rawInput` from the update, `{}` until it arrives. */
   input: Record<string, unknown>;
@@ -40,7 +43,8 @@ type ProjectedItem =
   | { type: "assistant"; markdown: string; blocks: RichBlock[] }
   | { type: "tools"; tools: ToolState[] };
 
-export type ProjectorChange = "none" | "text" | "boundary" | "tool";
+/** `status`: only the progress line changed, so a live draft has nothing new. */
+export type ProjectorChange = "none" | "text" | "boundary" | "tool" | "status";
 
 type ToolUpdate = Extract<acp.SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>;
 
@@ -53,6 +57,47 @@ const THINKING_CUSTOM_EMOJI = {
 };
 /** The thinking placeholder starts counting only once a wait is noticeable. */
 const THINKING_ELAPSED_AFTER_MS = 5_000;
+const THINKING = "Thinking…";
+const WORKING = "Working…";
+/**
+ * In progress mode the status line names what fx is up to, roughly. A new
+ * activity shows at once; falling back to an idle phrase waits this long, so
+ * the gap between one tool finishing and the next starting is not a flicker.
+ */
+const PROGRESS_HOLD_MS = 2_500;
+const PROGRESS_PHRASES: Record<ToolActivity, string> = {
+  commands: "Running commands…",
+  wrote_files: "Editing files…",
+  edited_files: "Editing files…",
+  read_files: "Reading files…",
+  searched_files: "Searching code…",
+  searched_code: "Searching code…",
+  searched_web: "Browsing the web…",
+  fetched_pages: "Browsing the web…",
+  searched_capabilities: "Loading skills…",
+  used_skills: "Loading skills…",
+  installed_skills: "Loading skills…",
+  used_subagents: "Running subagents…",
+  inspected_images: "Looking at images…",
+  read_tool_results: "Reading results…",
+  asked_user: "Asking a question…",
+  used_chat_tools: "Using Telegram…",
+  used_external_tools: "Using tools…",
+};
+
+/** `answer` and `progress` deliver the answer alone; the other modes show the work. */
+function answerOnly(output: OutputMode): boolean {
+  return output === "answer" || output === "progress";
+}
+
+function progressPhrase(tool: ToolState): string {
+  const { activity } = describeTool(tool);
+  return activity ? PROGRESS_PHRASES[activity] : WORKING;
+}
+
+function idlePhrase(text: string): boolean {
+  return text === THINKING || text === WORKING;
+}
 
 function elapsedSeconds(from: number, to: number): number {
   return Math.max(1, Math.round((to - from) / 1_000));
@@ -139,6 +184,9 @@ export class AcpProjector {
   private commands: TimelineSnapshot["commands"] = [];
   private readonly startedAt: number;
   private changedAt: number;
+  /** What the progress line should say, and what it says until the hold expires. */
+  private wantedPhrase = THINKING;
+  private phase: { text: string; since: number };
 
   constructor(
     private readonly mcpIcons: McpIconMap = {},
@@ -146,10 +194,19 @@ export class AcpProjector {
   ) {
     this.startedAt = clock();
     this.changedAt = this.startedAt;
+    this.phase = { text: THINKING, since: this.startedAt };
   }
 
   apply(update: acp.SessionUpdate): ProjectorChange {
     this.changedAt = this.clock();
+    const shown = this.phase.text;
+    const change = this.applyUpdate(update);
+    // Settle the progress line now, so a later update is not blamed for this one's news.
+    const line = this.progressLine(this.changedAt);
+    return change === "none" && line !== shown ? "status" : change;
+  }
+
+  private applyUpdate(update: acp.SessionUpdate): ProjectorChange {
     switch (update.sessionUpdate) {
       case "agent_message_chunk": {
         if (update.content.type !== "text") return "none";
@@ -172,6 +229,7 @@ export class AcpProjector {
       }
       case "agent_thought_chunk": {
         if (update.content.type !== "text") return "none";
+        if (!this.toolInProgress()) this.wantedPhrase = THINKING;
         const messageId = update.messageId ?? undefined;
         if (!this.hasThought) {
           this.hasThought = true;
@@ -208,18 +266,27 @@ export class AcpProjector {
     // as `in_progress` on the same call without completing it again. A finished
     // row stays finished; only its content changed.
     const status = previous && terminal(previous.status) && !terminal(reported) ? previous.status : reported;
+    const kind = typeof update.kind === "string" ? update.kind : previous?.kind;
     const next: ToolState = {
       id,
       name: typeof update.name === "string" ? update.name : previous?.name ?? "",
       title: typeof update.title === "string" ? update.title : previous?.title ?? "Tool",
+      ...(kind ? { kind } : {}),
       status,
       input: isRecord(update.rawInput) ? update.rawInput : previous?.input ?? {},
       startedAt: previous?.startedAt ?? now,
       ...(terminal(status) ? { finishedAt: previous?.finishedAt ?? now } : {}),
     };
     this.tools.set(id, next);
+    // The progress line follows every call, even one that has no row yet.
+    this.wantedPhrase = progressPhrase(next);
     if (!visible(next)) return false;
     return !previous || !visible(previous) || rowKey(previous) !== rowKey(next);
+  }
+
+  private toolInProgress(): boolean {
+    for (const tool of this.tools.values()) if (!terminal(tool.status)) return true;
+    return false;
   }
 
   snapshot(): TimelineSnapshot {
@@ -232,20 +299,16 @@ export class AcpProjector {
     };
   }
 
-  private projected(includeTools: boolean): ProjectedItem[] {
+  private projected(): ProjectedItem[] {
     const items: ProjectedItem[] = [];
     let group: ToolState[] = [];
 
+    // True when the group had tools but none had a row to show (unnamed and
+    // still running), so the prose around it needs its own paragraph break.
     const flushTools = (): boolean => {
-      let rendered = false;
-      if (includeTools) {
-        const shown = group.filter(visible);
-        if (shown.length) {
-          items.push({ type: "tools", tools: shown });
-          rendered = true;
-        }
-      }
-      const hidden = group.length > 0 && !rendered;
+      const shown = group.filter(visible);
+      if (shown.length) items.push({ type: "tools", tools: shown });
+      const hidden = group.length > 0 && !shown.length;
       group = [];
       return hidden;
     };
@@ -278,6 +341,29 @@ export class AcpProjector {
     return items;
   }
 
+  /**
+   * The answer: the last run of prose, ignoring a tool call that comes after
+   * it (a reaction, a sent file). While drafting, prose only counts once the
+   * tools are behind it; anything fx said before a tool was narration.
+   */
+  private answer(items: ProjectedItem[], draft: boolean): Extract<ProjectedItem, { type: "assistant" }>[] {
+    let end = items.length;
+    if (!draft) {
+      while (end > 0 && items[end - 1]!.type === "tools") end--;
+    }
+    let start = end;
+    while (start > 0 && items[start - 1]!.type === "assistant") start--;
+    return items.slice(start, end) as Extract<ProjectedItem, { type: "assistant" }>[];
+  }
+
+  private progressLine(now: number): string {
+    const wanted = this.wantedPhrase;
+    if (wanted !== this.phase.text && (!idlePhrase(wanted) || now - this.phase.since >= PROGRESS_HOLD_MS)) {
+      this.phase = { text: wanted, since: now };
+    }
+    return this.phase.text;
+  }
+
   // Timeline index of the guidelines resource read, but only when it is the
   // turn's first tool call (a bootstrap turn); -1 otherwise. Assistant text
   // before that index is a forbidden announcement and is not rendered.
@@ -305,21 +391,19 @@ export class AcpProjector {
     return this.waiting ? [{ type: "paragraph", text: { type: "italic", text: this.waiting } }] : [];
   }
 
-  rich(options: {
-    final: boolean;
-    expandStreamingTools: boolean;
-    includeTools?: boolean;
-  }): InputRichMessageWithoutUpload {
-    const items = this.projected(options.includeTools ?? true);
+  rich(options: { final: boolean; output: OutputMode }): InputRichMessageWithoutUpload {
     const now = this.clock();
+    const all = this.projected();
+    const items: ProjectedItem[] = answerOnly(options.output) ? this.answer(all, !options.final) : all;
     if (!items.length) {
       if (options.final) return { blocks: [{ type: "paragraph", text: "Done." }] };
       // Only ever append to the placeholder: clients type draft changes in from
       // the first differing character.
       const waited = now - this.startedAt;
       const suffix = waited >= THINKING_ELAPSED_AFTER_MS ? ` ${elapsedSeconds(this.startedAt, now)}s` : "";
+      const line = options.output === "progress" ? this.progressLine(now) : THINKING;
       return { blocks: [
-        { type: "thinking", text: [THINKING_CUSTOM_EMOJI, ` Thinking…${suffix}`] },
+        { type: "thinking", text: [THINKING_CUSTOM_EMOJI, ` ${line}${suffix}`] },
         ...this.waitingBlocks(),
       ] };
     }
@@ -327,12 +411,7 @@ export class AcpProjector {
     const blocks = items.flatMap((item, index) => {
       if (item.type === "assistant") return item.blocks;
       const live = !options.final && index === items.length - 1;
-      return [this.toolGroupBlock(
-        item.tools,
-        !options.final,
-        !options.final && options.expandStreamingTools,
-        live ? now : undefined,
-      )];
+      return [this.toolGroupBlock(item.tools, !options.final, live ? now : undefined)];
     });
     return { blocks: options.final ? blocks : [...blocks, ...this.waitingBlocks()] };
   }
@@ -351,15 +430,12 @@ export class AcpProjector {
     return rows;
   }
 
-  // A live group (the newest thing in a draft) ends with an elapsed counter.
-  // It is the last row on purpose: every heartbeat changes only those digits,
-  // so the client animates nothing above them.
-  private toolGroupBlock(
-    tools: ToolState[],
-    working: boolean,
-    expanded: boolean,
-    liveAt?: number,
-  ): RichBlock {
+  // A draft group stays open under a "Working..." label; the final message
+  // labels it with what was done and collapses it. A live group (the newest
+  // thing in a draft) ends with an elapsed counter. It is the last row on
+  // purpose: every heartbeat changes only those digits, so the client animates
+  // nothing above them.
+  private toolGroupBlock(tools: ToolState[], working: boolean, liveAt?: number): RichBlock {
     const blocks = this.rows(tools).map(({ tool, count }) => this.toolRow(tool, count));
     if (liveAt !== undefined) {
       const startedAt = Math.min(...tools.map((tool) => tool.startedAt));
@@ -369,7 +445,7 @@ export class AcpProjector {
       type: "details",
       summary: working ? "Working..." : completedToolSummary(tools, this.changedAt),
       blocks,
-      ...(expanded ? { is_open: true as const } : {}),
+      ...(working ? { is_open: true as const } : {}),
     };
   }
 
@@ -403,8 +479,10 @@ export class AcpProjector {
     };
   }
 
-  plainFinal(includeTools: boolean): string {
-    const parts = this.projected(includeTools).map((item) => {
+  plainFinal(output: OutputMode): string {
+    const all = this.projected();
+    const items: ProjectedItem[] = answerOnly(output) ? this.answer(all, false) : all;
+    const parts = items.map((item) => {
       if (item.type === "assistant") return item.markdown.trim();
       const rows = this.rows(item.tools).map(({ tool, count }) => {
         const { title: name, argument } = describeTool(tool);

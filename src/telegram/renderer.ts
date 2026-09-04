@@ -1,6 +1,6 @@
 import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { setTimeout as delay } from "node:timers/promises";
-import type { RendererConfig, Route } from "../types";
+import type { OutputMode, Route } from "../types";
 import { AcpProjector, type ProjectorChange } from "../fx/projector";
 import { StateStore } from "../state";
 import { TelegramApi, TelegramError } from "./api";
@@ -18,8 +18,13 @@ export function createDraftId(): number {
   return (crypto.getRandomValues(new Uint32Array(1))[0]! & 0x7fffffff) || 1;
 }
 
-export function streamsRoute(config: RendererConfig, route: Route): boolean {
-  return config.mode === "streaming" && route.chatKind === "private";
+/** Whether a mode drafts at all; groups never see drafts, whatever the mode. */
+export function streams(output: OutputMode): boolean {
+  return output === "live" || output === "progress";
+}
+
+export function streamsRoute(output: OutputMode, route: Route): boolean {
+  return streams(output) && route.chatKind === "private";
 }
 
 export function splitTelegramText(text: string, limit = 4_000): string[] {
@@ -69,18 +74,24 @@ export type TurnRendererOptions = {
    * frames arrive, and a frame that repeats after a long silence resets the
    * whole block. While a tool group is the newest thing on screen, re-render
    * this often so its elapsed counter grows at the tail and nothing before it
-   * is redrawn.
+   * is redrawn. Progress mode ticks faster: its frames are one short line.
    */
   heartbeatMs?: number;
   keepaliveMs?: number;
+  /** How often a turn without a draft renews Telegram's "typing…" status. */
+  typingMs?: number;
 };
 
 const HEARTBEAT_MS = 3_000;
+const PROGRESS_HEARTBEAT_MS = 1_000;
+/** Telegram clears the status after about five seconds, so renew it before then. */
+const TYPING_MS = 4_000;
 
 export class TurnRenderer {
   private stopped = false;
   private visibleOutput = false;
   private heartbeat?: ReturnType<typeof setInterval>;
+  private typing?: ReturnType<typeof setInterval>;
   readonly draftId = createDraftId();
   private readonly draftAbort = new AbortController();
   private readonly drafts: AdaptiveDraftScheduler<InputRichMessageWithoutUpload>;
@@ -90,10 +101,10 @@ export class TurnRenderer {
     private readonly api: TelegramApi,
     private readonly state: StateStore,
     private readonly route: Route,
-    private readonly config: RendererConfig,
+    private readonly output: OutputMode,
     private readonly projector: AcpProjector,
     private readonly signal?: AbortSignal,
-    limiter = new PeerDraftLimiter({ minGapMs: config.updateEveryMs }),
+    limiter = new PeerDraftLimiter(),
     private readonly options: TurnRendererOptions = {},
   ) {
     this.drafts = new AdaptiveDraftScheduler({
@@ -122,18 +133,27 @@ export class TurnRenderer {
   }
 
   private frame(): InputRichMessageWithoutUpload {
-    return this.projector.rich({
-      final: false,
-      expandStreamingTools: this.config.expandStreamingTools,
-    });
+    return this.projector.rich({ final: false, output: this.output });
   }
 
   start(): void {
-    if (!this.streaming || this.stopped) return;
+    if (this.stopped) return;
+    if (!this.streaming) {
+      // Nothing shows until the final message, so say that someone is working on it.
+      const type = () => {
+        if (this.stopped) return;
+        Promise.resolve()
+          .then(() => this.api.sendTyping(this.route.chatId, this.route.topicId, this.draftAbort.signal))
+          .catch(() => undefined);
+      };
+      type();
+      this.typing = setInterval(type, this.options.typingMs ?? TYPING_MS);
+      return;
+    }
     this.drafts.start(this.frame());
     this.heartbeat = setInterval(() => {
       if (!this.stopped) this.drafts.offer(this.frame(), "normal");
-    }, this.options.heartbeatMs ?? HEARTBEAT_MS);
+    }, this.options.heartbeatMs ?? (this.output === "progress" ? PROGRESS_HEARTBEAT_MS : HEARTBEAT_MS));
   }
 
   changed(change: ProjectorChange): void {
@@ -148,7 +168,9 @@ export class TurnRenderer {
   private stopDrafts(reason: string): Promise<void> {
     this.stopped = true;
     clearInterval(this.heartbeat);
+    clearInterval(this.typing);
     this.heartbeat = undefined;
+    this.typing = undefined;
     this.draftAbort.abort(new Error(reason));
     return this.drafts.stop();
   }
@@ -159,17 +181,13 @@ export class TurnRenderer {
   }
 
   private get streaming(): boolean {
-    return streamsRoute(this.config, this.route);
+    return streamsRoute(this.output, this.route);
   }
 
   async finish(input: { botId: string; inboxId: number; effectKey: string }): Promise<string[]> {
     await this.stopDrafts("draft finalized");
-    const rich = this.projector.rich({
-      final: true,
-      expandStreamingTools: this.config.expandStreamingTools,
-      includeTools: true,
-    });
-    const plain = this.projector.plainFinal(true);
+    const rich = this.projector.rich({ final: true, output: this.output });
+    const plain = this.projector.plainFinal(this.output);
     const outboxId = this.state.createOutbox({
       effectKey: input.effectKey,
       botId: input.botId,

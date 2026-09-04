@@ -10,6 +10,7 @@ import {
   type StatusStore,
   type TraceGlyph,
 } from "../status";
+import { OUTPUT_MODES, REPLY_STYLES, type OutputMode } from "../types";
 
 /**
  * The live wire: `telegram ── tgfx ── fx` as the status view.
@@ -23,7 +24,7 @@ import {
 
 export type TuiControls = {
   quit(): void;
-  setStreaming(on: boolean): void;
+  setOutput(output: OutputMode): void;
   setCustomIcons(on: boolean): void;
   setPaused(on: boolean): void;
 };
@@ -87,8 +88,8 @@ function Cells({ cells: list }: { cells: Cell[] }) {
 function Wire({ store, columns, now, tick }: { store: StatusStore; columns: number; now: number; tick: number }) {
   const { poll, routes, packets, settings, boot, bot } = store.snapshot();
   const left = `${bot ?? "telegram"} `;
-  const middle = " tgfx ";
-  const right = " fx";
+  const middle = " 𝒕𝒈(𝒇x) ";
+  const right = " 𝒇x";
   const running = routes.filter((route) => route.turn === "running");
   const suffix = running.length > 1 ? ` ×${running.length}` : "";
   const fixed = [...left].length + 1 + [...middle].length + 1 + 1 + [...right].length + [...suffix].length;
@@ -312,23 +313,42 @@ function PatchBay({ store, showLog, menuOpen }: { store: StatusStore; showLog: b
   );
 }
 
-/** How answers look in Telegram. Values show only while the menu is open. */
-type FormatOption = { name: string; on: boolean; hint: string; toggle(on: boolean): void };
+/**
+ * How answers look in Telegram. Values show only while the menu is open; each
+ * option cycles through its values, so a switch is a two-value select.
+ */
+type FormatOption = {
+  name: string;
+  value: string;
+  values: readonly string[];
+  /** How the value reads in the menu; dim when it means "off". */
+  label: string;
+  on: boolean;
+  hint: string;
+  set(value: string): void;
+};
 
 function formatOptions(store: StatusStore, controls: TuiControls): FormatOption[] {
   const { settings } = store.snapshot();
   return [
     {
-      name: "streaming", on: settings.streaming,
-      hint: "live draft in private chats, one final message in groups",
-      toggle: (on) => controls.setStreaming(on),
+      name: "style", value: settings.output, values: OUTPUT_MODES, label: REPLY_STYLES[settings.output].name, on: true,
+      hint: REPLY_STYLES[settings.output].hint,
+      set: (value) => controls.setOutput(value as OutputMode),
     },
     {
-      name: "icons", on: settings.customIcons,
+      name: "icons", value: settings.customIcons ? "on" : "off", values: ["on", "off"],
+      label: settings.customIcons ? "● on" : "○ off", on: settings.customIcons,
       hint: "custom emoji on tool rows and pickers",
-      toggle: (on) => controls.setCustomIcons(on),
+      set: (value) => controls.setCustomIcons(value === "on"),
     },
   ];
+}
+
+/** The value after the current one, wrapping; `step` -1 goes back. */
+function cycle(option: FormatOption, step: 1 | -1): string {
+  const current = option.values.indexOf(option.value);
+  return option.values[(current + step + option.values.length) % option.values.length]!;
 }
 
 function FormatMenu({ options, cursor }: { options: FormatOption[]; cursor: number }) {
@@ -337,12 +357,12 @@ function FormatMenu({ options, cursor }: { options: FormatOption[]; cursor: numb
       {options.map((option, index) => (
         <Box key={option.name}>
           <Text color="cyan">{index === cursor ? "    ▸ " : "      "}</Text>
-          <Text bold={index === cursor}>{option.name.padEnd(11)}</Text>
-          <Text color={option.on ? "green" : undefined} dimColor={!option.on}>{option.on ? "● on " : "○ off"}</Text>
-          <Text dimColor>{`    ${option.hint}`}</Text>
+          <Text bold={index === cursor}>{option.name.padEnd(9)}</Text>
+          <Text color={option.on ? "green" : undefined} dimColor={!option.on}>{option.label.padEnd(20)}</Text>
+          <Text dimColor>{`  ${option.hint}`}</Text>
         </Box>
       ))}
-      <Text dimColor>{"      ↑↓ move · space toggle · esc close"}</Text>
+      <Text dimColor>{"      ↑↓ move · ←→ change · esc close"}</Text>
     </Box>
   );
 }
@@ -383,9 +403,9 @@ export function Tui({ store, controls, columns, now = Date.now, animate = false 
     else if (menu.open && key.upArrow) setMenu((state) => ({ ...state, cursor: Math.max(0, state.cursor - 1) }));
     else if (menu.open && key.downArrow) {
       setMenu((state) => ({ ...state, cursor: Math.min(options.length - 1, state.cursor + 1) }));
-    } else if (menu.open && (input === " " || key.return)) {
+    } else if (menu.open && (input === " " || key.return || key.rightArrow || key.leftArrow)) {
       const option = options[menu.cursor];
-      if (option) option.toggle(!option.on);
+      if (option) option.set(cycle(option, key.leftArrow ? -1 : 1));
     }
   });
   const width = columns ?? stdout.columns ?? 80;

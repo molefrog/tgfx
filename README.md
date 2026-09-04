@@ -7,6 +7,7 @@ Telegram. Works with your locally installed 𝒇x, and provides as much latest T
 
 - [x] Rich replies: markdown, tables, code blocks, spoilers, TeX math
 - [x] Live streaming while the agent works, renders tool calls nicely
+- [x] Four reply styles (`/format`), from a quiet final answer to a live draft with tool activity
 - [x] Can work in DMs and groups
 - [x] Can send stickers and send reactions
 - [x] Interactive model picker (`/model`)
@@ -46,6 +47,28 @@ skip 𝒇x's permission checks.
 
 On the first run it asks for your bot token and pairs you as the owner: scan a
 QR code or tap a link. To change or remove the token later, run `tgfx auth`.
+Everything tgfx remembers about a folder lives under `~/.fx/telegram/`; nothing
+is written into the project.
+
+## Reply style
+
+Pick how answers reach Telegram with `--output <mode>` for one run, press
+`f` in the running terminal, or send `/format` to the bot and tap a button.
+Either way the choice applies to the next turn and is saved for this project:
+
+```text
+answer     Final answer         send the answer when the turn finishes
+report     Final with activity  send the answer with collapsed tool activity
+progress   Live answer          show live status, then stream the final answer
+live       Live with activity   stream the answer and tool activity as they happen (default)
+```
+
+Groups always get one message. Set a machine-wide default in
+`~/.fx/telegram/config.json`:
+
+```json
+{ "defaults": { "output": "progress" } }
+```
 
 ## MCP
 
@@ -69,6 +92,7 @@ To turn it off, start with `tgfx --no-icons`.
 ```text
 tgfx           run fx in this folder (sets up on first run)
 tgfx --yolo    same, without fx permission checks
+tgfx --output  answer · report · progress · live
 tgfx allow     let more users or chats talk to the bot (no id: pair by QR code)
 tgfx auth      add, rotate, or remove the bot token
 tgfx doctor    diagnostics: token, chats, rights, fx

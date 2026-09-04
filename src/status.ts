@@ -6,6 +6,8 @@
  * be tested from events alone.
  */
 
+import type { OutputMode } from "./types";
+
 export type RouteLabel = {
   key: string;
   /** What a person recognises: the sender's name in a private chat, the chat title in a group. */
@@ -37,7 +39,7 @@ export type BootStep = "fx" | "telegram" | "lock" | "menus" | "polling";
 export const BOOT_STEPS: BootStep[] = ["fx", "telegram", "lock", "menus", "polling"];
 export type BootState = { state: "pending" | "running" | "done" | "failed"; detail?: string };
 
-export type Settings = { streaming: boolean; customIcons: boolean; paused: boolean; yolo: boolean };
+export type Settings = { output: OutputMode; customIcons: boolean; paused: boolean; yolo: boolean };
 
 export type RouteStatus = RouteLabel & {
   who: string;
@@ -92,7 +94,7 @@ export class StatusStore {
     settings: Partial<Settings> = {},
     private readonly clock: () => number = () => Date.now(),
   ) {
-    this.settings = { streaming: true, customIcons: true, paused: false, yolo: false, ...settings };
+    this.settings = { output: "live", customIcons: true, paused: false, yolo: false, ...settings };
     this.poll = { state: "listening", retryMs: 0, since: this.clock() };
   }
 

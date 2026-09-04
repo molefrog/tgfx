@@ -90,9 +90,10 @@ Telegram Bot API:
    asking the user to look up IDs. Advanced setup can instead accept one numeric
    user or chat ID and a separate approvals chat; more principals can be added
    later with `tgfx allow`. No wildcard access exists in v1.
-4. tgfx acquires the machine-wide bot lock, writes non-secret settings to
-   `.fx/telegram/config.json`, opens the bot's shared journal at
-   `~/.fx/telegram/state/<bot_id>.db`, and begins long polling. FX
+4. tgfx acquires the machine-wide bot lock, writes the project's non-secret
+   settings to `~/.fx/telegram/projects/<folder>-<hash>.json`, opens the bot's
+   shared journal at `~/.fx/telegram/state/<bot_id>.db`, and begins long
+   polling. FX
    ACP processes are created lazily, one per active route. When the user supplied
    `tgfx --model <id>`, each process launches as `fx acp --model <id>` with the
    model ID as a separate argument.
@@ -130,7 +131,8 @@ Telegram Bot API:
     originating chat shows that work is waiting.
 12. With default settings, a private chat sees a live rich draft containing
     structured prose and ordered groups of completed tools. A group, or any chat
-    using `--no-streaming`, waits for one permanent rich response.
+    in the `answer` or `report` output mode, sees Telegram's "typing…" status
+    until one permanent rich response arrives.
     Tool rows stay compact and never include tool results. Telegram's Stop button
     cancels the active FX turn only when its draft ID matches the route's current draft.
 13. The next message in the same chat and topic continues the same FX route and
@@ -192,15 +194,16 @@ If the selected bot has no token, tgfx asks for it in a hidden prompt:
 │  https://t.me/my_fx_bot?start=tgfx_<one-time-nonce>
 │  Open this link and press Start.
 ◆  Connected Mole Frog (@molefrog)
-@my_fx_bot · polling · /Users/me/code/my-project · streaming
+@my_fx_bot · polling · /Users/me/code/my-project · live
 ```
 
-Setup asks nothing that a good default already answers: streaming keeps its
-default and stays adjustable with flags or config.
+Setup asks nothing that a good default already answers: the output mode keeps
+its default and stays adjustable with flags or config.
 
 The token is validated with Telegram's `getMe` before it is saved. The terminal
 shows the bot identity and asks before replacing a different configured bot. The
-confirmed bot ID is written to this workspace's `.fx/telegram/config.json`.
+confirmed bot ID is written to this workspace's project file under
+`~/.fx/telegram/projects/`; the workspace itself stays untouched.
 
 After resolving the bot ID, tgfx acquires a machine-wide process lock for that
 bot before it begins polling. A lock is global to the user account, not stored in
@@ -257,8 +260,9 @@ the turn ends the line stays for 24 hours, showing the outcome and how long
 ago it finished, with running turns sorted above finished ones. After that it
 collapses to a summary of the last turn.
 
-The last line holds the switches: `f` opens a format menu (streaming, custom
-icons) navigated with arrows and space, `p` pauses polling without
+The last line holds the switches: `f` opens a format menu (reply style, custom
+icons) navigated with arrows, whose changes apply to the next turn and are
+saved as this project's own settings, `p` pauses polling without
 acknowledging anything, `l` shows a tail of the log beneath, and `q` quits.
 `✓ yolo` appears when FX permission checks are off for this run.
 
@@ -266,7 +270,7 @@ The view needs a terminal on both ends and a workspace that is already set up.
 `--json`, `--no-tui`, and non-TTY runs print the plain append-only log instead:
 
 ```text
-@my_fx_bot · polling · /Users/me/code/my-project · streaming
+@my_fx_bot · polling · /Users/me/code/my-project · live
 12:04:11 123456789 · turn started
 12:04:19 123456789 · delivered 1 message · 8.2s
 ```
@@ -326,12 +330,29 @@ which the normal recovery pass then delivers from the new folder.
 
 ### In Telegram
 
-In a private chat, an ordinary allowed message starts a turn. With the default
-streaming mode, the user first sees one temporary thinking placeholder. It
-disappears as soon as structured prose or a completed tool is available, and the
-rich draft then grows as FX responds. When the turn finishes, the draft becomes a
-permanent rich message. With `--no-streaming`, the user sees only that final
-message.
+In a private chat, an ordinary allowed message starts a turn. What the user
+sees depends on the output mode:
+
+- `live` (the default): one temporary thinking placeholder, which disappears as
+  soon as structured prose or a named tool is available; the rich draft then
+  grows with prose and open tool groups as FX responds. When the turn finishes,
+  the draft becomes a permanent rich message with collapsed tool groups.
+- `progress`: the placeholder stays and names what FX is doing, roughly
+  (`Reading files…`, `Running commands…`, `Thinking…`), never showing
+  arguments. A new activity shows as soon as FX starts it; the line only waits
+  a couple of seconds before falling back to `Thinking…`, so the gap between
+  two tools does not flicker. Its elapsed counter ticks every second. Prose
+  that follows the last tool streams in as the answer. The final message is
+  the answer alone.
+- `report`: the "typing…" status until the turn ends, then the same final
+  message `live` produces: the answer with collapsed tool groups.
+- `answer`: the "typing…" status until the turn ends, then the answer alone.
+  Narration before a tool call, and a tool call after the answer (a reaction, a
+  sent file), are left out.
+
+Whenever a turn has no draft, in these two modes and in every group, the chat
+shows the bot as typing from the moment the turn starts until its message
+arrives or it is cancelled.
 
 In a group, tgfx reacts only to `/compact`, a reply to the bot, or a configured
 mention. It does not read normal
@@ -360,6 +381,7 @@ tgfx currently exposes four Telegram slash commands:
 | `/clear` | Start a fresh FX conversation for the active route and make it current. |
 | `/compact` | Compact the active route's FX conversation. |
 | `/model` | Choose a model from the live FX ACP model catalog. |
+| `/format` | Choose the reply style: a card listing the four output modes with a 2×2 button grid, the current one ticked. A tap applies to the next turn and is saved as this project's setting; the card is stateless, so an old one keeps working. |
 | `/cost` | Show FX's local usage and spend over 24-hour, 7-day, or 30-day windows. |
 
 Other commands advertised by ACP `available_commands_update` are recorded but
@@ -374,7 +396,7 @@ The Telegram command surface is explicit rather than a generic ACP projection.
 1. tgfx authorizes the Telegram sender and route before interpreting any
    command. Telegram's visible command menu is discoverability, not an access
    control boundary.
-2. Only `/clear`, `/compact`, `/model`, and `/cost` are accepted. Every other slash
+2. Only `/clear`, `/compact`, `/model`, `/format`, and `/cost` are accepted. Every other slash
    command receives an unknown command response and is never downgraded into an
    ordinary model prompt.
 3. `/clear` closes the loaded route session, resets that route's session
@@ -395,16 +417,16 @@ The Telegram command surface is explicit rather than a generic ACP projection.
 7. tgfx invokes FX with one ACP text block:
    `{ "type": "text", "text": "/compact" }`. It suppresses generic ACP command
    output and owns the Telegram progress UI.
-8. In private streaming mode, tgfx sends a rich draft whose sole block is a
+8. In a private chat with a live output mode, tgfx sends a rich draft whose sole block is a
    draft-only Thinking block containing the recommended thinking custom emoji
    and `Compacting conversation...`. Success is persisted visibly with a new
    rich message containing `✓ Conversation compacted`.
-9. With streaming disabled, and in groups, tgfx sends a regular rich paragraph
+9. In the `answer` and `report` modes, and in groups, tgfx sends a regular rich paragraph
    with the same progress label and edits that message in place to
    `✓ Conversation compacted`.
 
 tgfx uses Telegram `setMyCommands` with a chat-specific scope for each allowed
-chat. It installs only the explicit `/clear`, `/compact`, `/model`, and `/cost` list
+chat. It installs only the explicit `/clear`, `/compact`, `/model`, `/format`, and `/cost` list
 without overwriting the bot's default or BotFather-managed command list. On a
 clean handoff it removes the chat-scoped list it owned, revealing any broader
 Telegram configuration underneath. The menu is available before an FX session
@@ -424,7 +446,7 @@ The intended commands are deliberately limited. Each is one verb, one idea:
 | `tgfx auth [--remove]` | Add, rotate, or remove the Telegram bot token. |
 | `tgfx doctor` | Check FX, Telegram, the approvals chat, live admin rights, SQLite, and workspace access. |
 
-The run flags are `--model <id>`, `--yolo`, `--streaming`/`--no-streaming`,
+The run flags are `--model <id>`, `--yolo`, `--output <mode>`,
 `--no-icons`, and `--no-tui`; `--json`, `--no-color`, and `--debug` are global.
 Human-readable output is the default and `--json` is the machine
 mode everywhere. Conversational output — banners, prompts, errors, hints — goes
@@ -435,22 +457,24 @@ stays clean.
 | --- | --- | --- |
 | `--model <id>` | FX default/session model | Pass `<id>` directly as `fx acp --model <id>` for this run. The value is not saved by tgfx. |
 | `--yolo` | off (FX auto mode) | Disable FX permission checks for this process through `FX_PERMISSION_MODE=yolo`. tgfx's Telegram-admin approval layer remains active. |
-| `--streaming` / `--no-streaming` | streaming | Stream a private draft, or wait for one final response. The final response includes collapsed, labeled tool groups in either mode. |
+| `--output <mode>` | `live` | How a turn reaches Telegram, shown in menus as the reply style: `answer` (Final answer: one message, the answer alone), `report` (Final with activity: one message, the answer with collapsed tool groups), `progress` (Live answer: a live status line, then the answer streams in), or `live` (Live with activity: a live draft with every tool call). Groups always get one message. |
 | `--no-icons` | off (`customIcons` true) | Plain buttons and tool rows instead of the `tgfx icons` custom emoji set. |
 | `--no-tui` | off | Print the plain append-only log instead of the live status view. |
 | `--json` | off | Emit terminal events as JSON Lines with a typed `event` field. |
 | `--no-color` | off | Disable terminal color (NO_COLOR is also honored). |
 | `--debug` | off | Show stack traces behind the one-line error output. |
 
-Stable defaults may be written to the project's `.fx/telegram/config.json`, and
-machine-wide defaults for the renderer and model picker to
-`~/.fx/telegram/config.json`; the project file wins where both set a value.
-Command-line flags win for the current run. Environment variables are reserved
-for secrets and automation, not for a second large configuration system.
+Every project has one file under `~/.fx/telegram/projects/`, named after the
+folder plus a hash of its full path, and machine-wide defaults for the settings
+live in `~/.fx/telegram/config.json`; the project file wins where both set a
+value. Command-line flags win for the current run. Environment variables are
+reserved for secrets and automation, not for a second large configuration
+system.
 
 ```json
 {
   "version": 1,
+  "workspace": "/Users/me/code/my-project",
   "activeBotId": "123456789",
   "access": {
     "userIds": ["123456789"],
@@ -460,16 +484,18 @@ for secrets and automation, not for a second large configuration system.
     "chatId": "123456789",
     "topicId": "0"
   },
-  "streaming": true,
-  "expandStreamingTools": true,
-  "updateEveryMs": 250,
+  "output": "live",
   "customIcons": true
 }
 ```
 
 Settings are flat keys; `access` and `approvals` stay structured because they
-are. Omitted settings inherit the machine-wide defaults, and commands that
-change access or approvals keep those settings omitted.
+are. Omitted settings inherit the machine-wide defaults (`{ "defaults": {
+"output": "live", "customIcons": true } }`), and commands that change access or
+approvals keep those settings omitted. The format menu in the running terminal
+is how a project gets its own values: a switch flipped there is written to the
+project file. The draft update rate is not a setting:
+tgfx stays inside Telegram's per-peer draft limits on its own.
 
 The token does not belong in this file. Allowlist and approvals-target IDs do:
 they are explicit workspace configuration, not model context or transient
@@ -1005,11 +1031,12 @@ The primary renderer maps the ACP timeline to Telegram Rich Messages:
 - adjacent Markdown paragraphs receive a non-breaking-space-only spacer block
   because Telegram clients render neighboring paragraph blocks without visible
   margins and collapse repeated newlines inside one paragraph;
-- one draft-only `tg-thinking` block is shown only before any real output exists;
-- only terminal tool calls are rendered, in their first-observed ACP order;
+- one draft-only `tg-thinking` block is shown only before any real output
+  exists; in `progress` mode it stays while tools run and names the activity;
+- only named or terminal tool calls are rendered, in their first-observed ACP
+  order, and only in the `live` and `report` modes;
 - consecutive tools form a details block. Every draft group keeps the
-  `Working...` label and stays open until finalization when
-  `expandStreamingTools` is true (the default). The final message uses
+  `Working...` label and stays open until finalization. The final message uses
   formatted activity labels and collapses every group;
 - consecutive calls that print the same row fold into one row with a count;
 - the newest draft group ends with an elapsed counter (`⏱ 12s`) and the
@@ -1085,16 +1112,15 @@ tgfx uses a few small storage locations:
 | Location | Contents | Lifetime |
 | --- | --- | --- |
 | OS credential store through `Bun.secrets` | Telegram bot token, keyed by actual bot ID | Until the user removes or rotates it. Bun uses macOS Keychain, Linux Secret Service/libsecret, or Windows Credential Manager. |
-| `~/.fx/telegram/config.json` | Machine-wide renderer/model-picker defaults | Until removed. |
+| `~/.fx/telegram/config.json` | Machine-wide defaults for the output mode and custom icons | Until removed. |
+| `~/.fx/telegram/projects/<folder>-<hash>.json` | One per workspace: its path, active bot ID, allowlist, approvals target, and any setting it overrides | Until removed. |
 | `~/.fx/telegram/state/<bot_id>.db` | The bot's journal: poll cursor, routes, FX session references, owning workspace, and temporary inbox/outbox/effect/approval recovery rows | Operational; completed payloads expire. |
 | `~/.fx/telegram/state/<bot_id>.lock` | Machine-wide process lock, held in SQLite exclusive locking mode | Held while that bot is active; released by the kernel on process death. |
 | `~/.fx/telegram/state/<bot_id>.info.json` | Diagnostic workspace/PID metadata for the lock holder | While that bot is active. |
 | `~/.fx/telegram/files/<bot_id>/` | Attachments explicitly downloaded for the agent | Temporary; cleaned by age. Scoped refs expire independently. |
-| `<workspace>/.fx/telegram/config.json` | Active bot ID, allowlist, approvals target, and renderer overrides | Project-local. |
 
-The layout follows fx's own `~/.fx` convention (`TGFX_HOME` overrides it). The
-project's `.fx/telegram/` holds only non-secret configuration; whether to commit
-or ignore it is the project's choice. FX authentication, settings, project
+The layout follows fx's own `~/.fx` convention (`TGFX_HOME` overrides it).
+Nothing is written into the workspace. FX authentication, settings, project
 instructions, permissions, and saved agent sessions remain in FX's own storage.
 tgfx does not copy them.
 
@@ -1408,7 +1434,7 @@ surface. Versions are pinned in the lockfile and upgraded deliberately.
   log file.
 - Downloaded and generated paths are canonicalized and must remain inside the
   workspace or the bot's `~/.fx/telegram/files/<bot_id>` directory; the rest of
-  `~/.fx/telegram` and the project's `.fx/telegram` are never sendable.
+  `~/.fx/telegram` is never sendable.
 
 ## Important edge cases
 

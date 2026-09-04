@@ -1,4 +1,5 @@
 import { parseArgs as parseNodeArgs } from "node:util";
+import { OUTPUT_MODES } from "../types";
 import { VERSION } from "../version";
 
 /**
@@ -116,7 +117,7 @@ export function helpText(): string {
     line("tgfx auth [--remove]", "add, rotate, or remove the bot token"),
     line("tgfx doctor", "deep diagnostics: token, chats, rights, fx"),
     "",
-    `  ${dim("run flags:")}  --model <id> · --yolo · --streaming/--no-streaming · --no-icons · --no-tui`,
+    `  ${dim("run flags:")}  --model <id> · --yolo · --output ${OUTPUT_MODES.join("|")} · --no-icons · --no-tui`,
     `  ${dim("while running:")} f format menu · p pause polling · l log tail · q quit`,
     `  ${dim("global:")}     --json · --no-color · --debug · --help · --version`,
     "",

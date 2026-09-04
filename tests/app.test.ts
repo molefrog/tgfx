@@ -5,10 +5,10 @@ import { join, resolve } from "node:path";
 import type { InputRichMessageWithoutUpload, Message, Update } from "grammy/types";
 import { TgfxApp } from "../src/app";
 import type { StatusEvent } from "../src/status";
-import { workspacePaths, type WorkspacePaths } from "../src/config";
+import { loadConfig, saveConfig, workspacePaths, type WorkspacePaths } from "../src/config";
 import { StateStore } from "../src/state";
 import type { TelegramApi } from "../src/telegram/api";
-import type { TgfxConfig } from "../src/types";
+import type { OutputMode, TgfxConfig } from "../src/types";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -58,7 +58,7 @@ describe("tgfx host pipeline", () => {
       activeBotId: "100",
       access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
@@ -68,6 +68,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) {
           firstPoll = false;
@@ -121,6 +122,31 @@ describe("tgfx host pipeline", () => {
     } finally { state.close(); }
   });
 
+  test("saves a switch flipped in the terminal view as the project's own setting", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-settings-"));
+    temporary.push(workspace);
+    const paths = testPaths(workspace);
+    const config: TgfxConfig = {
+      version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
+      approvals: { chatId: "42", topicId: "0" }, output: "live", customIcons: true,
+    };
+    await saveConfig(paths, config);
+    const telegram = { deleteCommands: async () => true as const } as unknown as TelegramApi;
+    const app = new TgfxApp({
+      config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
+      telegram, fxBinary: "fx", log: () => undefined,
+    });
+    app.setOutput("progress");
+    expect(app.settings().output).toBe("progress");
+    const deadline = Date.now() + 2_000;
+    while ((await loadConfig(paths))?.output !== "progress") {
+      if (Date.now() > deadline) throw new Error("the setting was not saved");
+      await Bun.sleep(5);
+    }
+    expect(JSON.parse(await readFile(paths.config, "utf8")).customIcons).toBeUndefined();
+    await app.stop();
+  });
+
   test("uses the model-picker custom icon flag for MCP and FX tool rows", async () => {
     const run = async (customIcons: boolean) => {
       const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-mcp-icons-"));
@@ -130,7 +156,7 @@ describe("tgfx host pipeline", () => {
       const config: TgfxConfig = {
         version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
         approvals: { chatId: "42", topicId: "0" },
-        streaming: false, expandStreamingTools: true, updateEveryMs: 10,
+        output: "report",
         customIcons,
       };
       let firstPoll = true;
@@ -140,6 +166,7 @@ describe("tgfx host pipeline", () => {
       const permanent = new Promise<void>((resolve) => { delivered = resolve; });
       const telegram = {
         getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
         getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
           if (firstPoll) { firstPoll = false; return [update(1, 42, "MCP_TOOL FX_TOOL")]; }
           return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -191,7 +218,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const stickerUpdate = update(1, 42, "") as any;
     delete stickerUpdate.message.text;
@@ -205,6 +232,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) { firstPoll = false; return [stickerUpdate as Update]; }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -253,7 +281,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     let poll = 0;
     let deliveries = 0;
@@ -261,6 +289,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         poll += 1;
         if (poll === 1) return [update(1, 42, "first message")];
@@ -303,7 +332,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const texts: string[] = [];
     let phase = 0;
@@ -314,6 +343,7 @@ describe("tgfx host pipeline", () => {
     const cancellation = new Promise<void>((resolve) => { cancelled = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -375,7 +405,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      output: "live",
       customIcons: false,
     };
     const sequence: string[] = [];
@@ -389,6 +419,7 @@ describe("tgfx host pipeline", () => {
     const cancellation = new Promise<void>((resolve) => { cancelled = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) { phase = 1; return [update(1, 42, "WAIT")]; }
         if (phase === 1) {
@@ -447,7 +478,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     const texts: string[] = [];
     const menus: Array<Array<{ command: string }>> = [];
@@ -458,6 +489,7 @@ describe("tgfx host pipeline", () => {
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) {
           firstPoll = false;
@@ -500,7 +532,7 @@ describe("tgfx host pipeline", () => {
     expect(texts).toContain("Unknown command /status.");
     expect(texts).toContain("✓ Started a fresh conversation");
     const commands = menus.at(-1)?.map((entry) => entry.command) ?? [];
-    expect(commands).toEqual(["clear", "compact", "model", "cost"]);
+    expect(commands).toEqual(["clear", "compact", "model", "format", "cost"]);
     expect(drafts).toEqual([{
       blocks: [{
         type: "thinking",
@@ -531,7 +563,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10,
+      output: "live",
       customIcons: false,
     };
     let phase = 0;
@@ -563,6 +595,7 @@ describe("tgfx host pipeline", () => {
     } as Update);
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -641,7 +674,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     let phase = 0;
     let sevenDayCallback = "";
@@ -654,6 +687,7 @@ describe("tgfx host pipeline", () => {
     const callbackAnswers: string[] = [];
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -716,7 +750,7 @@ describe("tgfx host pipeline", () => {
     expect(events.filter((entry) => entry.event === "usage").map((entry) => entry.value.period)).toEqual(["24h", "7d"]);
   });
 
-  test("edits one regular progress message for /compact when streaming is disabled", async () => {
+  test("edits one regular progress message for /compact in report mode", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-compact-final-"));
     temporary.push(workspace);
     const paths = testPaths(workspace);
@@ -724,7 +758,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: false, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "report", customIcons: true,
     };
     const sent: InputRichMessageWithoutUpload[] = [];
     const edits: Array<{ messageId: number; rich: InputRichMessageWithoutUpload }> = [];
@@ -733,6 +767,7 @@ describe("tgfx host pipeline", () => {
     const completed = new Promise<void>((resolve) => { edited = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) {
           firstPoll = false;
@@ -788,7 +823,7 @@ describe("tgfx host pipeline", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+      output: "live", customIcons: true,
     };
     let phase = 0;
     let approvalData!: string;
@@ -800,6 +835,7 @@ describe("tgfx host pipeline", () => {
     const markupEdits: unknown[] = [];
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (phase === 0) {
           phase = 1;
@@ -871,13 +907,14 @@ describe("tgfx status feed", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: false,
+      output: "live", customIcons: false,
     };
     let firstPoll = true;
     let delivered!: () => void;
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         if (firstPoll) { firstPoll = false; return [update(1, 42, "hello")]; }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
@@ -923,7 +960,7 @@ describe("tgfx status feed", () => {
     const config: TgfxConfig = {
       version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
       approvals: { chatId: "42", topicId: "0" },
-      streaming: true, expandStreamingTools: true, updateEveryMs: 10, customIcons: false,
+      output: "live", customIcons: false,
     };
     let resumed = false;
     let pollsBeforeResume = 0;
@@ -934,6 +971,7 @@ describe("tgfx status feed", () => {
     const first = new Promise<void>((resolve) => { firstPolled = resolve; });
     const telegram = {
       getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
       getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
         polls++;
         if (!resumed) pollsBeforeResume++;
@@ -1012,7 +1050,7 @@ function resolvedLabel(edit: EditedMarkup): string {
 /** A running app over the fake fx and a scripted Telegram that records every call. */
 async function permissionHarness(options: {
   approvals: { chatId: string; topicId: string };
-  streaming?: boolean;
+  output?: OutputMode;
   timeoutMs?: number;
   seed?: (state: StateStore) => void;
 }) {
@@ -1023,8 +1061,7 @@ async function permissionHarness(options: {
   const fxBinary = await fakeFx(workspace, logPath);
   const config: TgfxConfig = {
     version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: [] },
-    approvals: options.approvals, streaming: options.streaming ?? false,
-    expandStreamingTools: true, updateEveryMs: 10, customIcons: true,
+    approvals: options.approvals, output: options.output ?? "report", customIcons: true,
   };
   if (options.seed) {
     const seeded = new StateStore(paths.database);
@@ -1054,6 +1091,7 @@ async function permissionHarness(options: {
   const polling = Promise.withResolvers<void>();
   const telegram = {
     getWebhookInfo: async () => ({ url: "" }),
+      sendTyping: async () => true as const,
     getUpdates: async (_offset: number, _timeout: number, signal?: AbortSignal) => {
       polling.resolve();
       while (!queue.length) {
@@ -1155,7 +1193,7 @@ describe("fx permission cards", () => {
   });
 
   test("shows the wait in the live draft and drops it from the final message", async () => {
-    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, streaming: true });
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "live" });
     h.deliver([update(1, 42, "PERMISSION")]);
     const card = await h.card();
     await h.until<Draft>((event) => event.kind === "draft" && JSON.stringify(event.rich).includes("approval"), "waiting draft");
@@ -1216,7 +1254,7 @@ describe("fx permission cards", () => {
   });
 
   test("rejects and marks the card when the draft is stopped", async () => {
-    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, streaming: true });
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "live" });
     h.deliver([update(1, 42, "PERMISSION")]);
     await h.card();
     const draft = await h.until<Draft>((event) => event.kind === "draft", "draft");
@@ -1253,5 +1291,33 @@ describe("fx permission cards", () => {
     try {
       expect(state.interaction("stale")?.state).toBe("expired");
     } finally { state.close(); }
+  });
+});
+
+describe("/format", () => {
+  test("sends the reply-style card and a button switches the output for the next turn", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "report" });
+    h.deliver([update(1, 42, "/format")]);
+    const card = await h.until<SentText>((event) => event.kind === "sendText" && buttons(event).some((button) => button.callback_data.startsWith("fmt:")), "format card");
+    expect(card.chat).toBe("42");
+    expect(card.markup?.inline_keyboard.map((row) => row.length)).toEqual([2, 2]);
+    expect(buttons(card).find((button) => button.callback_data === "fmt:report")?.text).toStartWith("✓");
+
+    h.deliver([callbackUpdate(2, OWN_CHAT, 42, "fmt:progress", card.messageId)]);
+    const edited = await h.until<EditedText>((event) => event.kind === "editText" && event.messageId === card.messageId, "card update");
+    expect(edited.text).toContain("✓ <b>Live answer</b>");
+    expect(h.app.settings().output).toBe("progress");
+    expect(h.answers()).toContain("Reply style: Live answer");
+    while ((await loadConfig(h.paths))?.output !== "progress") await Bun.sleep(10);
+    await h.stop();
+  });
+
+  test("rejects an unknown style without changing anything", async () => {
+    const h = await permissionHarness({ approvals: { chatId: "42", topicId: "0" }, output: "report" });
+    h.deliver([callbackUpdate(1, OWN_CHAT, 42, "fmt:loud", 500)]);
+    await h.until((event) => event.kind === "answer", "callback answer");
+    expect(h.answers()).toEqual(["Unknown reply style"]);
+    expect(h.app.settings().output).toBe("report");
+    await h.stop();
   });
 });

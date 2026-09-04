@@ -146,6 +146,13 @@ export class TelegramApi {
     ));
   }
 
+  /** Telegram shows the status for about five seconds, or until the bot sends a message. */
+  async sendTyping(chatId: string, topicId = "0", signal?: AbortSignal): Promise<true> {
+    return this.call(() => this.api.sendChatAction(chatId, "typing", {
+      ...(topicId === "0" ? {} : { message_thread_id: Number(topicId) }),
+    }, signal));
+  }
+
   async answerCallback(callbackQueryId: string, text?: string): Promise<true> {
     return this.call(() => this.api.answerCallbackQuery(callbackQueryId, text ? { text } : {}));
   }

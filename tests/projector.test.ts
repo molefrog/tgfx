@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { InputRichMessageWithoutUpload } from "grammy/types";
 import { AcpProjector } from "../src/fx/projector";
+import type { OutputMode } from "../src/types";
 
 type RichBlock = NonNullable<InputRichMessageWithoutUpload["blocks"]>[number];
 type DetailsBlock = Extract<RichBlock, { type: "details" }>;
@@ -16,12 +17,12 @@ const WORKING_SUMMARY = "Working...";
 /** The newest draft group ends with an elapsed counter; tests run within its first second. */
 const ELAPSED_ROW = { type: "paragraph" as const, text: "⏱ 1s" };
 
-function draft(projector: AcpProjector, expandStreamingTools = true): RichBlock[] {
-  return projector.rich({ final: false, expandStreamingTools }).blocks ?? [];
+function draft(projector: AcpProjector, output: OutputMode = "live"): RichBlock[] {
+  return projector.rich({ final: false, output }).blocks ?? [];
 }
 
-function final(projector: AcpProjector): RichBlock[] {
-  return projector.rich({ final: true, expandStreamingTools: true }).blocks ?? [];
+function final(projector: AcpProjector, output: OutputMode = "live"): RichBlock[] {
+  return projector.rich({ final: true, output }).blocks ?? [];
 }
 
 function details(block: RichBlock | undefined): DetailsBlock {
@@ -189,12 +190,6 @@ describe("ordered ACP projector", () => {
     expect(details(blocks[2]).is_open).toBeTrue();
     expect(details(blocks[2]).summary).toEqual(WORKING_SUMMARY);
 
-    const alwaysCollapsed = draft(projector, false);
-    expect(details(alwaysCollapsed[0]).is_open).toBeUndefined();
-    expect(details(alwaysCollapsed[0]).summary).toEqual(WORKING_SUMMARY);
-    expect(details(alwaysCollapsed[2]).summary).toEqual(WORKING_SUMMARY);
-    expect(details(alwaysCollapsed[2]).is_open).toBeUndefined();
-
     const finalBlocks = final(projector);
     expect(details(finalBlocks[0]).is_open).toBeUndefined();
     expect(details(finalBlocks[2]).is_open).toBeUndefined();
@@ -236,7 +231,7 @@ describe("ordered ACP projector", () => {
       { type: "paragraph", text: ["Running command", " ", { type: "code", text: "bun test" }] },
       ELAPSED_ROW,
     ]);
-    expect(projector.plainFinal(true)).toContain("Running command bun test");
+    expect(projector.plainFinal("live")).toContain("Running command bun test");
 
     // Finishing changes nothing visible in the row, so no redraw is requested.
     expect(projector.apply(update({ sessionUpdate: "tool_call_update", toolCallId: "cmd", status: "completed" }))).toBe("none");
@@ -287,8 +282,8 @@ describe("ordered ACP projector", () => {
     });
 
     expect(details(final(projector)[0]).blocks).toEqual([{ type: "paragraph", text: "Reading guidelines" }]);
-    expect(projector.plainFinal(true)).toContain("Reading guidelines");
-    expect(projector.plainFinal(true)).not.toContain("telegram://");
+    expect(projector.plainFinal("live")).toContain("Reading guidelines");
+    expect(projector.plainFinal("live")).not.toContain("telegram://");
   });
 
   test("uses the MCP server icon for resource reads through mcp_features", () => {
@@ -314,7 +309,7 @@ describe("ordered ACP projector", () => {
     expect(rendered(blocks)).not.toContain("I'll start by reading");
     expect(rendered(blocks)).toContain("Reading guidelines");
     expect(rendered(blocks)).toContain("Hey! What's up?");
-    expect(projector.plainFinal(true)).not.toContain("I'll start by reading");
+    expect(projector.plainFinal("live")).not.toContain("I'll start by reading");
   });
 
   test("keeps assistant text before a first tool that is not the guidelines read", () => {
@@ -337,12 +332,12 @@ describe("ordered ACP projector", () => {
 
     const summary = "Ran 2 commands, wrote 1 file, read 1 file, searched files + 1 more";
     expect(details(final(projector)[0]).summary).toBe(summary);
-    expect(projector.plainFinal(true).split("\n")[0]).toBe(summary);
+    expect(projector.plainFinal("live").split("\n")[0]).toBe(summary);
 
     const unknown = new AcpProjector();
     finished(unknown, "future", "future_tool", { x: 1 });
     expect(details(final(unknown)[0]).summary).toBe("Worked for 1s");
-    expect(unknown.plainFinal(true).split("\n")[0]).toBe("Worked for 1s");
+    expect(unknown.plainFinal("live").split("\n")[0]).toBe("Worked for 1s");
   });
 
   test("omits failed tools from activity summaries but still lists them", () => {
@@ -353,7 +348,7 @@ describe("ordered ACP projector", () => {
     const group = details(final(projector)[0]);
     expect(group.summary).toBe("Ran 1 command");
     expect(rendered(group.blocks)).toContain("Loading skill");
-    expect(projector.plainFinal(true).split("\n")[0]).toBe("Ran 1 command");
+    expect(projector.plainFinal("live").split("\n")[0]).toBe("Ran 1 command");
   });
 
   test("adds server custom emoji to MCP tool rows only when icons are supplied", () => {
@@ -554,7 +549,7 @@ describe("ordered ACP projector", () => {
 
     const draftOutput = rendered(draft(projector));
     const finalOutput = rendered(final(projector));
-    const plain = projector.plainFinal(true);
+    const plain = projector.plainFinal("live");
     for (const output of [draftOutput, finalOutput, plain]) {
       expect(output).not.toContain(token);
       expect(output).toContain("[redacted Telegram token]");
@@ -611,7 +606,7 @@ describe("ordered ACP projector", () => {
     expect(rows[1]).toContain("Waiting for command ×3");
     expect(rows[2]).toContain("Running command");
     expect(rows[2]).not.toContain("×");
-    expect(projector.plainFinal(true)).toContain("Waiting for command ×3");
+    expect(projector.plainFinal("live")).toContain("Waiting for command ×3");
   });
 
   test("preserves assistant/tool order in the plain fallback and lists unfinished tools", () => {
@@ -622,7 +617,7 @@ describe("ordered ACP projector", () => {
     finished(projector, "two", "read_file", { path: "two.ts" }, "failed");
     call(projector, "unfinished", "read_file", { path: "unfinished.ts" });
 
-    const plain = projector.plainFinal(true);
+    const plain = projector.plainFinal("live");
     expect(plain.indexOf("Before.")).toBeLessThan(plain.indexOf("one.ts"));
     expect(plain.indexOf("one.ts")).toBeLessThan(plain.indexOf("After."));
     expect(plain.indexOf("After.")).toBeLessThan(plain.indexOf("two.ts"));
@@ -630,6 +625,60 @@ describe("ordered ACP projector", () => {
     const lastGroup = plain.slice(plain.indexOf("After."));
     expect(lastGroup).toContain("Reading file unfinished.ts");
     expect(lastGroup).not.toContain("Read 1 file");
-    expect(projector.plainFinal(false)).toBe("Before.\n\nAfter.");
+    expect(projector.plainFinal("answer")).toBe("After.");
+  });
+
+  test("answer mode keeps the last run of prose and ignores a tool after it", () => {
+    const projector = new AcpProjector();
+    say(projector, "Let me check.");
+    finished(projector, "read", "read_file", { path: "a.ts" });
+    say(projector, "First.", "m1");
+    say(projector, "Second.", "m2");
+    finished(projector, "react", "mcp_telegram_react", { emoji: "👍" });
+
+    const blocks = final(projector, "answer");
+    expect(blocks.every((block) => block.type !== "details")).toBeTrue();
+    expect(rendered(blocks)).toContain("First.");
+    expect(rendered(blocks)).toContain("Second.");
+    expect(rendered(blocks)).not.toContain("Let me check.");
+    expect(final(projector, "progress")).toEqual(blocks);
+    expect(projector.plainFinal("answer")).toBe("First.\n\nSecond.");
+    expect(final(new AcpProjector(), "answer")).toEqual([{ type: "paragraph", text: "Done." }]);
+  });
+
+  test("progress mode names each new activity at once, and only waits before going idle", () => {
+    let now = 0;
+    const projector = new AcpProjector({}, () => now);
+    say(projector, "Let me look.");
+    expect(draft(projector, "progress")).toEqual([{ type: "paragraph", text: "Let me look." }]);
+
+    call(projector, "read", "read_file", { path: "a.ts" });
+    expect(draft(projector, "progress")).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Reading files…"] }]);
+    complete(projector, "read");
+    now = 1_000;
+    call(projector, "run", "shell", { action: "run", command: "bun test" });
+    expect(rendered(draft(projector, "progress"))).toContain("Running commands…");
+    complete(projector, "run");
+    now = 2_000;
+    expect(projector.apply(update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hmm" } }))).toBe("none");
+    expect(rendered(draft(projector, "progress"))).toContain("Running commands…");
+    now = 6_000;
+    expect(draft(projector, "progress")).toEqual([{ type: "thinking", text: [THINKING_EMOJI, " Thinking… 6s"] }]);
+
+    say(projector, "All green.", "answer");
+    expect(draft(projector, "progress")).toEqual([{ type: "paragraph", text: "All green." }]);
+    expect(final(projector, "progress")).toEqual([{ type: "paragraph", text: "All green." }]);
+  });
+
+  test("names the activity from the ACP kind when fx sends no tool name", () => {
+    let now = 0;
+    const projector = new AcpProjector({}, () => now);
+    // No row yet (unnamed, still pending), but the progress line has news.
+    expect(projector.apply(update({
+      sessionUpdate: "tool_call", toolCallId: "t1", title: "Running", kind: "execute", status: "pending",
+    }))).toBe("status");
+    expect(rendered(draft(projector, "progress"))).toContain("Running commands…");
+    complete(projector, "t1");
+    expect(details(final(projector, "report")[0]).summary).toBe("Ran 1 command");
   });
 });

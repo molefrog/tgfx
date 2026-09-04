@@ -8,7 +8,7 @@ const config: TgfxConfig = {
   version: 1, activeBotId: "100",
   access: { userIds: ["42"], chatIds: [] },
   approvals: { chatId: "42", topicId: "0" },
-  streaming: true, expandStreamingTools: true, updateEveryMs: 800, customIcons: true,
+  output: "live", customIcons: true,
 };
 
 function update(overrides: Record<string, unknown> = {}): Update {
