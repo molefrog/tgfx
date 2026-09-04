@@ -66,9 +66,9 @@ Tool calls are rendered as collapsible groups, in the order they happen.
     <th align="center">No streaming</th>
   </tr>
   <tr>
-    <td><img src="doc/assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="280"></td>
-    <td><img src="doc/assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="280"></td>
-    <td><img src="doc/assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="280"></td>
+    <td><img src="doc/assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="256"></td>
+    <td><img src="doc/assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="256"></td>
+    <td><img src="doc/assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="256"></td>
   </tr>
   <tr>
     <td align="center"><code>live</code> (default)<br>Stream the answer and tool activity as they happen</td>
