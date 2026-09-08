@@ -1,10 +1,9 @@
 #!/bin/sh
 
-if ! command -v bun >/dev/null 2>&1; then
+if ! command -v bun >/dev/null 2>&1 || ! bun -e 'process.exit(Bun.semver.satisfies(Bun.version, ">=1.4.0") ? 0 : 1)' >/dev/null 2>&1; then
   printf '%s\n' \
     'tgfx requires Bun 1.4 or newer.' \
-    'Install Bun: https://bun.com/docs/installation' \
-    'Standalone releases: https://github.com/molefrog/telegram-fx/releases' >&2
+    'Install Bun: https://bun.com/docs/installation' >&2
   exit 127
 fi
 

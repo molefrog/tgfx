@@ -5,7 +5,7 @@ Telegram. Works with your locally installed 𝒇x and supports as many of the la
 
 ## Features
 
-<img src="doc/assets/tgfx-primary.webp" alt="tgfx in Telegram: rich replies, a model picker, stickers, and a transcribed voice message" width="240" align="right">
+<img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/tgfx-primary.webp" alt="tgfx in Telegram: rich replies, a model picker, stickers, and a transcribed voice message" width="240" align="right">
 
 Most Telegram adapters for popular harnesses only scratch the surface of what Telegram can do.
 Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way you would from its TUI.
@@ -29,6 +29,19 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 You need [Bun 1.4+](https://bun.sh), an authenticated `fx 0.0.8+`, and a bot
 token from [@BotFather](https://t.me/BotFather).
 
+Install [𝒇x](https://fx.sh) and sign in with `fx login` (Vercel),
+`fx login codex` (ChatGPT), or `fx login grok` (Grok):
+
+```bash
+curl -fsSL https://fx.sh/setup.sh | bash
+fx login
+```
+
+Already have 𝒇x? Run `fx upgrade --channel stable` and check `fx --version`.
+Version [0.0.8](https://github.com/vercel-labs/fx/releases/tag/v0.0.8) is
+available on stable. Development builds also work: `fx upgrade --channel dev`
+switches to that channel, and `fx upgrade --channel stable` switches back.
+
 Why we depend on Bun? We use it to keep everything minimal and fast,
 reusing as much of Bun's built-ins as possible (SQLite, image compression etc.).
 
@@ -40,6 +53,9 @@ bun add --global @molefrog/tgfx
 #    It walks you through authorization on the first run.
 tgfx
 ```
+
+You can also install with `npm install --global @molefrog/tgfx`; Bun is still
+required to run it. Run `tgfx doctor` to check your setup.
 
 ## How it works
 
@@ -68,9 +84,9 @@ Tool calls are rendered as collapsible groups, in the order they happen.
     <th align="center">No streaming</th>
   </tr>
   <tr>
-    <td width="240" align="center"><img src="doc/assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="240" height="300"></td>
-    <td width="240" align="center"><img src="doc/assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="240" height="300"></td>
-    <td width="240" align="center"><img src="doc/assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="240" height="300"></td>
+    <td width="240" align="center"><img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="240" height="300"></td>
+    <td width="240" align="center"><img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="240" height="300"></td>
+    <td width="240" align="center"><img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="240" height="300"></td>
   </tr>
   <tr>
     <td align="center"><code>live</code> (default)<br>Stream the answer and tool activity as they happen</td>
@@ -94,7 +110,7 @@ How to pick a reply style:
 
 ## Custom icons
 
-<img src="doc/assets/custom-icons.png" alt="Tool calls rendered with custom emoji icons" width="340" align="right">
+<img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/custom-icons.png" alt="Tool calls rendered with custom emoji icons" width="340" align="right">
 
 The bot renders tool calls nicely with the
 [tgfx icons](https://t.me/addemoji/ai_provider_labs_by_fxharness_bot) premium custom
@@ -121,4 +137,4 @@ tgfx doctor    diagnostics: token, chats, rights, fx
 ```
 
 Details, guarantees, and the rest of the commands live in the
-[specification](./doc/SPEC.md).
+[specification](https://github.com/molefrog/tgfx/blob/main/doc/SPEC.md).

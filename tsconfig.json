@@ -12,5 +12,5 @@
     "jsx": "react-jsx",
     "types": ["bun"]
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "scripts"]
 }

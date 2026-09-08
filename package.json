@@ -2,11 +2,14 @@
   "name": "@molefrog/tgfx",
   "version": "0.1.0",
   "description": "Run a local fx agent through Telegram",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/molefrog/telegram-fx.git"
+    "url": "git+https://github.com/molefrog/tgfx.git"
   },
+  "homepage": "https://github.com/molefrog/tgfx#readme",
+  "bugs": "https://github.com/molefrog/tgfx/issues",
+  "keywords": ["telegram", "fx", "ai", "coding-agent", "cli"],
   "files": [
     "bin",
     "dist",
@@ -23,7 +26,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "bun build --target=bun --minify --sourcemap=linked --splitting --external react-devtools-core src/index.ts --outdir dist --entry-naming=tgfx.js",
+    "build": "bun scripts/build.ts",
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "check": "bunx tsc --noEmit",

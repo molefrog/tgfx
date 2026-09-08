@@ -89,7 +89,7 @@ describe("tgfx CLI", () => {
     const binary = join(paths.workspace, "fx");
     await Bun.write(binary, [
       `#!${process.execPath}`,
-      'if (process.argv[2] === "--version") console.log("0.0.7");',
+      'if (process.argv[2] === "--version") console.log("0.0.8");',
       'else if (process.argv[2] === "doctor" && process.argv[3] === "--json") {',
       '  console.log(JSON.stringify({ fail_count: 0, warn_count: 0, model: "test", auth: "ready", workspace: process.cwd(), checks: [] }));',
       '} else process.exit(1);',

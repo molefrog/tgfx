@@ -1,7 +1,7 @@
 import { redactSecrets } from "../secrets";
 import { withTimeout } from "../timeout";
 
-const MINIMUM_FX_VERSION = [0, 0, 7] as const;
+const MINIMUM_FX_VERSION = [0, 0, 8] as const;
 
 export type FxDoctorReport = {
   fail_count: number;
@@ -19,7 +19,10 @@ export function assertSupportedFxVersion(version: string): void {
   for (let index = 0; index < MINIMUM_FX_VERSION.length; index += 1) {
     if (current[index]! > MINIMUM_FX_VERSION[index]!) return;
     if (current[index]! < MINIMUM_FX_VERSION[index]!) {
-      throw new Error(`fx 0.0.7 or newer is required (found ${redactSecrets(version)})`);
+      throw new Error(
+        `fx ${MINIMUM_FX_VERSION.join(".")} or newer is required (found ${redactSecrets(version)}). `
+        + "Run fx upgrade --channel stable. For development builds, use fx upgrade --channel dev.",
+      );
     }
   }
 }
@@ -65,11 +68,17 @@ async function run(binary: string, args: string[], workspace: string): Promise<s
 export async function inspectFx(binary: string, workspace: string): Promise<{
   version: string; report: FxDoctorReport;
 }> {
-  const [version, doctor] = await Promise.all([
-    run(binary, ["--version"], workspace),
-    run(binary, ["doctor", "--json"], workspace),
-  ]);
+  let version: string;
+  try {
+    version = await run(binary, ["--version"], workspace);
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") {
+      throw new Error("fx was not found. Install it with: curl -fsSL https://fx.sh/setup.sh | bash", { cause: error });
+    }
+    throw error;
+  }
   assertSupportedFxVersion(version);
+  const doctor = await run(binary, ["doctor", "--json"], workspace);
   const report = parseFxDoctor(doctor);
   if (report.fail_count > 0) {
     const failures = report.checks

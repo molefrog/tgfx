@@ -7,6 +7,19 @@ const logPath = process.env.FAKE_FX_LOG;
 const record = (event: string, value: unknown = {}) => {
   if (logPath) appendFileSync(logPath, `${JSON.stringify({ event, value })}\n`);
 };
+if (process.argv[2] === "--version") {
+  record("version");
+  console.log(process.env.FAKE_FX_VERSION ?? "0.0.8");
+  process.exit(0);
+}
+if (process.argv[2] === "doctor") {
+  record("doctor");
+  console.log(JSON.stringify({
+    fail_count: 0, warn_count: 0, model: "fake-default", auth: "ready",
+    workspace: process.cwd(), checks: [],
+  }));
+  process.exit(0);
+}
 if (process.argv[2] === "usage") {
   const period = process.argv[process.argv.indexOf("--period") + 1] ?? "24h";
   const multiplier = period === "30d" ? 30 : period === "7d" ? 7 : 1;
