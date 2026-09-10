@@ -48,7 +48,7 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
   const app = new TgfxApp({
     paths, config: { version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: options.group ? [chat] : [] },
       approvals: { chatId: "42", topicId: "0" }, output: options.output ?? "live", customIcons: false },
-    bot: { id: "100", username: "fake_bot", displayName: "Fake" }, token: "100:offline", fxBinary: binary,
+    bot: { id: "100", username: "fake_bot", displayName: "Fake" }, token: "100:offline", fxBinary: binary, cancelGraceMs: 250,
     telegram: new TelegramApi("100:offline", telegram.url), log: () => undefined,
     status: (event) => {
       statuses.push(event);

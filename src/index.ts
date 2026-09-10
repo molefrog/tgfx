@@ -3,7 +3,7 @@ import { confirm, isCancel, note, password, select, spinner, text } from "@clack
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { TgfxApp, type TgfxLogEvent } from "./app";
+import type { TgfxApp, TgfxLogEvent } from "./app";
 import { StatusStore, type StatusEvent } from "./status";
 import {
   botPaths,
@@ -15,7 +15,6 @@ import {
   type ProjectSettings,
 } from "./config";
 import { acquireRuntimeLock } from "./lock";
-import { runTelegramMcpServer } from "./mcp/server";
 import { botTokenSource, deleteBotToken, getBotToken, setBotToken, tokenFromEnvironment } from "./secrets";
 import { StateStore } from "./state";
 import { adminCapabilitiesForMember, createTelegramApi, type TelegramApi } from "./telegram/api";
@@ -470,6 +469,7 @@ async function runCommand(tokens: string[]): Promise<void> {
       const message = "fx permission checks are disabled for this run (--yolo)";
       if (!live) log({ event: "permission.mode", message, mode: "yolo" });
     }
+    const { TgfxApp } = await import("./app");
     app = new TgfxApp({
       ...appRuntime,
       mcpLaunch: Bun.isStandaloneExecutable
@@ -929,6 +929,7 @@ const COMMANDS: Record<string, { run: (tokens: string[]) => Promise<void> }> = {
 const argv = process.argv.slice(2);
 const first = argv[0];
 if (first === "mcp") {
+  const { runTelegramMcpServer } = await import("./mcp/server");
   await runTelegramMcpServer();
 } else {
   if (argv.includes("--no-color")) process.env.NO_COLOR = "1";

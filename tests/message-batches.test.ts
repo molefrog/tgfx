@@ -56,7 +56,7 @@ async function harness(seed?: (state: StateStore) => void) {
       version: 1, activeBotId: bot.id, access: { userIds: ["42", "43"], chatIds: ["-9"] },
       approvals: { chatId: "42", topicId: "0" }, output: "answer", customIcons: false,
     },
-    bot, paths, token: "100:test", fxBinary: binary,
+    bot, paths, token: "100:test", fxBinary: binary, batchQuietMs: 150,
     telegram: new TelegramApi("100:test", telegram.url),
     log: (event) => {
       if (event.event === "turn.started") {

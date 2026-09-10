@@ -249,6 +249,10 @@ export class TgfxApp {
     permissionMode?: FxPermissionMode;
     /** How long an approval card stays answerable. Default: five minutes. */
     permissionTimeoutMs?: number;
+    /** Quiet period that closes a run of forwards or an album. Default: one second for forwards, 750 ms for albums. */
+    batchQuietMs?: number;
+    /** How long a cancelled fx turn may keep running before its process is terminated. Default: two seconds. */
+    cancelGraceMs?: number;
     mcpLaunch?: { command: string; args: string[] };
     /** Run-time overrides of the configured settings, from flags or the terminal view. */
     output?: OutputMode;
@@ -718,7 +722,7 @@ export class TgfxApp {
       clearTimeout(current.timer);
     }
     const ids = current?.ids ?? [inboxId];
-    const timer = setTimeout(() => this.flushBatch(key), delay ?? (forwarded ? 1_000 : 750));
+    const timer = setTimeout(() => this.flushBatch(key), delay ?? this.options.batchQuietMs ?? (forwarded ? 1_000 : 750));
     this.batches.set(key, { group, ids, timer });
   }
 
@@ -1718,6 +1722,7 @@ export class TgfxApp {
       binary: this.options.fxBinary,
       model: this.options.model,
       permissionMode: this.options.permissionMode,
+      cancelGraceMs: this.options.cancelGraceMs,
       previousSessionId: row.session_id ?? undefined,
       mcp: {
         command: mcpLaunch.command,
