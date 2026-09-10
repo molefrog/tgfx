@@ -15,7 +15,7 @@ import {
 } from "./config";
 import { acquireRuntimeLock } from "./lock";
 import { runTelegramMcpServer } from "./mcp/server";
-import { deleteBotToken, getBotToken, setBotToken, tokenFromEnvironment } from "./secrets";
+import { botTokenSource, deleteBotToken, getBotToken, setBotToken, tokenFromEnvironment } from "./secrets";
 import { StateStore } from "./state";
 import { adminCapabilitiesForMember, createTelegramApi, type TelegramApi } from "./telegram/api";
 import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairing";
@@ -99,6 +99,11 @@ async function askForToken(): Promise<string> {
   });
   cancelled(value);
   return String(value).trim();
+}
+
+async function saveToken(botId: string, token: string): Promise<void> {
+  const path = await setBotToken(botId, token);
+  if (path) warn(`saved token in ${path} · readable only by your user, stored unencrypted`);
 }
 
 async function pairPrivateOwner(bot: BotIdentity, telegram: TelegramApi): Promise<PrivatePairing> {
@@ -364,7 +369,7 @@ async function runtime(project: ProjectPaths, options: {
         "remove the webhook so tgfx can use long polling",
       );
     }
-    if (prompted) await setBotToken(bot.id, token);
+    if (prompted) await saveToken(bot.id, token);
     return { paths: { ...project, ...botPaths(bot.id) }, config, token, telegram, bot, fxBinary, release };
   } catch (error) {
     await release();
@@ -694,7 +699,7 @@ async function authCommand(tokens: string[]): Promise<void> {
       }
     }
     if (environmentToken) warn("using TELEGRAM_BOT_TOKEN from the environment · not saved to the credential store");
-    else await setBotToken(bot.id, token);
+    else await saveToken(bot.id, token);
     ok(`connected @${bot.username ?? bot.id}`);
   } finally {
     await release();
@@ -735,7 +740,7 @@ async function doctorCommand(tokens: string[]): Promise<void> {
         checks.push({
           check: "Telegram",
           ok: !webhook.url && identityMatches,
-          detail: `@${bot.username ?? bot.id} · ${environmentToken ? "environment token" : "OS credential store"}${webhook.url ? " · webhook configured" : ""}${identityMatches ? "" : " · wrong configured bot"}`,
+          detail: `@${bot.username ?? bot.id} · ${environmentToken ? "environment token" : await botTokenSource(config.activeBotId)}${webhook.url ? " · webhook configured" : ""}${identityMatches ? "" : " · wrong configured bot"}`,
         });
         try {
           const approvals = await telegram.api.getChat(config.approvals.chatId);

@@ -57,6 +57,8 @@ tgfx
 You can also install with `npm install --global @molefrog/tgfx`; Bun is still
 required to run it. Run `tgfx doctor` to check your setup.
 
+Set `TELEGRAM_BOT_TOKEN` to override the saved token.
+
 ## How it works
 
 That's it. `tgfx` starts an `fx acp` process in that folder, with your current

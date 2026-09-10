@@ -1,10 +1,30 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { redactSecrets, setBotToken } from "../src/secrets";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { deleteBotToken, getBotToken, redactSecrets, setBotToken } from "../src/secrets";
 
 describe("bot token secrets", () => {
-  afterEach(() => {
-    mock.restore();
+  let directory: string;
+  let originalHome: string | undefined;
+  beforeEach(async () => {
+    originalHome = process.env.TGFX_HOME;
+    directory = await mkdtemp(join(tmpdir(), "tgfx-secrets-"));
+    process.env.TGFX_HOME = directory;
   });
+  afterEach(async () => {
+    mock.restore();
+    if (originalHome === undefined) delete process.env.TGFX_HOME;
+    else process.env.TGFX_HOME = originalHome;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  async function localToken(token = "123456:old-token"): Promise<string> {
+    await mkdir(join(directory, "tokens"), { mode: 0o700 });
+    const path = join(directory, "tokens", "123456.token");
+    await Bun.write(path, token, { mode: 0o600 });
+    return path;
+  }
 
   test("stores the token using Bun's object-form secrets API", async () => {
     const set = spyOn(Bun.secrets, "set").mockResolvedValue(undefined);
@@ -17,6 +37,63 @@ describe("bot token secrets", () => {
       name: "telegram:123456",
       value: "123456:token",
     });
+  });
+
+  test.skipIf(process.platform === "linux")("keeps non-Linux keyring failures visible", async () => {
+    spyOn(Bun.secrets, "set").mockRejectedValue(new Error("keyring locked"));
+    await expect(setBotToken("123456", "123456:token")).rejects.toThrow("keyring locked");
+  });
+
+  test("a fallback token takes precedence over an older keyring token", async () => {
+    await localToken();
+    const get = spyOn(Bun.secrets, "get").mockResolvedValue("123456:stale-token");
+    expect(await getBotToken("123456")).toBe("123456:old-token");
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  test("rotation keeps using the fallback after the keyring recovers", async () => {
+    const path = await localToken();
+    const set = spyOn(Bun.secrets, "set").mockResolvedValue(undefined);
+    expect(await setBotToken("123456", "123456:new-token")).toBe(path);
+    expect(await Bun.file(path).text()).toBe("123456:new-token");
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  test.skipIf(process.platform === "win32")("rotation restores owner-only file and directory permissions", async () => {
+    const path = await localToken();
+    await chmod(path, 0o644);
+    await chmod(join(directory, "tokens"), 0o755);
+    await setBotToken("123456", "123456:new-token");
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    expect((await stat(join(directory, "tokens"))).mode & 0o777).toBe(0o700);
+  });
+
+  test("removing a fallback token cannot revive an older keyring token", async () => {
+    const path = await localToken();
+    spyOn(Bun.secrets, "get").mockResolvedValue("123456:stale-token");
+    expect(await deleteBotToken("123456")).toBeTrue();
+    expect(await Bun.file(path).text()).toBe("");
+    expect(await getBotToken("123456")).toBeUndefined();
+  });
+
+  test("removing an already removed fallback token reports no token", async () => {
+    await localToken("");
+    expect(await deleteBotToken("123456")).toBeFalse();
+  });
+
+  test("auth can replace a previously removed fallback token", async () => {
+    const path = await localToken("");
+    await setBotToken("123456", "123456:new-token");
+    expect(await Bun.file(path).text()).toBe("123456:new-token");
+  });
+
+  test("rejects bot IDs that could escape the token directory", async () => {
+    await expect(setBotToken("../other", "secret")).rejects.toThrow("bot ID");
+  });
+
+  test("reports filesystem errors instead of reading a stale keyring token", async () => {
+    await Bun.write(join(directory, "tokens"), "not a directory");
+    await expect(getBotToken("123456")).rejects.toThrow();
   });
 });
 
