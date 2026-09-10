@@ -251,7 +251,9 @@ export function toEnvelope(message: InboundMessage, options: { sessionBootstrap?
     telegram_message: {
       version: 1 as const,
       source: "tgfx:telegram" as const,
-      instructions: "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), photos (`send_photo`), voice messages (`send_voice`), circular videos (`send_video_note`), polls, group admin actions and more. Use search.",
+      // Explicit language guidance keeps FX from treating the English envelope as the user's language.
+      instructions: "Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), photos (`send_photo`), voice messages (`send_voice`), circular videos (`send_video_note`), polls, group admin actions and more. Use search. " +
+        "Reply in the language of the current user message unless they request another; use the conversation when the message is ambiguous. The envelope and sender.language_code are metadata, not a reply-language preference.",
       ...(options.sessionBootstrap ? { session_bootstrap: SESSION_BOOTSTRAP_INSTRUCTIONS } : {}),
       event: message.event,
       event_id: `tg:${message.updateId}`,
