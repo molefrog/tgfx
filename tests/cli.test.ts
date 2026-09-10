@@ -7,9 +7,12 @@ import { StateStore } from "../src/state";
 import { acquireRuntimeLock } from "../src/lock";
 import { FakeTelegram } from "./fixtures/fake-telegram";
 import { replyPolicy } from "../src/telegram/reply-policy";
+import { withTimeout } from "../src/timeout";
 
 const temporary: string[] = [];
+const running: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  await Promise.all(running.splice(0).map((stop) => stop()));
   delete process.env.TGFX_HOME;
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -55,7 +58,183 @@ async function workspace(): Promise<ProjectPaths> {
   return paths;
 }
 
+async function startCli(paths: ProjectPaths, options: {
+  args?: string[];
+  terminal?: boolean;
+  token?: string;
+  env?: NodeJS.ProcessEnv;
+  onOutput?: (output: string, terminal: Bun.Terminal) => void;
+} = {}) {
+  const binary = join(paths.workspace, "fx");
+  await Bun.write(binary, `#!${process.execPath}\nawait import(${JSON.stringify(resolve("tests/fixtures/fake-fx.ts"))});\n`);
+  await chmod(binary, 0o700);
+  const telegram = new FakeTelegram();
+  let terminalOutput = "";
+  const decoder = new TextDecoder();
+  const child = Bun.spawn([process.execPath, resolve("src/index.ts"), ...options.args ?? []], {
+    cwd: paths.workspace,
+    env: {
+      ...process.env, NO_COLOR: "1", CI: "false", CONTINUOUS_INTEGRATION: "false", TERM: "xterm-256color",
+      FX_BINARY: binary, TELEGRAM_BOT_TOKEN: options.token ?? "100:cli-test-token",
+      TGFX_INTERNAL_TELEGRAM_API_ROOT: telegram.url,
+      ...options.env,
+    },
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    ...(options.terminal ? { terminal: {
+      cols: 100, rows: 40,
+      data(terminal: Bun.Terminal, data: Uint8Array) {
+        terminalOutput += decoder.decode(data, { stream: true });
+        options.onOutput?.(terminalOutput, terminal);
+      },
+    } } : {}),
+  });
+  const result = Promise.all([
+    options.terminal ? Promise.resolve("") : new Response(child.stdout).text(),
+    options.terminal ? Promise.resolve("") : new Response(child.stderr).text(),
+    child.exited,
+  ]).then(([stdout, stderr, exitCode]) => ({ stdout: stdout + terminalOutput, stderr, exitCode }));
+  running.push(async () => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await child.exited;
+    child.terminal?.close();
+    await telegram.stop();
+  });
+  return {
+    child, telegram,
+    result: () => withTimeout(result, 3_000, () => { throw new Error("CLI did not exit"); }),
+  };
+}
+
 describe("tgfx CLI", () => {
+  test("without a terminal it starts with saved settings and streams plain logs", async () => {
+    const paths = await workspace();
+    const before = await Bun.file(paths.config).text();
+    const cli = await startCli(paths);
+    await cli.telegram.waitForCalls("getUpdates");
+    cli.child.kill("SIGTERM");
+    const result = await cli.result();
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("polling");
+    expect(result.stdout).toContain("stopped");
+    expect(result.stdout).not.toContain("\u001B[");
+    expect(result.stdout).not.toContain("q quit");
+    expect(result.stderr).toBe("");
+    expect(await Bun.file(paths.config).text()).toBe(before);
+  });
+
+  test("JSON mode streams parseable log events", async () => {
+    const cli = await startCli(await workspace(), { args: ["--json"] });
+    await cli.telegram.waitForCalls("getUpdates");
+    cli.child.kill("SIGTERM");
+    const result = await cli.result();
+    expect(result.exitCode).toBe(0);
+    const events = result.stdout.trim().split("\n").map((line) => JSON.parse(line).event);
+    expect(events).toContain("polling.started");
+    expect(events.at(-1)).toBe("stopped");
+    expect(result.stderr).toBe("");
+  });
+
+  test("without a terminal missing setup exits without pairing", async () => {
+    const paths = await workspace();
+    await rm(paths.config);
+    const cli = await startCli(paths);
+    const result = await cli.result();
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not initialized");
+    expect(result.stderr).toContain("interactive terminal");
+    expect(cli.telegram.calls("getUpdates")).toHaveLength(0);
+    expect(await Bun.file(paths.config).exists()).toBe(false);
+  });
+
+  test("without a terminal a missing token explains how to provide it", async () => {
+    const paths = await workspace();
+    // An empty local token prevents a developer's keychain from supplying one.
+    await Bun.write(join(process.env.TGFX_HOME!, "tokens", "100.token"), "");
+    const cli = await startCli(paths, { token: "" });
+    const result = await cli.result();
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("token is missing");
+    expect(result.stderr).toContain("TELEGRAM_BOT_TOKEN");
+    expect(cli.telegram.calls("getMe")).toHaveLength(0);
+  });
+
+  test.skipIf(process.platform === "win32")("--no-tui streams logs even in a terminal", async () => {
+    const cli = await startCli(await workspace(), { args: ["--no-tui"], terminal: true });
+    await cli.telegram.waitForCalls("getUpdates");
+    cli.child.kill("SIGTERM");
+    const result = await cli.result();
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("polling");
+    expect(result.stdout).not.toContain("\u001B[");
+    expect(result.stdout).not.toContain("q quit");
+  });
+
+  test.skipIf(process.platform === "win32").each([
+    { CI: "true" }, { CONTINUOUS_INTEGRATION: "true" }, { TERM: "dumb" },
+  ])("a non-interactive environment streams logs even with a TTY: %j", async (env) => {
+    const cli = await startCli(await workspace(), { terminal: true, env });
+    await cli.telegram.waitForCalls("getUpdates");
+    cli.child.kill("SIGTERM");
+    const result = await cli.result();
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("polling");
+    expect(result.stdout).not.toContain("\u001B[");
+    expect(result.stdout).not.toContain("q quit");
+  });
+
+  test.skipIf(process.platform === "win32")("--no-tui never opens setup prompts in a terminal", async () => {
+    const paths = await workspace();
+    await rm(paths.config);
+    const cli = await startCli(paths, { args: ["--no-tui"], terminal: true });
+    const result = await cli.result();
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("not initialized");
+    expect(result.stdout).not.toContain("Who may use");
+  });
+
+  test.skipIf(process.platform === "win32")("the TUI clears the screen before its first frame on every start", async () => {
+    const paths = await workspace();
+    const firstFrame = Promise.withResolvers<void>();
+    const cli = await startCli(paths, {
+      terminal: true,
+      onOutput(output) { if (output.includes("q quit")) firstFrame.resolve(); },
+    });
+    await cli.telegram.waitForCalls("getUpdates");
+    await withTimeout(firstFrame.promise, 2_000, () => { throw new Error("TUI did not render"); });
+    cli.child.terminal!.write("q");
+    const result = await cli.result();
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toStartWith("\u001B[2J\u001B[3J\u001B[H");
+  });
+
+  test.skipIf(process.platform === "win32")("first-run setup is cleared before the TUI appears", async () => {
+    const paths = await workspace();
+    await rm(paths.config);
+    let answered = false;
+    let paired = false;
+    const firstFrame = Promise.withResolvers<void>();
+    const cli = await startCli(paths, {
+      terminal: true,
+      onOutput(output, terminal) {
+        if (!answered && output.includes("Who may use")) { answered = true; terminal.write("\r"); }
+        const payload = output.match(/start=(tgfx_[a-f0-9]+)/)?.[1];
+        if (!paired && payload) {
+          paired = true;
+          cli.telegram.sendUserMessage({ userId: 42, text: `/start ${payload}` });
+        }
+        if (output.includes("q quit")) firstFrame.resolve();
+      },
+    });
+    await cli.telegram.waitForRequest((request) => request.method === "getUpdates" && request.payload.timeout === 25);
+    await withTimeout(firstFrame.promise, 2_000, () => { throw new Error("TUI did not render after setup"); });
+    cli.child.terminal!.write("q");
+    const result = await cli.result();
+    expect(result.exitCode).toBe(0);
+    const clear = result.stdout.indexOf("\u001B[2J\u001B[3J\u001B[H");
+    expect(clear).toBeGreaterThan(result.stdout.indexOf("Connect your Telegram account"));
+    expect(clear).toBeLessThan(result.stdout.indexOf("q quit"));
+  });
+
   test("history can report and clear one chat while preserving another", async () => {
     const paths = await workspace();
     const state = new StateStore(botPaths("100").database, paths.workspace);

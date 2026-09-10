@@ -31,6 +31,7 @@ import {
   dim,
   green,
   helpText,
+  isInteractiveTerminal,
   ok,
   parseArgs,
   printError,
@@ -332,11 +333,11 @@ async function knownWorkspace(project: ProjectPaths): Promise<{ config: TgfxConf
 }
 
 async function runtime(project: ProjectPaths, options: {
-  json?: boolean;
+  interactive: boolean;
   known?: { config: TgfxConfig; token: string };
   /** Startup progress for the live view; each step reports before and after. */
   boot?: (event: Extract<StatusEvent, { type: "boot" }>) => void;
-} = {}): Promise<{
+}): Promise<{
   paths: WorkspacePaths; config: TgfxConfig; token: string; telegram: TelegramApi; bot: BotIdentity;
   fxBinary: string; release: () => Promise<void>;
 }> {
@@ -359,10 +360,16 @@ async function runtime(project: ProjectPaths, options: {
   let token = options.known?.token ?? tokenFromEnvironment();
   let prompted = false;
   if (!token && config) token = await getBotToken(config.activeBotId);
-  if (options.json && (!config || !token)) {
+  if (!options.interactive && !config) {
     throw new CliError(
       "this workspace is not initialized",
-      "run tgfx once without --json to finish interactive setup",
+      "run tgfx once in an interactive terminal to finish setup",
+    );
+  }
+  if (!options.interactive && !token) {
+    throw new CliError(
+      "the Telegram bot token is missing",
+      "set TELEGRAM_BOT_TOKEN or run tgfx auth in an interactive terminal",
     );
   }
   if (!token) { token = await askForToken(); prompted = true; }
@@ -396,7 +403,7 @@ function createLogger(json: boolean): (event: TgfxLogEvent) => void {
   if (json) {
     return (event) => console.log(JSON.stringify({ ts: new Date().toISOString(), ...event }));
   }
-  return (event) => console.log(`${dim(new Date().toTimeString().slice(0, 8))} ${event.message}`);
+  return (event) => console.log(`${new Date().toTimeString().slice(0, 8)} ${event.message}`);
 }
 
 async function runCommand(tokens: string[]): Promise<void> {
@@ -422,9 +429,8 @@ async function runCommand(tokens: string[]): Promise<void> {
   }
   const json = Boolean(flags.json);
   const project = projectPaths();
-  // The live view needs a terminal on both ends and a workspace that is already
-  // set up, so no prompt has to share the screen with it. Otherwise stay a plain log.
-  const live = !json && !flags["no-tui"] && Boolean(process.stderr.isTTY && process.stdin.isTTY);
+  // Without terminal input and output, use saved settings and stream logs.
+  const live = !json && !flags["no-tui"] && isInteractiveTerminal();
   const known = live ? await knownWorkspace(project) : undefined;
   const store = live ? new StatusStore({ yolo: Boolean(flags.yolo) }) : undefined;
   const log = store ? (event: TgfxLogEvent) => store.logLine(event.message) : createLogger(json);
@@ -440,8 +446,6 @@ async function runCommand(tokens: string[]): Promise<void> {
   // for the setup prompts and mounts the view once they are done.
   const mount = async () => {
     if (!store || view) return;
-    // After setup, wipe the prompts and QR code so the view starts on a clean screen.
-    if (!known) process.stderr.write("[2J[3J[H");
     const { startTui } = await import("./cli/tui");
     view = startTui({
       store,
@@ -457,15 +461,14 @@ async function runCommand(tokens: string[]): Promise<void> {
   try {
     if (known) await mount();
     const resolved = await runtime(project, {
-      json, ...(known ? { known } : {}), ...(store ? { boot: (event) => store.apply(event) } : {}),
+      interactive: live, ...(known ? { known } : {}), ...(store ? { boot: (event) => store.apply(event) } : {}),
     });
     await mount();
     const { release: releaseLock, ...appRuntime } = resolved;
     release = releaseLock;
     if (flags.yolo) {
       const message = "fx permission checks are disabled for this run (--yolo)";
-      if (json) log({ event: "permission.mode", message, mode: "yolo" });
-      else if (!live) warn(message);
+      if (!live) log({ event: "permission.mode", message, mode: "yolo" });
     }
     app = new TgfxApp({
       ...appRuntime,
@@ -489,7 +492,7 @@ async function runCommand(tokens: string[]): Promise<void> {
     await release?.();
     await view?.unmount(!completed);
     if (completed) {
-      if (json) log({ event: "stopped", message: "stopped" });
+      if (!live) log({ event: "stopped", message: "stopped" });
       else process.stderr.write(`${green("☞")} bye!\n`);
     }
   }

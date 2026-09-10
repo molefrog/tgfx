@@ -13,6 +13,12 @@ import { VERSION } from "../version";
 
 export { VERSION };
 
+export function isInteractiveTerminal(): boolean {
+  const ci = [process.env.CI, process.env.CONTINUOUS_INTEGRATION]
+    .some((value) => value !== undefined && value !== "0" && value !== "false");
+  return Boolean(process.stdin.isTTY && process.stderr.isTTY) && process.env.TERM !== "dumb" && !ci;
+}
+
 function colorEnabled(): boolean {
   if (process.env.NO_COLOR) return false;
   if (process.env.FORCE_COLOR !== undefined) return process.env.FORCE_COLOR !== "0";

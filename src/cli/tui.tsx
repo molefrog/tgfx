@@ -459,6 +459,8 @@ export function Tui({ store, controls, columns, now = Date.now, animate = false 
 
 /** Mounts the view on stderr so stdout stays clean for `--json` style output. */
 export function startTui(props: Omit<TuiProps, "animate">): { unmount(clear?: boolean): Promise<void> } {
+  // Clear setup prompts and scrollback, then put the first frame at the top.
+  process.stderr.write("\u001B[2J\u001B[3J\u001B[H");
   const instance = render(<Tui {...props} animate />, {
     stdout: process.stderr,
     stdin: process.stdin,
