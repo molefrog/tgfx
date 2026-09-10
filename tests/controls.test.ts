@@ -200,7 +200,7 @@ test.each([{ output: "answer" as const }, { group: true }])("/stop works without
   const h = await harness(options);
   try {
     h.send("WAIT"); await h.status("started");
-    h.send("/stop"); await h.status("finished");
+    h.send("group" in options ? "/stop@fake_bot" : "/stop"); await h.status("finished");
     expect(h.telegram.calls("sendRichMessageDraft")).toHaveLength(0);
     expect(h.telegram.calls("sendMessage").some(r => String(r.payload.text).includes("cancelled"))).toBeTrue();
   } finally { await h.close(); }

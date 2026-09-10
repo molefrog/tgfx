@@ -2,9 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { loadConfig, projectPaths, saveConfig, type ProjectPaths } from "../src/config";
+import { botPaths, loadConfig, projectPaths, saveConfig, type ProjectPaths } from "../src/config";
+import { StateStore } from "../src/state";
 import { acquireRuntimeLock } from "../src/lock";
 import { FakeTelegram } from "./fixtures/fake-telegram";
+import { replyPolicy } from "../src/telegram/reply-policy";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -54,6 +56,66 @@ async function workspace(): Promise<ProjectPaths> {
 }
 
 describe("tgfx CLI", () => {
+  test("history can report and clear one chat while preserving another", async () => {
+    const paths = await workspace();
+    const state = new StateStore(botPaths("100").database, paths.workspace);
+    state.history.recordBot("100:-9:0", "1", "group decision");
+    state.history.recordBot("100:42:0", "1", "DM decision");
+    state.close();
+    const before = await tgfx(["history", "--json"], { cwd: paths.workspace });
+    expect(JSON.parse(before.stdout)).toHaveLength(2);
+    const cleared = await tgfx(["history", "clear", "--chat", "-9"], { cwd: paths.workspace });
+    expect(cleared.exitCode).toBe(0);
+    const after = await tgfx(["history", "--json"], { cwd: paths.workspace });
+    expect(JSON.parse(after.stdout).map((s: { route: string }) => s.route)).toEqual(["100:42:0"]);
+  });
+
+  test("allow saves reply defaults without granting access or pairing", async () => {
+    const paths = await workspace();
+    const before = (await loadConfig(paths))!.access;
+    const result = await tgfx(["allow", "--dm", "mention", "--groups", "all"], { cwd: paths.workspace });
+    expect(result.exitCode).toBe(0);
+    const config = (await loadConfig(paths))!;
+    expect(config).toMatchObject({ access: before, dmReply: "mention", groupReply: "all" });
+  });
+
+  test("allow updates an existing group's reply policy without duplicating the grant", async () => {
+    const paths = await workspace();
+    await tgfx(["allow", "-9", "--reply", "mention"], { cwd: paths.workspace });
+    const updated = await tgfx(["allow", "-9", "--reply", "all"], { cwd: paths.workspace });
+    expect(updated.exitCode).toBe(0);
+    expect(await loadConfig(paths)).toMatchObject({ access: { chatIds: ["-9"] }, chatReplies: { "-9": "all" } });
+  });
+
+  test("allow inherit resumes the group default and preserves other overrides", async () => {
+    const paths = await workspace();
+    await tgfx(["allow", "-9", "-10", "--reply", "all"], { cwd: paths.workspace });
+    const inherited = await tgfx(["allow", "-9", "--inherit"], { cwd: paths.workspace });
+    expect(inherited.exitCode).toBe(0);
+    const config = (await loadConfig(paths))!;
+    expect(config.chatReplies).toEqual({ "-10": "all" });
+    expect(replyPolicy(config, { chatId: "-9", chatKind: "group" })).toBe("mention");
+  });
+
+  test("allow preserves an existing reply policy when no policy flag is given", async () => {
+    const paths = await workspace();
+    await tgfx(["allow", "-9", "--reply", "all"], { cwd: paths.workspace });
+    await tgfx(["allow", "-9"], { cwd: paths.workspace });
+    expect((await loadConfig(paths))?.chatReplies?.["-9"]).toBe("all");
+  });
+
+  test.each([
+    ["allow", "--groups", "all", "-9"],
+    ["allow", "-9", "--reply", "direct"],
+    ["allow", "-9", "--inherit"],
+    ["allow", "42", "--reply", "mention", "--inherit"],
+  ].map((args) => ({ args })))("invalid policy arguments leave access unchanged: %j", async ({ args }) => {
+    const paths = await workspace();
+    const before = await Bun.file(paths.config).text();
+    expect((await tgfx(args, { cwd: paths.workspace })).exitCode).toBe(1);
+    expect(await Bun.file(paths.config).text()).toBe(before);
+  });
+
   test("a mistyped command errors instead of starting the bot", async () => {
     const root = await mkdtemp(join(tmpdir(), "tgfx-cli-typo-"));
     temporary.push(root);

@@ -9,6 +9,7 @@ const team: RouteLabel = { key: "100:-500:0", chat: "team-fx", group: true };
 
 const idleControls: TuiControls = {
   quit: () => undefined, setOutput: () => undefined, setCustomIcons: () => undefined, setPaused: () => undefined,
+  setReplyPolicy: () => undefined,
 };
 
 /** A store on a fake clock, and a view that renders it at a chosen instant. */

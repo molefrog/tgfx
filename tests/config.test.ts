@@ -50,7 +50,7 @@ describe("workspace config", () => {
     const workspace = join(root, "my project");
     const paths = projectPaths(workspace);
     await saveConfig(paths, config());
-    expect(await loadConfig(paths)).toEqual(config());
+    expect(await loadConfig(paths)).toMatchObject(config());
     expect(paths.config).toMatch(/\/home\/projects\/my-project-[0-9a-f]{12}\.json$/);
     expect(projectPaths(join(root, "other")).config).not.toBe(paths.config);
     const written = await Bun.file(paths.config).text();

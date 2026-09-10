@@ -133,7 +133,7 @@ const app = acp.agent({ name: "fake-fx" })
   .onRequest(acp.methods.agent.session.prompt, async (context) => {
     record("prompt", context.params);
     const text = context.params.prompt
-      .flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+      .flatMap((block) => block.type === "text" && !block.text.startsWith('{"telegram_context":') ? [block.text] : []).join("\n");
     if (text.includes("CRASH_AGENT")) process.exit(1);
     const forcedStopReason = text.match(/STOP_REASON=(\w+)/)?.[1];
     ignoreCancel = text.includes("IGNORE_CANCEL");

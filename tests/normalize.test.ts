@@ -95,7 +95,7 @@ describe("Telegram input normalization", () => {
       chat: { id: -9, type: "supergroup", title: "Team" }, text: "hello",
     }))!;
     const command = normalizeMessageUpdate(bot, update({
-      chat: { id: -9, type: "supergroup", title: "Team" }, text: "/status",
+      chat: { id: -9, type: "supergroup", title: "Team" }, text: `/status@${bot.username}`,
     }))!;
     expect(shouldInvokeAgent(ordinary, bot.username)).toBeFalse();
     expect(shouldInvokeAgent(command, bot.username)).toBeTrue();

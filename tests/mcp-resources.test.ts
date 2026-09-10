@@ -83,7 +83,9 @@ async function rpc(root: string, requests: Array<Record<string, unknown>>): Prom
       throw new Error(`MCP server closed before all responses arrived: ${stderr}`);
     }
     buffered += new TextDecoder().decode(next.value);
-    for (const line of buffered.split("\n").filter(Boolean)) {
+    const lines = buffered.split("\n");
+    buffered = lines.pop()!;
+    for (const line of lines.filter(Boolean)) {
       const response = JSON.parse(line);
       if (typeof response.id === "number" && response.id !== 1) responses.set(response.id, response);
     }
@@ -104,6 +106,29 @@ function chatRecent(response: any): { version: number; count: number; messages: 
 }
 
 describe("Telegram MCP chat resources", () => {
+  test("read_history serves archived messages through the active turn's snapshot", async () => {
+    const root = workspace();
+    const state = new StateStore(database(root), root);
+    const past = inbound({ updateId: 1, messageId: "1", messageRef: "msg_1", text: "discussion" });
+    state.history.recordInbound(past);
+    const request = inbound({ updateId: 2, messageId: "2", messageRef: "msg_2", text: "save" });
+    state.history.recordInbound(request);
+    state.registerInbound(request);
+    state.history.begin(ROUTE.key, request.contextRef, request.historySeq!, 1);
+    state.history.recordInbound(inbound({ updateId: 3, messageId: "3", messageRef: "msg_3", text: "later" }));
+    state.close();
+    const responses = await rpc(root, [{ id: 2, method: "tools/call", params: { name: "read_history", arguments: {} } }]);
+    const result = responses.get(2)!.result;
+    expect(result.isError).not.toBeTrue();
+    expect(JSON.parse(result.content[0].text).messages.map((m: any) => m.text)).toEqual(["discussion", "save"]);
+  });
+
+  test("read_history requires an active request", async () => {
+    const root = workspace();
+    const responses = await rpc(root, [{ id: 2, method: "tools/call", params: { name: "read_history", arguments: {} } }]);
+    expect(responses.get(2)!.result.isError).toBeTrue();
+  });
+
   test("lists and serves the recent-messages resource with bounded excerpts", async () => {
     const root = workspace();
     const state = new StateStore(database(root));

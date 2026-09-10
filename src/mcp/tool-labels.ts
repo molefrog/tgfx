@@ -1,4 +1,5 @@
 export const TELEGRAM_MCP_TOOL_ROW_TITLES = {
+  read_history: "Reading conversation",
   set_reaction: "Reacting to message",
   download_attachment: "Downloading attachment",
   send_file: "Sending file",

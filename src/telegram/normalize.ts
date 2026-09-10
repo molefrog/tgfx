@@ -6,6 +6,7 @@ import type {
   InboundMessage,
   SenderIdentity,
   TgfxConfig,
+  ReplyPolicy,
 } from "../types";
 import { routeKey } from "../types";
 import { TELEGRAM_GUIDELINES_URI } from "../mcp/guidelines";
@@ -331,18 +332,23 @@ export function commandFromText(text: string | undefined, botUsername?: string):
   };
 }
 
-export function shouldInvokeAgent(message: InboundMessage, botUsername?: string, botId?: string): boolean {
-  if (message.route.chatKind === "private") return true;
+export function shouldInvokeAgent(
+  message: InboundMessage, botUsername?: string, botId?: string,
+  policy: ReplyPolicy = message.route.chatKind === "private" ? "all" : "mention",
+): boolean {
   const command = message.provenance?.forward_origin ? undefined : commandFromText(message.text, botUsername);
-  if (command?.addressed) return true;
+  if (command && !command.addressed) return false;
+  if (policy === "all") return true;
+  if (command?.addressed && (message.route.chatKind === "private" || /^\/\w+@/u.test(message.text ?? ""))) return true;
   const rawMessage = message.raw.message ?? message.raw.edited_message;
   const entities = rawMessage?.entities ?? rawMessage?.caption_entities ?? [];
   const mentioned = botUsername ? entities.some((entity) =>
-    entity.type === "mention"
-    && message.text?.slice(entity.offset, entity.offset + entity.length).toLowerCase() === `@${botUsername.toLowerCase()}`
-  ) : false;
+    (entity.type === "mention"
+      && message.text?.slice(entity.offset, entity.offset + entity.length).toLowerCase() === `@${botUsername.toLowerCase()}`)
+    || (entity.type === "text_mention" && String(entity.user.id) === botId)
+  ) : entities.some((entity) => entity.type === "text_mention" && String(entity.user.id) === botId);
   const replyToBot = rawMessage?.reply_to_message?.from?.is_bot
     && ((botId !== undefined && String(rawMessage.reply_to_message.from.id) === botId)
-      || rawMessage.reply_to_message.from.username?.toLowerCase() === botUsername?.toLowerCase());
+      || (botUsername !== undefined && rawMessage.reply_to_message.from.username?.toLowerCase() === botUsername.toLowerCase()));
   return Boolean(mentioned || replyToBot);
 }

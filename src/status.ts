@@ -6,7 +6,7 @@
  * be tested from events alone.
  */
 
-import type { OutputMode } from "./types";
+import type { OutputMode, ReplyPolicy } from "./types";
 
 export type RouteLabel = {
   key: string;
@@ -39,7 +39,10 @@ export type BootStep = "fx" | "telegram" | "lock" | "menus" | "polling";
 export const BOOT_STEPS: BootStep[] = ["fx", "telegram", "lock", "menus", "polling"];
 export type BootState = { state: "pending" | "running" | "done" | "failed"; detail?: string };
 
-export type Settings = { output: OutputMode; customIcons: boolean; paused: boolean; yolo: boolean; saveError?: string };
+export type Settings = {
+  output: OutputMode; customIcons: boolean; paused: boolean; yolo: boolean; saveError?: string;
+  dmReply?: ReplyPolicy; groupReply?: ReplyPolicy; chatReplies?: Record<string, ReplyPolicy>; allowedChats?: string[];
+};
 
 export type RouteStatus = RouteLabel & {
   who: string;
@@ -115,6 +118,7 @@ export class StatusStore {
         this.poll = { state: event.state, retryMs: event.state === "reconnecting" ? event.retryMs : 0, since: now };
         break;
       case "inbound":
+        this.route(event.route);
         this.packets.push({ at: now, label: `▶ ${event.who}`, segment: "left", direction: "in" });
         break;
       case "queue":

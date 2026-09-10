@@ -70,6 +70,20 @@ QR code or tap a link. To change or remove the token later, run `tgfx auth`.
 Everything tgfx remembers about a folder lives under `~/.fx/telegram/`; nothing
 is written into the project.
 
+## Groups and reply settings
+
+By default, bots only respond in groups when mentioned or replied to.
+To reply to every message, allow the group using its chat ID:
+
+```bash
+tgfx allow -1001234567890 --reply all
+```
+
+To let it see the whole discussion, make it a group admin, or disable Group
+Privacy in [@BotFather](https://t.me/BotFather) (`/setprivacy` → **Disable**),
+then remove and re-add it to the group. Keep tgfx running to collect messages
+as context for later requests; it cannot fetch messages from before it joined.
+
 ## Reply style
 
 𝒕𝒈(𝒇x) has four reply styles, depending on whether you want the answer

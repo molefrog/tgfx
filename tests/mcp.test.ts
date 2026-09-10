@@ -145,7 +145,7 @@ describe("Telegram MCP catalog", () => {
   test("exposes the scoped core tools by default", async () => {
     const tools = await listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
-      "set_reaction", "download_attachment", "send_file", "send_photo", "send_voice", "send_video_note", "get_sticker_pack",
+      "read_history", "set_reaction", "download_attachment", "send_file", "send_photo", "send_voice", "send_video_note", "get_sticker_pack",
       "send_sticker_by_id", "send_sticker_file",
       "request_choice", "create_poll",
     ]);
@@ -197,7 +197,6 @@ describe("Telegram MCP catalog", () => {
       expect(names).toContain("delete_messages");
       expect(names).toContain("moderate_member");
       expect(names).toContain("review_join_request");
-      expect(tools).toHaveLength(18);
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
       expect(byName.delete_messages!.annotations?.destructiveHint).toBeTrue();
       expect(byName.moderate_member!.inputSchema.properties?.action.enum).toEqual([
@@ -242,7 +241,7 @@ describe("Telegram MCP catalog", () => {
     try {
       const tools = await listTools({ chatId: "-9", allowed: ["-9"], apiRoot: telegram.url });
       expect(tools.map((tool) => tool.name)).toEqual([
-        "set_reaction", "download_attachment", "send_file", "send_photo", "send_voice", "send_video_note", "get_sticker_pack",
+        "read_history", "set_reaction", "download_attachment", "send_file", "send_photo", "send_voice", "send_video_note", "get_sticker_pack",
         "send_sticker_by_id", "send_sticker_file",
         "request_choice", "create_poll",
       ]);

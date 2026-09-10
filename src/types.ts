@@ -16,6 +16,12 @@ export type ChatKind = "private" | "group" | "supergroup" | "channel";
 export const OUTPUT_MODES = ["answer", "report", "progress", "live"] as const;
 export type OutputMode = (typeof OUTPUT_MODES)[number];
 
+export const REPLY_POLICIES = ["all", "mention"] as const;
+export type ReplyPolicy = (typeof REPLY_POLICIES)[number];
+export const REPLY_POLICY_LABELS: Record<ReplyPolicy, string> = {
+  all: "Every message", mention: "Mentions or replies",
+};
+
 /** How each mode reads in menus: the terminal format menu and Telegram's /format. */
 export const REPLY_STYLES: Record<OutputMode, { name: string; hint: string }> = {
   answer: { name: "Final answer", hint: "Send the answer when the turn finishes" },
@@ -49,6 +55,9 @@ export type TgfxConfig = {
   };
   output: OutputMode;
   customIcons: boolean;
+  dmReply?: ReplyPolicy;
+  groupReply?: ReplyPolicy;
+  chatReplies?: Record<string, ReplyPolicy>;
 };
 
 export type Route = {
@@ -187,6 +196,10 @@ type TelegramEnvelope = {
 };
 
 export type InboundMessage = {
+  /** Fixed at ingestion, so policy changes and later updates cannot change a queued turn. */
+  invokesAgent?: boolean;
+  historySeq?: number;
+  historyMessageIds?: string[];
   updateId: number;
   event: TelegramEnvelope["telegram_message"]["event"];
   route: Route;

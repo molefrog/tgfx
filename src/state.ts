@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { InboundMessage, Route } from "./types";
+import { ChatHistory } from "./history";
 
 type InboxStatus = "received" | "dispatching" | "running" | "done" | "failed" | "interrupted" | "discarded";
 type OutboxStatus = "pending" | "sending" | "sent" | "failed";
@@ -209,7 +210,7 @@ CREATE INDEX IF NOT EXISTS context_route_active
 
 function now(): string { return new Date().toISOString(); }
 
-/** Message text is retained only as this bounded excerpt, never in full. */
+/** Action references retain a bounded excerpt; full messages live in ChatHistory. */
 export const MESSAGE_EXCERPT_LIMIT = 200;
 
 export function messageExcerpt(text: string | undefined | null): string | null {
@@ -222,13 +223,15 @@ export function messageExcerpt(text: string | undefined | null): string | null {
 
 export class StateStore {
   readonly db: Database;
+  readonly history: ChatHistory;
 
-  constructor(readonly path: string) {
+  constructor(readonly path: string, workspace = "") {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     chmodSync(dirname(path), 0o700);
     this.db = new Database(path, { create: true, strict: true });
     chmodSync(path, 0o600);
     this.db.exec(SCHEMA);
+    this.history = new ChatHistory(this.db, workspace);
     const messageColumns = this.db.query<{ name: string }, []>(
       "SELECT name FROM pragma_table_info('telegram_messages')",
     ).all();
@@ -314,12 +317,14 @@ export class StateStore {
     updateId: number;
     routeKey?: string;
     payload?: unknown;
+    message?: InboundMessage;
     authorized: boolean;
     supersede?: { chatId: string; messageId: string };
   }): number | undefined {
     return this.db.transaction(() => {
       let inboxId: number | undefined;
       if (input.authorized && input.routeKey && input.payload !== undefined) {
+        if (input.message) this.history.recordInbound(input.message);
         this.db.query(`
           INSERT INTO telegram_inbox(
             bot_id, update_id, route_key, status, payload_json, created_at, updated_at
@@ -478,6 +483,7 @@ export class StateStore {
           .run(newKey, newChatId, route.route_key);
         this.db.query("UPDATE context_capabilities SET route_key=?,chat_id=? WHERE route_key=?")
           .run(newKey, newChatId, route.route_key);
+        this.history.migrate(route.route_key, newKey);
         migrated.push({ oldKey: route.route_key, newKey });
       }
       return migrated;
@@ -695,6 +701,7 @@ export class StateStore {
     ref: string; botId: string; routeKey: string; chatId: string;
     topicId: string; messageId: string; excerpt?: string;
   }): void {
+    this.history.recordBot(input.routeKey, input.messageId, input.excerpt);
     const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     this.db.query(`
       INSERT INTO telegram_messages(
@@ -711,6 +718,8 @@ export class StateStore {
   }
 
   updateMessageExcerpt(ref: string, routeKey: string, text: string): void {
+    const message = this.managedMessageReference(ref, routeKey);
+    if (message?.owned_by_bot) this.history.recordBot(routeKey, message.message_id, text);
     this.db.query("UPDATE telegram_messages SET excerpt=? WHERE ref=? AND route_key=?")
       .run(messageExcerpt(text), ref, routeKey);
   }
@@ -758,13 +767,19 @@ export class StateStore {
   }
 
   markOutbox(id: number, status: OutboxStatus, messageId?: string, error?: string): void {
-    this.db.query(`
-      UPDATE telegram_outbox SET status=$status,
-        attempts=CASE WHEN $status='sending' THEN attempts+1 ELSE attempts END,
-        payload_json=CASE WHEN $status='sent' THEN '{}' ELSE payload_json END,
-        telegram_message_id=COALESCE($message,telegram_message_id), error=$error, updated_at=$now
-      WHERE id=$id
-    `).run({ id, status, message: messageId ?? null, error: error ?? null, now: now() });
+    this.db.transaction(() => {
+      this.db.query(`
+        UPDATE telegram_outbox SET status=$status,
+          attempts=CASE WHEN $status='sending' THEN attempts+1 ELSE attempts END,
+          payload_json=CASE WHEN $status='sent' THEN '{}' ELSE payload_json END,
+          telegram_message_id=COALESCE($message,telegram_message_id), error=$error, updated_at=$now
+        WHERE id=$id
+      `).run({ id, status, message: messageId ?? null, error: error ?? null, now: now() });
+      if (status === "sent") {
+        const row = this.db.query<{ inbox_id: number | null }, [number]>("SELECT inbox_id FROM telegram_outbox WHERE id=?").get(id);
+        if (row?.inbox_id !== null && row?.inbox_id !== undefined) this.history.complete(row.inbox_id);
+      }
+    })();
   }
 
   beginEffect(input: { effectKey: string; botId: string; routeKey: string; toolName: string }): "new" | "complete" | "unknown" {

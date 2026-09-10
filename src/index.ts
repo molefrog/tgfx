@@ -12,6 +12,7 @@ import {
   saveConfig,
   type ProjectPaths,
   type WorkspacePaths,
+  type ProjectSettings,
 } from "./config";
 import { acquireRuntimeLock } from "./lock";
 import { runTelegramMcpServer } from "./mcp/server";
@@ -19,7 +20,8 @@ import { botTokenSource, deleteBotToken, getBotToken, setBotToken, tokenFromEnvi
 import { StateStore } from "./state";
 import { adminCapabilitiesForMember, createTelegramApi, type TelegramApi } from "./telegram/api";
 import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairing";
-import { isOutputMode, OUTPUT_MODES, type BotIdentity, type TgfxConfig } from "./types";
+import { isOutputMode, OUTPUT_MODES, REPLY_POLICIES, REPLY_POLICY_LABELS, type ReplyPolicy, type BotIdentity, type TgfxConfig } from "./types";
+import { replyPolicy } from "./telegram/reply-policy";
 import { inspectFx } from "./fx/preflight";
 import { terminalQrCode } from "./cli/qr";
 import {
@@ -196,11 +198,24 @@ async function pickPrincipal(paths: ProjectPaths, config: TgfxConfig): Promise<P
     options: [
       { value: "pair", label: "Connect a Telegram account", hint: "scan a QR code" },
       { value: "manual", label: "Enter a Telegram ID", hint: "users, groups, and channels" },
+      { value: "existing", label: "Edit an existing grant" },
     ],
     ...STDERR,
   });
   cancelled(method);
   if (method === "manual") return askPrincipal();
+  if (method === "existing") {
+    const principal = await select({
+      message: "Whose reply setting?",
+      options: [
+        ...config.access.userIds.map((id) => ({ value: `user:${id}`, label: `User ${id} · DM` })),
+        ...config.access.chatIds.map((id) => ({ value: `chat:${id}`, label: `Chat ${id}` })),
+      ], ...STDERR,
+    });
+    cancelled(principal);
+    const [kind, id] = String(principal).split(":");
+    return { kind: kind as Principal["kind"], id: id! };
+  }
   const { bot, telegram } = await validateToken(await requireToken(config));
   if (bot.id !== config.activeBotId) {
     throw new CliError(
@@ -433,6 +448,7 @@ async function runCommand(tokens: string[]): Promise<void> {
       controls: {
         quit: shutdown,
         setOutput: (output) => app?.setOutput(output),
+        setReplyPolicy: (target, policy) => app?.setReplyPolicy(target, policy),
         setCustomIcons: (on) => app?.setCustomIcons(on),
         setPaused: (on) => app?.setPaused(on),
       },
@@ -494,26 +510,69 @@ function parseChatTarget(value: string): ParsedTarget {
 
 async function allowCommand(tokens: string[]): Promise<void> {
   const { flags, positionals } = parseArgs(tokens, {
-    flags: { chat: "boolean", json: "boolean" },
+    flags: { chat: "boolean", json: "boolean", reply: "string", inherit: "boolean", dm: "string", groups: "string" },
     positionals: true,
   });
   const paths = projectPaths();
   const config = await requireConfig(paths);
-  if (positionals.length) {
-    for (const raw of positionals) {
-      const id = canonicalId(raw);
-      grant(config, { kind: flags.chat || Number(id) < 0 ? "chat" : "user", id });
+  for (const name of ["reply", "dm", "groups"]) {
+    if (flags[name] !== undefined && !REPLY_POLICIES.includes(flags[name] as ReplyPolicy)) {
+      throw new CliError(`--${name} must be all or mention`);
     }
-  } else {
+  }
+  const defaults = flags.dm !== undefined || flags.groups !== undefined;
+  if (defaults && (positionals.length || flags.reply || flags.inherit || flags.chat)) {
+    throw new CliError("--dm and --groups set defaults; use them without IDs, --reply, --inherit, or --chat");
+  }
+  if (flags.inherit && (flags.reply || !positionals.length)) {
+    throw new CliError("--inherit needs an existing ID and cannot be combined with --reply");
+  }
+  const changes: Partial<ProjectSettings> = {};
+  const principals: Principal[] = positionals.map((raw) => {
+    const id = canonicalId(raw);
+    return { kind: flags.chat || Number(id) < 0 ? "chat" : "user", id };
+  });
+  if (defaults) {
+    if (flags.dm) changes.dmReply = flags.dm as ReplyPolicy;
+    if (flags.groups) changes.groupReply = flags.groups as ReplyPolicy;
+  } else if (!principals.length) {
     if (!process.stdin.isTTY || !process.stderr.isTTY) {
       throw new CliError(
         "give at least one Telegram user or chat ID",
         "example: tgfx allow 123456789 · in a terminal, plain tgfx allow pairs an account by QR code",
       );
     }
-    grant(config, await pickPrincipal(paths, config));
+    const principal = await pickPrincipal(paths, config);
+    principals.push(principal);
+    if (!flags.reply) {
+      const value = await select({
+        message: "When should FX reply?",
+        initialValue: replyPolicy(config, { chatId: principal.id, chatKind: Number(principal.id) < 0 ? "group" : "private" }),
+        options: REPLY_POLICIES.map((value) => ({ value, label: REPLY_POLICY_LABELS[value] })), ...STDERR,
+      });
+      cancelled(value);
+      flags.reply = String(value);
+    }
   }
-  await saveConfig(paths, config);
+  for (const principal of principals) {
+    if (flags.inherit) {
+      const ids = principal.kind === "user" ? config.access.userIds : config.access.chatIds;
+      if (!ids.includes(principal.id)) throw new CliError(`${principal.id} is not allowed; --inherit does not grant access`);
+    } else grant(config, principal);
+    if (flags.reply || flags.inherit) {
+      changes.chatReplies ??= { ...config.chatReplies };
+      if (flags.inherit) delete changes.chatReplies[principal.id];
+      else changes.chatReplies[principal.id] = flags.reply as ReplyPolicy;
+    }
+  }
+  Object.assign(config, changes);
+  await saveConfig(paths, config, changes);
+  if (defaults) ok(`replies · DMs ${config.dmReply} · groups ${config.groupReply}`);
+  for (const principal of principals) {
+    const policy = replyPolicy(config, { chatId: principal.id, chatKind: Number(principal.id) < 0 ? "group" : "private" });
+    ok(`${principal.id} · ${REPLY_POLICY_LABELS[policy]}`);
+  }
+  if (flags.reply || defaults) process.stderr.write(`  ${dim("History stays on this machine until cleared.")}\n`);
   process.stderr.write(`  ${dim("saved · restart tgfx to apply")}\n`);
   if (flags.json) console.log(JSON.stringify(config.access, null, 2));
 }
@@ -554,6 +613,43 @@ async function denyCommand(tokens: string[]): Promise<void> {
     `  ${dim(`${remaining} principal${remaining === 1 ? "" : "s"} remain${remaining === 1 ? "s" : ""} · saved · restart tgfx to apply`)}\n`,
   );
   if (flags.json) console.log(JSON.stringify(config.access, null, 2));
+}
+
+async function historyCommand(tokens: string[]): Promise<void> {
+  const { flags, positionals } = parseArgs(tokens, {
+    flags: { chat: "string", json: "boolean" }, positionals: true,
+  });
+  const clearing = positionals[0] === "clear";
+  if (positionals.length > 1 || (positionals.length && !clearing) || (clearing !== Boolean(flags.chat))) {
+    throw new CliError("use tgfx history, or tgfx history clear --chat <id>");
+  }
+  const paths = projectPaths();
+  const config = await requireConfig(paths);
+  const chatId = flags.chat ? canonicalId(String(flags.chat)) : undefined;
+  const release = clearing ? await acquireRuntimeLock(config.activeBotId, paths.workspace) : undefined;
+  let state: StateStore | undefined;
+  try {
+    state = new StateStore(botPaths(config.activeBotId).database, paths.workspace);
+    if (chatId) {
+      state.history.clear(chatId, config.activeBotId);
+      ok(`cleared local history for ${chatId} · Telegram messages and saved FX sessions remain`);
+      if (flags.json) console.log(JSON.stringify({ cleared: chatId }));
+    } else {
+      const chats = state.history.stats();
+      if (flags.json) console.log(JSON.stringify(chats, null, 2));
+      else {
+        console.log("History · kept on this machine until cleared");
+        for (const chat of chats) {
+          console.log(`  ${chat.route.split(":").slice(1).join("/")} · ${chat.messages} messages · ${chat.bytes} bytes · since ${chat.captured_since}`);
+        }
+        if (!chats.length) console.log("  No messages collected yet.");
+        console.log("  Only allowed messages received by tgfx are recorded. Earlier Telegram history is unavailable.");
+        if (!config.access.chatIds.some((id) => Number(id) < 0)) {
+          console.log("  No whole groups allowed; only allowed people's group messages can be recorded.");
+        }
+      }
+    }
+  } finally { state?.close(); await release?.(); }
 }
 
 async function approvalsCommand(tokens: string[]): Promise<void> {
@@ -608,7 +704,8 @@ async function accessCommand(tokens: string[]): Promise<void> {
         workspace: paths.workspace,
         access: principals,
         approvals: config.approvals,
-        settings: { output: config.output, customIcons: config.customIcons },
+        settings: { output: config.output, customIcons: config.customIcons,
+          dmReply: config.dmReply, groupReply: config.groupReply, chatReplies: config.chatReplies },
         sessions: routes.map((route) => ({
           chat: route.chat_id,
           topic: route.topic_id,
@@ -622,9 +719,12 @@ async function accessCommand(tokens: string[]): Promise<void> {
 
     console.log(`${bold(`bot ${config.activeBotId}`)} ${dim("·")} ${dim(paths.workspace)}`);
     console.log("");
+    console.log(`  ${dim(`replies · DMs ${config.dmReply ?? "all"} · groups ${config.groupReply ?? "mention"}`)}`);
     console.log(`  ${dim("can talk to fx")}`);
     for (const principal of principals) {
       const marks: string[] = [];
+      const policy = replyPolicy(config, { chatId: principal.id, chatKind: Number(principal.id) < 0 ? "group" : "private" });
+      marks.push(`${policy} (${config.chatReplies?.[principal.id] ? "chat override" : "default"})`);
       if (principal.id === config.approvals.chatId) marks.push(yellow("approvals go here"));
       if (principal.kind === "chat" && Number(principal.id) < 0) marks.push(dim("everyone"));
       console.log(`  ${green("●")} ${principal.kind} ${principal.id}${marks.length ? `   ${marks.join(" · ")}` : ""}`);
@@ -768,6 +868,13 @@ async function doctorCommand(tokens: string[]): Promise<void> {
                 ? `admin · ${granted.length ? granted.join(", ") : "no usable rights — grant them in the promote dialog"}`
                 : "not an admin · admin tools stay off",
             });
+            const visible = admin || Boolean((await telegram.getMe()).can_read_all_group_messages);
+            checks.push({
+              check: `history ${chatId}`, ok: visible,
+              detail: `${replyPolicy(config, { chatId, chatKind: "group" })} replies · ` + (visible
+                ? "group messages enabled; history contains only observed, allowed messages"
+                : "make the bot an admin, or disable Group Privacy with BotFather /setprivacy and remove/re-add it"),
+            });
           } catch (error) {
             checks.push({ check: `group ${chatId}`, ok: false, detail: error instanceof Error ? error.message : String(error) });
           }
@@ -805,6 +912,7 @@ async function doctorCommand(tokens: string[]): Promise<void> {
 const COMMANDS: Record<string, { run: (tokens: string[]) => Promise<void> }> = {
   access: { run: accessCommand },
   allow: { run: allowCommand },
+  history: { run: historyCommand },
   deny: { run: denyCommand },
   approvals: { run: approvalsCommand },
   auth: { run: authCommand },

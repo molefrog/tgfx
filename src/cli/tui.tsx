@@ -10,7 +10,7 @@ import {
   type StatusStore,
   type TraceGlyph,
 } from "../status";
-import { OUTPUT_MODES, REPLY_STYLES, type OutputMode } from "../types";
+import { OUTPUT_MODES, REPLY_STYLES, REPLY_POLICIES, REPLY_POLICY_LABELS, type ReplyPolicy, type OutputMode } from "../types";
 
 /**
  * The live wire: `telegram ── tgfx ── fx` as the status view.
@@ -27,6 +27,7 @@ export type TuiControls = {
   setOutput(output: OutputMode): void;
   setCustomIcons(on: boolean): void;
   setPaused(on: boolean): void;
+  setReplyPolicy(target: string, policy?: ReplyPolicy): void;
 };
 
 export type TuiProps = {
@@ -306,6 +307,7 @@ function PatchBay({ store, showLog, menuOpen }: { store: StatusStore; showLog: b
       </Text>
       <Switch hotkey="p" name="pause" on={settings.paused} />
       <Switch hotkey="l" name="log" on={showLog} />
+      <Text><Text color="cyan">r</Text>{" replies  "}</Text>
       <Box flexGrow={1} />
       {settings.yolo && <Text><Text color="yellow">✓</Text><Text dimColor>{" yolo  "}</Text></Text>}
       <Text dimColor>q quit  </Text>
@@ -343,6 +345,25 @@ function formatOptions(store: StatusStore, controls: TuiControls): FormatOption[
       set: (value) => controls.setCustomIcons(value === "on"),
     },
   ];
+}
+
+function replyOptions(store: StatusStore, controls: TuiControls, chats: boolean): FormatOption[] {
+  const { settings, routes } = store.snapshot();
+  const option = (name: string, target: string, value: ReplyPolicy | "inherit", hint: string): FormatOption => ({
+    name, value, values: chats ? ["inherit", ...REPLY_POLICIES] : REPLY_POLICIES,
+    label: value === "inherit" ? "Use default" : REPLY_POLICY_LABELS[value], on: value !== "inherit", hint,
+    set: (value) => controls.setReplyPolicy(target, value === "inherit" ? undefined : value as ReplyPolicy),
+  });
+  if (!chats) return [
+    option("DMs", "dm", settings.dmReply ?? "all", "DM default"),
+    option("Groups", "groups", settings.groupReply ?? "mention", "Group default"),
+  ];
+  const ids = [...new Set([...(settings.allowedChats ?? []), ...routes.map((r) => r.key.split(":")[1]!)])];
+  return ids.map((id) => {
+    const name = routes.find((r) => r.key.split(":")[1] === id)?.chat ?? id;
+    const inherited = Number(id) < 0 ? settings.groupReply ?? "mention" : settings.dmReply ?? "all";
+    return option(name, id, settings.chatReplies?.[id] ?? "inherit", `${id} · default: ${inherited}`);
+  });
 }
 
 /** The value after the current one, wrapping; `step` -1 goes back. */
@@ -387,19 +408,32 @@ export function Tui({ store, controls, columns, now = Date.now, animate = false 
   const [tick, setTick] = useState(0);
   const [showLog, setShowLog] = useState(false);
   const [menu, setMenu] = useState<{ open: boolean; cursor: number }>({ open: false, cursor: 0 });
+  const [menuKind, setMenuKind] = useState<"format" | "replies" | "chats">("format");
   const { stdout } = useStdout();
   useEffect(() => {
     if (!animate) return;
     const timer = setInterval(() => setTick((value) => value + 1), 125);
     return () => clearInterval(timer);
   }, [animate]);
-  const options = formatOptions(store, controls);
+  const options = menuKind === "format" ? formatOptions(store, controls)
+    : replyOptions(store, controls, menuKind === "chats");
+  if (menuKind === "replies") options.push({
+    name: "Chats", value: "", values: [""], label: "Edit chat overrides", on: true,
+    hint: "Enter to choose a chat", set: () => { setMenuKind("chats"); setMenu({ open: true, cursor: 0 }); },
+  });
   useInput((input, key) => {
     const { settings } = store.snapshot();
     if (input === "q" || (key.ctrl && input === "c")) controls.quit();
     else if (input === "p") controls.setPaused(!settings.paused);
     else if (input === "l") setShowLog((value) => !value);
-    else if (input === "f" || (menu.open && key.escape)) setMenu((state) => ({ ...state, open: !state.open }));
+    else if (input === "f" || input === "r") {
+      const kind = input === "f" ? "format" : "replies";
+      setMenu({ open: !menu.open || menuKind !== kind, cursor: 0 });
+      setMenuKind(kind);
+    } else if (menu.open && key.escape) {
+      if (menuKind === "chats") { setMenuKind("replies"); setMenu({ open: true, cursor: 0 }); }
+      else setMenu({ open: false, cursor: 0 });
+    }
     else if (menu.open && key.upArrow) setMenu((state) => ({ ...state, cursor: Math.max(0, state.cursor - 1) }));
     else if (menu.open && key.downArrow) {
       setMenu((state) => ({ ...state, cursor: Math.min(options.length - 1, state.cursor + 1) }));
@@ -417,6 +451,7 @@ export function Tui({ store, controls, columns, now = Date.now, animate = false 
       <PatchBay store={store} showLog={showLog} menuOpen={menu.open} />
       {store.snapshot().settings.saveError && <Text color="red">  {store.snapshot().settings.saveError}</Text>}
       {menu.open && <FormatMenu options={options} cursor={menu.cursor} />}
+      {menu.open && menuKind !== "format" && <Text dimColor>  History is kept on this machine even when FX stays quiet.</Text>}
       {showLog && <LogTail store={store} />}
     </Box>
   );

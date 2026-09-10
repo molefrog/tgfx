@@ -33,6 +33,7 @@ import {
   TurnRenderer,
 } from "./telegram/renderer";
 import { REPLY_STYLE_CALLBACK, replyStylePicker } from "./telegram/reply-style";
+import { replyPolicy } from "./telegram/reply-policy";
 import { redactSecrets } from "./secrets";
 import type { RouteLabel, Settings, StatusEvent, TraceGlyph } from "./status";
 import { withTimeout } from "./timeout";
@@ -49,6 +50,7 @@ import type {
   BotIdentity,
   InboundMessage,
   OutputMode,
+  ReplyPolicy,
   Route,
   SenderIdentity,
   TgfxConfig,
@@ -101,8 +103,8 @@ type StopCapableUpdate = Update & {
 type PersistedPayload =
   | { kind: "message"; message: InboundMessage }
   | { kind: "forwarded"; messages: InboundMessage[] }
-  | { kind: "callback"; update: Update; route: Route }
-  | { kind: "poll_answer"; update: Update; route: Route }
+  | { kind: "callback"; update: Update; route: Route; historySeq?: number }
+  | { kind: "poll_answer"; update: Update; route: Route; historySeq?: number }
   | { kind: "join_request"; update: Update; route: Route }
   | { kind: "migration"; update: Update; route: Route; oldChatId: string; newChatId: string };
 
@@ -258,7 +260,7 @@ export class TgfxApp {
     this.config = options.config;
     this.output = options.output ?? options.config.output;
     this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
-    this.state = new StateStore(options.paths.database);
+    this.state = new StateStore(options.paths.database, options.paths.workspace);
     this.state.ensurePollState(options.bot.id);
   }
 
@@ -294,6 +296,10 @@ export class TgfxApp {
       paused: this.resumePolling !== undefined,
       yolo: this.options.permissionMode === "yolo",
       saveError: this.settingsError,
+      dmReply: this.config.dmReply ?? "all",
+      groupReply: this.config.groupReply ?? "mention",
+      chatReplies: this.config.chatReplies ?? {},
+      allowedChats: [...new Set([...this.config.access.userIds, ...this.config.access.chatIds])],
     };
   }
 
@@ -308,6 +314,19 @@ export class TgfxApp {
     this.customIconsEnabled = on;
     this.status({ type: "settings", settings: this.settings() });
     this.persistSettings({ customIcons: on });
+  }
+
+  setReplyPolicy(target: "dm" | "groups" | string, policy?: ReplyPolicy): void {
+    const changes: Partial<ProjectSettings> = {};
+    if (target === "dm" && policy) changes.dmReply = policy;
+    else if (target === "groups" && policy) changes.groupReply = policy;
+    else {
+      changes.chatReplies = { ...this.config.chatReplies };
+      if (policy) changes.chatReplies[target] = policy;
+      else delete changes.chatReplies[target];
+    }
+    this.persistSettings(changes);
+    this.status({ type: "settings", settings: this.settings() });
   }
 
   /** A switch flipped in the terminal view becomes this project's own setting. */
@@ -541,12 +560,14 @@ export class TgfxApp {
     );
     if (message) {
       const authorized = isAuthorized(this.config, message);
+      message.invokesAgent = shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id, replyPolicy(this.config, message.route));
       if (authorized) this.state.ensureRoute(message.route);
       const id = this.state.ingestUpdate({
         botId: this.options.bot.id,
         updateId: update.update_id,
         routeKey: message.route.key,
         payload: { kind: "message", message } satisfies PersistedPayload,
+        message,
         authorized,
         ...(message.event === "message.edited"
           ? { supersede: { chatId: message.route.chatId, messageId: message.messageId } }
@@ -556,6 +577,14 @@ export class TgfxApp {
         const label = routeLabel(message);
         this.routeLabels.set(label.key, label);
         this.status({ type: "inbound", route: label, who: senderName(message) });
+        if (!message.invokesAgent && !message.provenance?.forward_origin && !message.provenance?.media_group_id) {
+          this.flushBatch(message.route.key);
+          if (this.state.claimInbox(id)) {
+            this.state.registerInbound(message, false);
+            this.state.markInbox(id, "done");
+          }
+          return;
+        }
         this.scheduleMessage(id, message);
       }
       return;
@@ -579,7 +608,7 @@ export class TgfxApp {
         botId: this.options.bot.id,
         updateId: update.update_id,
         routeKey: route.key,
-        payload: { kind: "callback", update, route } satisfies PersistedPayload,
+        payload: { kind: "callback", update, route, historySeq: this.state.history.latestSeq(route.key) } satisfies PersistedPayload,
         authorized,
       });
       if (id !== undefined) {
@@ -602,7 +631,7 @@ export class TgfxApp {
           || (actorId !== undefined && this.config.access.userIds.includes(String(actorId)));
         const id = this.state.ingestUpdate({
           botId: this.options.bot.id, updateId: update.update_id, routeKey: route.key,
-          payload: { kind: "poll_answer", update, route } satisfies PersistedPayload,
+          payload: { kind: "poll_answer", update, route, historySeq: this.state.history.latestSeq(route.key) } satisfies PersistedPayload,
           authorized,
         });
         if (id !== undefined) this.enqueue(id, route.key);
@@ -718,6 +747,9 @@ export class TgfxApp {
     const combined = {
       ...primary.payload.message,
       attachments: messages.flatMap(({ payload }) => payload.message.attachments),
+      historySeq: Math.max(...messages.map(({ payload }) => payload.message.historySeq ?? 0)),
+      historyMessageIds: messages.map(({ payload }) => payload.message.messageId),
+      invokesAgent: messages.some(({ payload }) => this.invokesAgent(payload.message)),
     };
     const captioned = messages.find(({ payload }) => payload.message.text !== undefined)?.payload.message;
     if (captioned) {
@@ -770,8 +802,10 @@ export class TgfxApp {
 
   private async dispatchForwarded(row: InboxRow, messages: InboundMessage[]): Promise<void> {
     for (const message of messages) this.state.registerInbound(message, false);
-    if (!messages.some((message) => shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id))) return;
-    const combined = { ...messages[0]!, attachments: messages.flatMap((message) => message.attachments) };
+    if (!messages.some((message) => this.invokesAgent(message))) return;
+    const combined = { ...messages[0]!, attachments: messages.flatMap((message) => message.attachments),
+      historySeq: Math.max(...messages.map((message) => message.historySeq ?? 0)),
+      historyMessageIds: messages.map((message) => message.messageId) };
     await this.runTurn(row, combined, async (sessionBootstrap, signal) => {
       // Opening a replacement session expires old refs; register each member
       // again once the session is ready, as runTurn does for the primary.
@@ -787,8 +821,12 @@ export class TgfxApp {
     });
   }
 
+  private invokesAgent(message: InboundMessage): boolean {
+    return message.invokesAgent ?? shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id, replyPolicy(this.config, message.route));
+  }
+
   private async dispatchMessage(row: InboxRow, message: InboundMessage): Promise<void> {
-    const invokesAgent = shouldInvokeAgent(message, this.options.bot.username, this.options.bot.id);
+    const invokesAgent = this.invokesAgent(message);
     this.state.registerInbound(message, false);
     if (!invokesAgent) return;
     const command = message.provenance?.forward_origin ? undefined : commandFromText(message.text, this.options.bot.username);
@@ -825,7 +863,7 @@ export class TgfxApp {
             );
           }
           await previous?.catch(() => undefined);
-          if (command.name === "clear" && !this.stopping) await this.runClear(message.route);
+          if (command.name === "clear" && !this.stopping) await this.runClear(message.route, message.historySeq);
         } finally {
           done.resolve();
           if (this.queueTails.get(message.route.key) === barrier) this.queueTails.delete(message.route.key);
@@ -1049,6 +1087,10 @@ export class TgfxApp {
       values.map((value) => value === oldChatId ? newChatId : value),
     )];
     this.config.access.chatIds = replaceId(this.config.access.chatIds);
+    if (this.config.chatReplies?.[oldChatId]) {
+      this.config.chatReplies = { ...this.config.chatReplies, [newChatId]: this.config.chatReplies[oldChatId]! };
+      delete this.config.chatReplies[oldChatId];
+    }
     if (this.config.approvals.chatId === oldChatId) this.config.approvals.chatId = newChatId;
     try {
       await saveConfig(this.options.paths, this.config);
@@ -1425,13 +1467,14 @@ export class TgfxApp {
     });
   }
 
-  private async runClear(route: Route): Promise<void> {
+  private async runClear(route: Route, through?: number): Promise<void> {
     this.pendingModels.delete(route.key);
     const previous = this.sessions.get(route.key);
     if (previous) await previous.dispose({ closeSession: true });
     await this.sessionStarts.get(route.key)?.catch(() => undefined);
     this.sessions.delete(route.key);
     this.state.resetRoute(route.key);
+    this.state.history.reset(route.key, through);
     await this.session(route);
     await this.options.telegram.sendText(route.chatId, "✓ Started a fresh conversation", route.topicId);
     this.log({
@@ -1456,6 +1499,8 @@ export class TgfxApp {
     };
 
     try {
+      this.state.history.begin(message.route.key, message.contextRef,
+        message.historySeq ?? this.state.history.latestSeq(message.route.key), row.id, [message.messageId]);
       let progressMessageId: number | undefined;
       if (draftId !== undefined) {
         await this.options.telegram.sendRichDraft(
@@ -1532,6 +1577,7 @@ export class TgfxApp {
     message: InboundMessage,
     buildPrompt: (sessionBootstrap: boolean, signal: AbortSignal) => acp.ContentBlock[] | Promise<acp.ContentBlock[]>,
   ): Promise<void> {
+    message.historySeq ??= (JSON.parse(row.payload_json) as { historySeq?: number }).historySeq;
     const controller = new AbortController();
     this.activeTurns.set(message.route.key, controller);
     const statusRoute = this.labelFor(message.route);
@@ -1541,6 +1587,10 @@ export class TgfxApp {
     let renderer: TurnRenderer | undefined;
     let remove: (() => void) | undefined;
     try {
+      // Preparation belongs to the claimed turn; edits must not enqueue a second run.
+      this.state.history.begin(message.route.key, message.contextRef,
+        message.historySeq ?? this.state.history.latestSeq(message.route.key), row.id,
+        message.historyMessageIds ?? [message.messageId]);
       const session = await this.session(message.route, controller.signal);
       controller.signal.throwIfAborted();
       const pendingModel = this.pendingModels.get(message.route.key);
@@ -1553,6 +1603,8 @@ export class TgfxApp {
       await this.prepareStickerImages(message, controller.signal);
       this.state.registerInbound(message);
       const blocks = await buildPrompt(this.pendingSessionBootstrap.has(message.route.key), controller.signal);
+      const preview = this.state.history.preview(message, this.pendingSessionBootstrap.has(message.route.key));
+      if (preview) blocks.unshift({ type: "text", text: JSON.stringify({ telegram_context: preview }) });
       controller.signal.throwIfAborted();
       const projector = new AcpProjector(await this.mcpToolIcons());
       renderer = new TurnRenderer(

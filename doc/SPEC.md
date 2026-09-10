@@ -33,8 +33,11 @@ Telegram poller causes tgfx to stop with an ownership error.
 | Command | Behavior |
 | --- | --- |
 | `tgfx` | Run in the current folder, setting it up if necessary. |
-| `tgfx access` | Show allowed users and chats, the approvals target, and saved routes. |
-| `tgfx allow [id…]` | Add access. Without IDs, offer interactive pairing or manual entry. Positive IDs mean users; negative IDs mean chats. `--chat` selects a chat explicitly. |
+| `tgfx access` | Show allowed users and chats, effective reply policies, the approvals target, and saved routes. |
+| `tgfx allow [id…]` | Add access or update an existing grant. `--reply all\|mention` sets its chat policy; a positive user ID affects only their DM. `--inherit` removes an existing grant's override. Without IDs, offer pairing, manual entry, or editing an existing grant. `--chat` selects a chat explicitly. |
+| `tgfx allow --dm all --groups mention` | Set folder reply defaults without adding access. Cannot be combined with IDs or per-chat flags. |
+| `tgfx history` | Show counts, text/metadata sizes, and collection start per chat/topic. `--json` returns structured output. |
+| `tgfx history clear --chat <id>` | Delete this folder's archive for a chat and its topics. Requires tgfx to be stopped. Does not erase Telegram messages or FX sessions. |
 | `tgfx deny <id…>` | Remove access. The allowlist must retain at least one entry. |
 | `tgfx approvals [chat[/topic]]` | Show or change where approval cards and recovery notices go. |
 | `tgfx auth [--remove]` | Add, replace, or remove the bot token. |
@@ -91,10 +94,33 @@ The topic ID is `0` outside a topic. Each route has its own fx process and saved
 session. Requests run in arrival order, one prompt at a time per route. Different
 routes can work concurrently.
 
-In a private chat, a supported message starts a turn. In a group, it must mention
-the bot, reply to the bot, or use a slash command addressed to it. Ordinary group
-conversation does not wake fx. These rules also apply to edited messages; an
-edit is a new event, not a rewind of earlier work.
+Reply policy defaults to `all` in private chats and `mention` in groups.
+`all` starts a turn for every supported, authorized message; `mention` requires
+a mention or a reply to this bot. DMs accept bare controls such as `/stop`.
+Groups require `/stop@bot`, a reply to the bot, or `all`; commands addressed to
+other bots are ignored. An edit can add the first invitation or replace a
+queued request. Editing a request already started does not rerun it.
+
+Reply policy is fixed when a message is received. The running terminal's
+`r replies` menu changes and saves defaults and chat overrides for future
+messages. CLI settings take effect on restart. Type defaults inherit from
+machine settings; folder defaults override them, and chat overrides win.
+
+Authorized discussion is recorded without starting FX. Each turn receives up
+to five background messages since the previous delivered turn's request, within
+8,000 text characters, with any explicitly replied-to message prioritized.
+Counts, truncation flags, and cursors explain omitted context. The history
+boundary is fixed at receipt; later messages and edits cannot change that
+snapshot. A delivered response advances the boundary atomically with its
+outbox status. Failure or cancellation leaves the discussion available.
+
+`read_history` reads full stored messages, searches plain text, or reads around
+a message reference. Pages contain up to 50 messages (25 by default) and 32,000
+text characters; remainder cursors preserve access to long text. Reading is
+limited to the active request's bot, workspace, chat, topic, and snapshot.
+History is quoted context, not additional instructions or action permissions.
+Replacement sessions receive a recent history seed; `/clear` establishes a new
+preview boundary without erasing the archive.
 
 A restart attempts to resume the saved fx session. If resume fails, tgfx starts
 a new session and tells the chat that its conversation was reset. A crashed fx
@@ -228,8 +254,9 @@ against the same route, with their own expiry. A reset invalidates old refs.
 
 | Tool | Purpose |
 | --- | --- |
+| `read_history` | Read this conversation's full observed history. Accepts one of `cursor`, `around` (history ref), or `query`, plus an optional `limit`. Requires an active turn. |
 | `set_reaction` | Set one emoji reaction on the current message or an earlier referenced message. |
-| `download_attachment` | Download an attachment from the active context and return its local path. Maximum: 20 MiB. |
+| `download_attachment` | Download an attachment from the active context or the same conversation's history snapshot. Return its local path. Maximum: 20 MiB. |
 | `send_file` | Send a regular file from the workspace or this bot's download directory. Maximum: 50 MiB. |
 | `send_photo` | Display a JPEG or PNG as a photo in the chat, with an optional caption. Maximum: 10 MiB. |
 | `send_voice` | Send OGG/Opus, MP3 or M4A as a voice message, with an optional caption. Maximum: 50 MiB. |
@@ -306,18 +333,23 @@ of a task and keeps its own session history separately.
 | Location | Contents |
 | --- | --- |
 | OS credential store | Bot token, keyed by the numeric bot ID. |
-| `config.json` | Machine-wide defaults for `output` and `customIcons`. |
+| `tokens/<bot_id>.token` | Linux fallback when the OS credential store is unavailable; unencrypted, owner-only (`0600`) in a private directory (`0700`). |
+| `config.json` | Machine-wide defaults for output, icons, and reply settings. |
 | `projects/<folder>-<hash>.json` | Workspace path, bot ID, access list, approvals target, and project setting overrides. |
-| `state/<bot_id>.db` | Poll cursor, routes, references, accepted requests, deliveries, interactions, and action results. |
+| `state/<bot_id>.db` | Poll cursor, routes, references, requests, deliveries, interactions, action results, and full observed conversation history scoped to each workspace. |
 | `state/<bot_id>.lock` and `.info.json` | Local process lock and diagnostic owner information. |
 | `files/<bot_id>/` | Downloaded attachments, pruned by age. Sticker previews also use system temporary directories. |
 
-The token lookup order is `TELEGRAM_BOT_TOKEN`, the OS credential store, then an
-interactive hidden prompt. Environment tokens are validated but not copied into
-the credential store. If secure storage is unavailable, use the environment;
-tgfx does not fall back to a plaintext token file. Token-bearing URLs and tokens
-are redacted from diagnostics. The fx child does not inherit the Telegram token
-as a shell environment variable; the scoped MCP server receives it separately.
+The token lookup order is `TELEGRAM_BOT_TOKEN`, an existing fallback token file,
+the OS credential store, then an interactive hidden prompt. Environment tokens
+are validated but not copied into either store. On Linux, unavailable keyrings
+do not block the prompt, and failed keyring writes fall back to a private token
+file. Setup explains that the file is unencrypted. Once a bot uses the file,
+rotation keeps using it; removal empties it so an older keyring token cannot
+reappear. `tgfx doctor` reports the active token source.
+Token-bearing URLs and tokens are redacted from diagnostics. The fx child does
+not inherit the Telegram token as a shell environment variable; the scoped MCP
+server receives it separately.
 
 Settings precedence is built-in defaults, machine defaults, project overrides,
 then run flags. A project file can omit presentation settings to inherit them.
@@ -332,8 +364,11 @@ for subsequent turns. Terminal icon changes are saved too. Writes within the
 process are serialized and atomically replace the settings file. Shutdown waits
 for pending saves; failures are shown instead of silently claiming persistence.
 
-SQLite is a recovery journal. Successful request and response bodies are
-scrubbed after completion; bounded excerpts remain with message refs. Expired
+SQLite holds the recovery journal and a separate conversation archive.
+Successful journal request and response bodies are scrubbed after completion;
+bounded excerpts remain with action refs. Full observed text, revisions,
+identities, and attachment metadata remain in the archive until explicitly
+cleared, independently of action expiry and session resets. Expired
 refs and old completion records are pruned. Failed or interrupted work can
 retain payloads for diagnosis, so the database must be treated as private data.
 Raw ACP transcripts are not recorded by default.
@@ -377,7 +412,7 @@ lock. After an abrupt exit, recovery uses the recorded states above.
 
 The current product covers private chats, groups, supergroups, and topics using
 long polling. It has no hosted daemon, webhook mode, broadcast-channel support,
-business-chat integration, bot-to-bot conversation, general history browser,
+business-chat integration, bot-to-bot conversation, arbitrary Telegram history fetching,
 or built-in media transcription. There is no limit or idle eviction policy yet
 for the number of route processes.
 
