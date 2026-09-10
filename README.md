@@ -33,31 +33,22 @@ Install [𝒇x](https://fx.sh) and sign in with `fx login` (Vercel),
 `fx login codex` (ChatGPT), or `fx login grok` (Grok):
 
 ```bash
+# 0. Ensure fx is installed and authenticated
 curl -fsSL https://fx.sh/setup.sh | bash
 fx login
-```
 
-Already have 𝒇x? Run `fx upgrade --channel stable` and check `fx --version`.
-Version [0.0.8](https://github.com/vercel-labs/fx/releases/tag/v0.0.8) is
-available on stable. Development builds also work: `fx upgrade --channel dev`
-switches to that channel, and `fx upgrade --channel stable` switches back.
-
-Why we depend on Bun? We use it to keep everything minimal and fast,
-reusing as much of Bun's built-ins as possible (SQLite, image compression etc.).
-
-```bash
 # 1. Install the package
-bun add --global @molefrog/tgfx
+bun add -g @molefrog/tgfx
 
 # 2. Grab a bot token from @BotFather, then run tgfx in your project folder.
 #    It walks you through authorization on the first run.
 tgfx
 ```
 
-You can also install with `npm install --global @molefrog/tgfx`; Bun is still
-required to run it. Run `tgfx doctor` to check your setup.
-
 Set `TELEGRAM_BOT_TOKEN` to override the saved token.
+
+>  Why we depend on Bun? We use it to keep everything minimal and fast,
+>  reusing as much of Bun's built-ins as possible (SQLite, image compression etc.).
 
 ## How it works
 
