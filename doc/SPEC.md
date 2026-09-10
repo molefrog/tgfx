@@ -433,5 +433,5 @@ session recovery, rendering, file boundaries, and action deduplication. They do
 not establish how every Telegram client renders a message or how every real
 fx tool behaves under cancellation.
 
-Run `bun run check && bun test` for code changes, and `bun run build` before
+Run `bun run check && bun run test` for code changes, and `bun run build` before
 using the linked executable.

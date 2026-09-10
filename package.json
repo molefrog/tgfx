@@ -30,7 +30,7 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "check": "bunx tsc --noEmit",
-    "test": "bun test tests/*.test.ts",
+    "test": "bun test --parallel tests/*.test.ts",
     "prepack": "bun run build",
     "prepublishOnly": "bun run check && bun run test"
   },

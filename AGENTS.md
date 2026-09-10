@@ -15,8 +15,8 @@ so `bun run build` first — and again after changes.
 
 ## Tests
 
-`bun run check && bun test` (Bun ≥ 1.4). Keep the suite fast. Wait on
-promises, never sleep and hope.
+`bun run check && bun run test` (Bun ≥ 1.4; the script runs test files
+in parallel). Keep the suite fast. Wait on promises, never sleep and hope.
 
 - Test through real seams: the fake `fx` binary, the fake Telegram server,
   real SQLite in a temp dir. No mock forests.

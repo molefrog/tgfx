@@ -124,6 +124,8 @@ export class FxRouteSession {
     binary: string;
     model?: string;
     permissionMode?: FxPermissionMode;
+    /** How long a cancelled turn may keep running before the process is terminated. Default: two seconds. */
+    cancelGraceMs?: number;
     previousSessionId?: string;
     mcp?: McpOptions;
   }) {}
@@ -332,7 +334,7 @@ export class FxRouteSession {
     let cancelTimer: ReturnType<typeof setTimeout> | undefined;
     const abort = () => {
       void this.cancel();
-      cancelTimer = setTimeout(() => { void this.dispose(); }, 2_000);
+      cancelTimer = setTimeout(() => { void this.dispose(); }, this.options.cancelGraceMs ?? 2_000);
     };
     handlers.signal?.addEventListener("abort", abort, { once: true });
     try {

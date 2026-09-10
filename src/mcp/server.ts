@@ -289,7 +289,7 @@ export async function runTelegramMcpServer(): Promise<void> {
         if (JSON.parse(approval.result_json) === "approve") return;
         throw new Error("The Telegram administrator denied this action.");
       }
-      await Bun.sleep(400);
+      await Bun.sleep(100);
     }
     if (state.expireInteraction(id)) {
       await telegram.editReplyMarkup(env.approvalsChat, card.message_id, {
