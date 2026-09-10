@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import * as acp from "@agentclientprotocol/sdk";
+import type * as acp from "@agentclientprotocol/sdk";
 import { appendFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 
@@ -54,6 +54,8 @@ if (process.argv[2] === "usage") {
   }));
   process.exit(0);
 }
+// The SDK is most of the startup cost; --version, doctor and usage exit before it loads.
+const { agent, methods, ndJsonStream } = await import("@agentclientprotocol/sdk");
 const modelIndex = process.argv.indexOf("--model");
 let model = modelIndex >= 0 ? process.argv[modelIndex + 1] ?? "fake-default" : "fake-default";
 const availableModels = [...new Set([
@@ -88,8 +90,8 @@ const sessionState = () => ({
   }],
 });
 
-const app = acp.agent({ name: "fake-fx" })
-  .onRequest(acp.methods.agent.initialize, ({ params }) => {
+const app = agent({ name: "fake-fx" })
+  .onRequest(methods.agent.initialize, ({ params }) => {
     record("initialize", params);
     return {
       protocolVersion: params.protocolVersion,
@@ -98,14 +100,14 @@ const app = acp.agent({ name: "fake-fx" })
       authMethods: [],
     };
   })
-  .onRequest(acp.methods.agent.session.load, ({ params }) => {
+  .onRequest(methods.agent.session.load, ({ params }) => {
     record("load", params);
     if (process.env.FAKE_FX_FAIL_LOAD === "1") throw new Error("missing saved session");
     return sessionState();
   })
-  .onRequest(acp.methods.agent.session.new, async (context) => {
+  .onRequest(methods.agent.session.new, async (context) => {
     record("new", context.params);
-    await context.client.notify(acp.methods.client.session.update, {
+    await context.client.notify(methods.client.session.update, {
       sessionId: "fake-new-session",
       update: {
         sessionUpdate: "available_commands_update",
@@ -118,11 +120,11 @@ const app = acp.agent({ name: "fake-fx" })
     });
     return { sessionId: "fake-new-session", ...sessionState() };
   })
-  .onRequest(acp.methods.agent.session.setMode, ({ params }) => {
+  .onRequest(methods.agent.session.setMode, ({ params }) => {
     record("set_mode", params);
     return {};
   })
-  .onRequest(acp.methods.agent.session.setConfigOption, ({ params }) => {
+  .onRequest(methods.agent.session.setConfigOption, ({ params }) => {
     record("set_config_option", params);
     if (params.configId !== "model" || typeof params.value !== "string" || !availableModels.includes(params.value)) {
       throw new Error("unsupported fake config option");
@@ -130,7 +132,7 @@ const app = acp.agent({ name: "fake-fx" })
     model = params.value;
     return { configOptions: sessionState().configOptions };
   })
-  .onRequest(acp.methods.agent.session.prompt, async (context) => {
+  .onRequest(methods.agent.session.prompt, async (context) => {
     record("prompt", context.params);
     const text = context.params.prompt
       .flatMap((block) => block.type === "text" && !block.text.startsWith('{"telegram_context":') ? [block.text] : []).join("\n");
@@ -143,7 +145,7 @@ const app = acp.agent({ name: "fake-fx" })
       ? ["# Section heading\n\nParagraph with **bold", "** and *italic*."]
       : ["fake streamed text"];
     for (const chunk of messageChunks) {
-      await context.client.notify(acp.methods.client.session.update, {
+      await context.client.notify(methods.client.session.update, {
         sessionId: context.params.sessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
@@ -155,11 +157,11 @@ const app = acp.agent({ name: "fake-fx" })
     // Tool calls mirror the fx wire shape: a pending `tool_call` with the
     // tool's name and arguments, then a completed `tool_call_update`.
     const runTool = async (toolCallId: string, name: string, kind: string, rawInput: object, output: string) => {
-      await context.client.notify(acp.methods.client.session.update, {
+      await context.client.notify(methods.client.session.update, {
         sessionId: context.params.sessionId,
         update: { sessionUpdate: "tool_call", toolCallId, name, title: name, kind, status: "pending", rawInput },
       } as unknown as acp.SessionNotification);
-      await context.client.notify(acp.methods.client.session.update, {
+      await context.client.notify(methods.client.session.update, {
         sessionId: context.params.sessionId,
         update: {
           sessionUpdate: "tool_call_update",
@@ -178,7 +180,7 @@ const app = acp.agent({ name: "fake-fx" })
         "<path>README.md</path>\n<content>\n1\t# Sample\n</content>");
     }
     if (text.includes("PERMISSION")) {
-      const decision = await context.client.request(acp.methods.client.session.requestPermission, {
+      const decision = await context.client.request(methods.client.session.requestPermission, {
         sessionId: context.params.sessionId,
         toolCall: {
           toolCallId: "tool-1", title: "Use Telegram", kind: "other", status: "pending",
@@ -200,12 +202,12 @@ const app = acp.agent({ name: "fake-fx" })
     await wait;
     return { stopReason: (forcedStopReason ?? "end_turn") as acp.StopReason };
   })
-  .onNotification(acp.methods.agent.session.cancel, ({ params }) => {
+  .onNotification(methods.agent.session.cancel, ({ params }) => {
     record("cancel", params);
     if (!ignoreCancel) cancelled?.();
     cancelled = undefined;
   })
-  .onRequest(acp.methods.agent.session.close, ({ params }) => {
+  .onRequest(methods.agent.session.close, ({ params }) => {
     record("close", params);
     return {};
   });
@@ -214,4 +216,4 @@ record("argv", process.argv.slice(2));
 record("permission_mode", process.env.FX_PERMISSION_MODE);
 const outgoing = Writable.toWeb(process.stdout) as unknown as WritableStream<Uint8Array>;
 const incoming = Readable.toWeb(process.stdin) as unknown as ReadableStream<Uint8Array>;
-await app.connect(acp.ndJsonStream(outgoing, incoming));
+await app.connect(ndJsonStream(outgoing, incoming));
