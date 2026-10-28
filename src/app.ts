@@ -39,6 +39,8 @@ import { replyPolicy } from "./telegram/reply-policy";
 import { redactSecrets } from "./secrets";
 import type { RouteLabel, Settings, StatusEvent, TraceGlyph } from "./status";
 import { withTimeout } from "./timeout";
+import { EventJournal, eventSchema, eventDestination, eventPrompt, type ExternalEvent, type EventJob } from "./events";
+import { eventsSocketPath, listenEvents } from "./event-socket";
 import {
   commandFromText,
   groupMigrationFromUpdate,
@@ -46,6 +48,7 @@ import {
   normalizeMessageUpdate,
   shouldInvokeAgent,
   toEnvelope,
+  SESSION_BOOTSTRAP_INSTRUCTIONS,
 } from "./telegram/normalize";
 import type {
   AdminCapability,
@@ -218,6 +221,9 @@ function traceGlyph(update: acp.SessionUpdate): TraceGlyph | undefined {
 
 export class TgfxApp {
   private readonly state: StateStore;
+  private readonly events: EventJournal;
+  private eventSocket?: Awaited<ReturnType<typeof listenEvents>>;
+  private background?: FxRouteSession;
   private readonly sessions = new Map<string, FxRouteSession>();
   private readonly sessionStarts = new Map<string, Promise<FxRouteSession>>();
   private readonly queueTails = new Map<string, Promise<void>>();
@@ -276,6 +282,7 @@ export class TgfxApp {
     this.output = options.output ?? options.config.output;
     this.customIconsEnabled = options.customIcons ?? options.config.customIcons;
     this.state = new StateStore(options.paths.database, options.paths.workspace);
+    this.events = new EventJournal(this.state.db, options.paths.workspace, options.bot.id);
     this.state.ensurePollState(options.bot.id);
   }
 
@@ -404,6 +411,18 @@ export class TgfxApp {
         this.schedule(row.id, row.route_key, payload);
       }
     }
+    for (const event of this.events.recover()) this.enqueueExternal(event);
+    this.eventSocket = await listenEvents(eventsSocketPath(this.options.paths.database), async request => {
+      if (!request || typeof request !== "object") throw new Error("Invalid event request");
+      const input = request as { op?: string; event?: unknown; id?: string };
+      if (input.op === "emit") return this.emitExternal(input.event);
+      if (input.op === "get" && typeof input.id === "string") {
+        const job = this.events.get(input.id);
+        if (!job) throw new Error("Unknown event ID");
+        return job;
+      }
+      throw new Error("Unknown event operation");
+    });
     this.log({
       event: "polling.started",
       message: `@${this.options.bot.username ?? this.options.bot.id} · polling · ${this.options.paths.workspace} · ${this.output}`,
@@ -432,6 +451,7 @@ export class TgfxApp {
 
   private async stopOnce(): Promise<void> {
     this.stopping = true;
+    await this.eventSocket?.close();
     this.stopSignal();
     this.pollAbort.abort(new Error("tgfx is stopping"));
     for (const batch of this.batches.values()) clearTimeout(batch.timer);
@@ -459,6 +479,7 @@ export class TgfxApp {
     // child processes so Ctrl-C cannot hang behind an unresponsive agent/tool.
     await withTimeout(queued, 3_000, () => undefined);
     await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
+    await this.background?.dispose();
     await queued;
     await this.settingsSave;
     await Promise.allSettled([...this.stickerTemporaryDirectories].map((directory) =>
@@ -712,6 +733,103 @@ export class TgfxApp {
       if (this.queueTails.get(routeKeyValue) === tail) this.queueTails.delete(routeKeyValue);
     });
     this.queueTails.set(routeKeyValue, tail);
+  }
+
+  /** Trusted local callers submit data; Telegram authorization is not inferred from its contents. */
+  emitExternal(input: unknown): EventJob {
+    if (this.stopping) throw new Error("TGFX is stopping");
+    const parsed = eventSchema.parse(input);
+    if (parsed.chatId && !this.config.access.chatIds.includes(parsed.chatId) && !this.config.access.userIds.includes(parsed.chatId)) {
+      throw new Error("Event destination is not an allowed chat");
+    }
+    const accepted = this.events.accept(parsed);
+    if (accepted.fresh) this.enqueueExternal(accepted.event);
+    return this.events.get(accepted.event.id)!;
+  }
+
+  eventJob(id: string): EventJob | undefined { return this.events.get(id); }
+
+  private enqueueExternal(event: ExternalEvent): void {
+    const key = eventDestination(event, this.options.bot.id);
+    if (event.chatId) this.flushBatch(key);
+    const session = event.chatId ? this.sessions.get(key) : this.background;
+    if (event.steer && session?.canSteer && this.activeTurns.has(key)) {
+      this.events.mark(event.id, "running");
+      const task = session.steer(eventPrompt(event)).then(() => {
+        this.events.mark(event.id, "done");
+      }, error => {
+        this.events.mark(event.id, this.stopping ? "interrupted" : "failed", null, redactSecrets(String(error)));
+      }).finally(() => this.controls.delete(task));
+      this.controls.add(task);
+      return;
+    }
+    const previous = this.queueTails.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      if (!this.stopping && this.events.get(event.id)?.status === "queued") await this.runExternal(event);
+    });
+    const tail = next.finally(() => {
+      if (this.queueTails.get(key) === tail) this.queueTails.delete(key);
+    });
+    this.queueTails.set(key, tail);
+  }
+
+  private async runExternal(event: ExternalEvent): Promise<void> {
+    const key = eventDestination(event, this.options.bot.id);
+    const controller = new AbortController();
+    this.activeTurns.set(key, controller);
+    this.events.mark(event.id, "running");
+    let renderer: TurnRenderer | undefined;
+    let remove: (() => void) | undefined;
+    try {
+      const route: Route | undefined = event.chatId ? {
+        key, botId: this.options.bot.id, chatId: event.chatId, topicId: event.topicId ?? "0",
+        chatKind: event.chatId.startsWith("-") ? "supergroup" : "private",
+      } : undefined;
+      let session: FxRouteSession;
+      if (route) {
+        session = await this.session(route, controller.signal);
+        const old = this.state.activeContext(key);
+        if (old) this.state.deactivateContext(key, old.context_ref);
+      } else {
+        if (!this.background?.usable) {
+          await this.background?.dispose();
+          this.background = new FxRouteSession({
+            workspace: this.options.paths.workspace, binary: this.options.fxBinary,
+            model: this.options.model, permissionMode: this.options.permissionMode,
+            previousSessionId: this.events.session(), cancelGraceMs: this.options.cancelGraceMs,
+          });
+        }
+        session = this.background;
+        const info = await session.start();
+        this.events.saveSession(info.sessionId);
+      }
+      const projector = new AcpProjector(await this.mcpToolIcons());
+      if (route) {
+        renderer = new TurnRenderer(this.options.telegram, this.state, route, this.output, projector,
+          controller.signal, this.draftLimiter(route.chatId));
+        renderer.start();
+      }
+      remove = session.onUpdate(update => { const snapshot = projector.apply(update); renderer?.changed(snapshot); });
+      this.log({ event: "external.started", message: `external event ${event.name} · ${event.id}`, id: event.id, destination: key });
+      const blocks = eventPrompt(event);
+      if (route && this.pendingSessionBootstrap.delete(key)) {
+        blocks.unshift({ type: "text", text: SESSION_BOOTSTRAP_INSTRUCTIONS });
+      }
+      await session.prompt(blocks, {
+        signal: controller.signal,
+        ...(route ? { permission: (request: acp.RequestPermissionRequest) => this.requestPermission(route, request, controller.signal) } : {}),
+      });
+      controller.signal.throwIfAborted();
+      if (renderer) await renderer.finish({ botId: this.options.bot.id, effectKey: `external:${this.options.paths.workspace}:${event.id}` });
+      const result = projector.plainFinal(this.output);
+      this.events.mark(event.id, "done", result);
+      this.log({ event: "external.done", message: `external event completed · ${event.id}`, id: event.id });
+    } catch (error) {
+      this.events.mark(event.id, this.stopping ? "interrupted" : "failed", null, redactSecrets(String(error)));
+      this.log({ event: "external.failed", message: `external event failed · ${event.id}`, id: event.id, error: redactSecrets(String(error)) });
+    } finally {
+      remove?.(); await renderer?.abort(); this.activeTurns.delete(key);
+    }
   }
 
   private scheduleMessage(inboxId: number, message: InboundMessage, delay?: number): void {

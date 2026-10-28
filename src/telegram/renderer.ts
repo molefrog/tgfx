@@ -184,7 +184,7 @@ export class TurnRenderer {
     return streamsRoute(this.output, this.route);
   }
 
-  async finish(input: { botId: string; inboxId: number; effectKey: string }): Promise<string[]> {
+  async finish(input: { botId: string; inboxId?: number; effectKey: string }): Promise<string[]> {
     await this.stopDrafts("draft finalized");
     const rich = this.projector.rich({ final: true, output: this.output });
     if (!rich.blocks?.length) return [];

@@ -926,6 +926,7 @@ async function doctorCommand(tokens: string[]): Promise<void> {
 }
 
 const COMMANDS: Record<string, { run: (tokens: string[]) => Promise<void> }> = {
+  emit: { run: async tokens => { const { emitCommand } = await import("./cli/emit"); await emitCommand(tokens); } },
   access: { run: accessCommand },
   allow: { run: allowCommand },
   history: { run: historyCommand },

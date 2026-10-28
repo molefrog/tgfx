@@ -133,6 +133,11 @@ const app = agent({ name: "fake-fx" })
     return { configOptions: sessionState().configOptions };
   })
   .onRequest(methods.agent.session.prompt, async (context) => {
+    if ((context.params._meta?.fx as { steer?: boolean } | undefined)?.steer) {
+      record("steer", context.params);
+      cancelled?.();
+      return { stopReason: "end_turn" as const };
+    }
     record("prompt", context.params);
     const text = context.params.prompt
       .flatMap((block) => block.type === "text" && !block.text.startsWith('{"telegram_context":') ? [block.text] : []).join("\n");
