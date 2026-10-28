@@ -10,6 +10,7 @@ import {
   loadConfig,
   projectPaths,
   saveConfig,
+  assertAccessPolicyWritable,
   type ProjectPaths,
   type WorkspacePaths,
   type ProjectSettings,
@@ -22,6 +23,7 @@ import { privatePairingFromUpdate, type PrivatePairing } from "./telegram/pairin
 import { isOutputMode, OUTPUT_MODES, REPLY_POLICIES, REPLY_POLICY_LABELS, type ReplyPolicy, type BotIdentity, type TgfxConfig } from "./types";
 import { replyPolicy } from "./telegram/reply-policy";
 import { inspectFx } from "./fx/preflight";
+import type { TelegramMcpBroker } from "./mcp/broker";
 import { terminalQrCode } from "./cli/qr";
 import {
   banner,
@@ -434,6 +436,7 @@ async function runCommand(tokens: string[]): Promise<void> {
   const store = live ? new StatusStore({ yolo: Boolean(flags.yolo) }) : undefined;
   const log = store ? (event: TgfxLogEvent) => store.logLine(event.message) : createLogger(json);
   let app: TgfxApp | undefined;
+  let mcpBroker: TelegramMcpBroker | undefined;
   let view: { unmount(clear?: boolean): Promise<void> } | undefined;
   let completed = false;
   let release: (() => Promise<void>) | undefined;
@@ -470,11 +473,17 @@ async function runCommand(tokens: string[]): Promise<void> {
       if (!live) log({ event: "permission.mode", message, mode: "yolo" });
     }
     const { TgfxApp } = await import("./app");
+    const mcpLaunch = Bun.isStandaloneExecutable
+      ? { command: process.execPath, args: ["mcp"] }
+      : { command: process.execPath, args: [fileURLToPath(import.meta.url), "mcp"] };
+    if (process.env.TGFX_MCP_SOCKET_DIR) {
+      const { TelegramMcpBroker } = await import("./mcp/broker");
+      mcpBroker = await TelegramMcpBroker.listen(process.env.TGFX_MCP_SOCKET_DIR, mcpLaunch);
+    }
     app = new TgfxApp({
       ...appRuntime,
-      mcpLaunch: Bun.isStandaloneExecutable
-        ? { command: process.execPath, args: ["mcp"] }
-        : { command: process.execPath, args: [fileURLToPath(import.meta.url), "mcp"] },
+      mcpLaunch,
+      ...(mcpBroker ? { mcpBroker } : {}),
       ...(typeof flags.model === "string" ? { model: flags.model } : {}),
       ...(output === undefined ? {} : { output }),
       ...(flags["no-icons"] ? { customIcons: false } : {}),
@@ -489,6 +498,7 @@ async function runCommand(tokens: string[]): Promise<void> {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
     await app?.stop();
+    await mcpBroker?.close();
     await release?.();
     await view?.unmount(!completed);
     if (completed) {
@@ -518,6 +528,7 @@ async function allowCommand(tokens: string[]): Promise<void> {
   });
   const paths = projectPaths();
   const config = await requireConfig(paths);
+  if (!(flags.dm || flags.groups || flags.inherit)) assertAccessPolicyWritable();
   for (const name of ["reply", "dm", "groups"]) {
     if (flags[name] !== undefined && !REPLY_POLICIES.includes(flags[name] as ReplyPolicy)) {
       throw new CliError(`--${name} must be all or mention`);
@@ -581,6 +592,7 @@ async function allowCommand(tokens: string[]): Promise<void> {
 }
 
 async function denyCommand(tokens: string[]): Promise<void> {
+  assertAccessPolicyWritable();
   const { flags, positionals } = parseArgs(tokens, {
     flags: { json: "boolean" },
     positionals: true,
@@ -669,6 +681,7 @@ async function approvalsCommand(tokens: string[]): Promise<void> {
     return;
   }
   if (positionals.length > 1) throw new CliError("approvals takes one chat", "example: tgfx approvals -1002255001/55");
+  assertAccessPolicyWritable();
   const target = parseChatTarget(positionals[0]!);
   const token = await requireToken(config);
   await createTelegramApi(token).api.getChat(target.chatId);
@@ -931,6 +944,9 @@ const first = argv[0];
 if (first === "mcp") {
   const { runTelegramMcpServer } = await import("./mcp/server");
   await runTelegramMcpServer();
+} else if (first === "mcp-proxy") {
+  const { runMcpProxy } = await import("./mcp/broker");
+  await runMcpProxy();
 } else {
   if (argv.includes("--no-color")) process.env.NO_COLOR = "1";
   const debug = argv.includes("--debug") || (process.env.DEBUG ?? "").includes("tgfx");

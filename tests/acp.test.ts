@@ -51,6 +51,8 @@ describe("FX ACP transport", () => {
       PATH: "/bin",
       OPENAI_API_KEY: "provider-owned-by-fx",
       TELEGRAM_BOT_TOKEN: "secret",
+      TGFX_HOME: "/private/state",
+      TGFX_POLICY_FILE: "/private/policy.json",
       TGFX_MCP_TOKEN: "secret",
       TGFX_MCP_ROUTE_KEY: "route",
       TGFX_INTERNAL_TELEGRAM_API_ROOT: "http://test",
