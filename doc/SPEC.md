@@ -94,6 +94,11 @@ The topic ID is `0` outside a topic. Each route has its own fx process and saved
 session. Requests run in arrival order, one prompt at a time per route. Different
 routes can work concurrently.
 
+When an ordinary request joins a busy route, Telegram gets one queue notice
+with the appropriate `/stop` command. More requests in the same busy period do
+not repeat the notice. Control commands still bypass the queue. Failure to send
+the notice does not cancel or delay the queued work.
+
 Reply policy defaults to `all` in private chats and `mention` in groups.
 `all` starts a turn for every supported, authorized message; `mention` requires
 a mention or a reply to this bot. DMs accept bare controls such as `/stop`.
