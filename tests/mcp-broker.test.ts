@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { connect } from "node:net";
@@ -14,6 +14,7 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), "tgfx-broker-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
+  await chmod(root, 0o2750);
   const broker = await TelegramMcpBroker.listen(root, {
     command: process.execPath, args: [resolve("src/index.ts"), "mcp"],
   });
@@ -41,6 +42,7 @@ test("serves real MCP through an uncredentialed proxy and ignores forged route e
   const { broker, lease } = await setup();
   expect(Object.keys(lease.launch.env).sort()).toEqual(["TGFX_MCP_CAPABILITY", "TGFX_MCP_SOCKET"]);
   expect((await stat(broker.path)).mode & 0o777).toBe(0o660);
+  expect((await stat(broker.path.replace(/\/[^/]+$/, ""))).mode & 0o7777).toBe(0o2750);
   const client = await clientFor({
     ...lease.launch,
     env: { ...lease.launch.env, TGFX_MCP_ROUTE_KEY: "100:-999:0", TGFX_MCP_ALLOWED_CHATS: '["-999"]' },

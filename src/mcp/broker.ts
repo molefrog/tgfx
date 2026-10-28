@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { createServer, connect, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -17,7 +17,14 @@ export class TelegramMcpBroker {
   private constructor(readonly path: string, private readonly server: Server, private readonly launch: Launch) {}
 
   static async listen(directory: string, launch: Launch): Promise<TelegramMcpBroker> {
-    await mkdir(directory, { recursive: true, mode: 0o750 });
+    // Bun's recursive mkdir can apply mode to an existing directory. Keep an
+    // operator-provided setgid directory intact so the socket inherits its group.
+    try {
+      if (!(await lstat(directory)).isDirectory()) throw new Error("MCP socket path must be a directory");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await mkdir(directory, { recursive: true, mode: 0o750 });
+    }
     // A fresh name never takes over another service's socket, including after a crash.
     const path = join(directory, `mcp-${randomBytes(8).toString("hex")}.sock`);
     let broker: TelegramMcpBroker;
