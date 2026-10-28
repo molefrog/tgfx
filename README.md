@@ -16,7 +16,7 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 - [x] Can work in DMs and groups
 - [x] Can send stickers and react to messages
 - [x] Interactive model picker (`/model`)
-- [x] Conversation compaction (`/compact`) and fresh starts (`/clear`)
+- [x] Conversation compaction (`/compact`) and fresh starts (`/clear`), with inline confirmation buttons
 - [x] Cost reports (`/cost`)
 - [x] Approval cards for destructive actions
 - [x] Bots can be group admins: pin messages, moderate, and more
@@ -60,6 +60,19 @@ On the first run it asks for your bot token and pairs you as the owner: scan a
 QR code or tap a link. To change or remove the token later, run `tgfx auth`.
 Everything tgfx remembers about a folder lives under `~/.fx/telegram/`; nothing
 is written into the project.
+
+## Session controls
+
+`/clear` and `/compact` first show a confirmation with buttons inside the message
+text, using Telegram Bot API 10.3's `RichTextButton`. Nothing changes until the
+person who sent the command presses the confirmation button. Cancel keeps the
+conversation and running task unchanged. Confirmations expire after five
+minutes; sending another session command replaces the pending confirmation.
+
+Confirming `/clear` stops the current task, discards queued requests, and starts
+a fresh conversation on the next message. It does not delete files or Telegram
+messages. Confirming `/compact` queues compaction after existing work. `/stop`
+still acts immediately and also discards queued compaction.
 
 ## Groups and reply settings
 
