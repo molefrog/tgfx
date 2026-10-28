@@ -9,6 +9,7 @@ import { loadConfig, saveConfig, workspacePaths, type WorkspacePaths } from "../
 import { StateStore } from "../src/state";
 import type { TelegramApi } from "../src/telegram/api";
 import type { OutputMode, TgfxConfig } from "../src/types";
+import { confirmationData, confirmUpdate } from "./fixtures/session-confirmation";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -483,6 +484,8 @@ describe("tgfx host pipeline", () => {
     const drafts: InputRichMessageWithoutUpload[] = [];
     const finals: InputRichMessageWithoutUpload[] = [];
     let firstPoll = true;
+    const confirmation = Promise.withResolvers<Update[]>();
+    let confirmed = false;
     let delivered!: () => void;
     const permanent = new Promise<void>((resolve) => { delivered = resolve; });
     const telegram = {
@@ -497,6 +500,7 @@ describe("tgfx host pipeline", () => {
             update(3, 42, "/compact"),
           ];
         }
+        if (!confirmed) { confirmed = true; return confirmation.promise; }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
       },
       setCommands: async (_chat: string, menu: Array<{ command: string }>) => { menus.push(menu); return true as const; },
@@ -510,11 +514,19 @@ describe("tgfx host pipeline", () => {
         return true as const;
       },
       sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
+        if (confirmationData(rich)) {
+          confirmation.resolve([confirmUpdate(rich, 701)]);
+          return { message_id: 701 } as Message.TextMessage;
+        }
         finals.push(rich);
         delivered();
         return { message_id: 701 } as Message.TextMessage;
       },
-      editRich: async () => { throw new Error("streaming compact must not edit a regular message"); },
+      answerCallback: async () => true as const,
+      editRich: async (_chat: string, _id: number, rich: InputRichMessageWithoutUpload) => {
+        if (JSON.stringify(rich).includes("compacted")) throw new Error("streaming compact must not edit a progress message");
+        return { message_id: 701 } as Message.TextMessage;
+      },
     } as unknown as TelegramApi;
     const app = new TgfxApp({
       config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },
@@ -758,6 +770,8 @@ describe("tgfx host pipeline", () => {
     const sent: InputRichMessageWithoutUpload[] = [];
     const edits: Array<{ messageId: number; rich: InputRichMessageWithoutUpload }> = [];
     let firstPoll = true;
+    const confirmation = Promise.withResolvers<Update[]>();
+    let confirmed = false;
     let edited!: () => void;
     const completed = new Promise<void>((resolve) => { edited = resolve; });
     const telegram = {
@@ -768,6 +782,7 @@ describe("tgfx host pipeline", () => {
           firstPoll = false;
           return [update(1, 42, "/compact")];
         }
+        if (!confirmed) { confirmed = true; return confirmation.promise; }
         return new Promise<Update[]>((resolve) => signal?.addEventListener("abort", () => resolve([]), { once: true }));
       },
       setCommands: async () => true as const,
@@ -775,14 +790,20 @@ describe("tgfx host pipeline", () => {
       sendText: async () => ({ message_id: 710 }) as Message.TextMessage,
       sendRichDraft: async () => { throw new Error("final mode must not send a draft"); },
       sendRich: async (_chat: string, rich: InputRichMessageWithoutUpload) => {
+        if (confirmationData(rich)) {
+          confirmation.resolve([confirmUpdate(rich, 710)]);
+          return { message_id: 710 } as Message.TextMessage;
+        }
         sent.push(rich);
         return { message_id: 711 } as Message.TextMessage;
       },
       editRich: async (_chat: string, messageId: number, rich: InputRichMessageWithoutUpload) => {
+        if (messageId === 710) return true as const;
         edits.push({ messageId, rich });
         edited();
         return true as const;
       },
+      answerCallback: async () => true as const,
     } as unknown as TelegramApi;
     const app = new TgfxApp({
       config, paths, token: "100:offline", bot: { id: "100", username: "test_bot", displayName: "Bot" },

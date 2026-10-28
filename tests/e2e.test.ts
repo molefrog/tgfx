@@ -8,6 +8,7 @@ import { StateStore } from "../src/state";
 import { TelegramApi } from "../src/telegram/api";
 import type { BotIdentity, TgfxConfig } from "../src/types";
 import { FakeTelegram } from "./fixtures/fake-telegram";
+import { confirmationData, confirmUpdate } from "./fixtures/session-confirmation";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -47,10 +48,12 @@ async function startApp(paths: WorkspacePaths, fxBinary: string, telegram: FakeT
   app: TgfxApp; running: Promise<void>;
   /** Resolves once the app has finished a turn, so stopping cannot interrupt it. */
   delivered: Promise<void>;
+  confirmationReady: Promise<void>;
 }> {
   const config = await loadConfig(paths);
   if (!config) throw new Error("test workspace config missing");
   const delivered = Promise.withResolvers<void>();
+  const confirmationReady = Promise.withResolvers<void>();
   const app = new TgfxApp({
     config,
     paths,
@@ -58,9 +61,12 @@ async function startApp(paths: WorkspacePaths, fxBinary: string, telegram: FakeT
     bot: BOT,
     telegram: new TelegramApi("100:e2e-token", telegram.url),
     fxBinary,
-    log: (event) => { if (event.event === "turn.delivered") delivered.resolve(); },
+    log: (event) => {
+      if (event.event === "turn.delivered") delivered.resolve();
+      if (event.event === "session.confirmation") confirmationReady.resolve();
+    },
   });
-  return { app, running: app.run(), delivered: delivered.promise };
+  return { app, running: app.run(), delivered: delivered.promise, confirmationReady: confirmationReady.promise };
 }
 
 describe("tgfx over the local Telegram simulator", () => {
@@ -102,14 +108,23 @@ describe("tgfx over the local Telegram simulator", () => {
       approvals: { chatId: "42", topicId: "0" },
       output: "report",
     });
-    const { app, running } = await startApp(paths, fxBinary, telegram);
+    const { app, running, confirmationReady } = await startApp(paths, fxBinary, telegram);
     try {
       telegram.sendUserMessage({ userId: 42, text: "/compact", firstName: "Ada" });
-      const edits = await telegram.waitForCalls("editMessageText");
+      await confirmationReady;
+      const confirmation = telegram.calls("sendRichMessage")[0]!.payload.rich_message;
+      const id = confirmationData(confirmation)!.split(":")[1]!;
+      const state = new StateStore(paths.database);
+      const card = JSON.parse(state.interaction(id)!.payload_json).card;
+      state.close();
+      const { update_id: _, ...callback } = confirmUpdate(confirmation, card.messageId);
+      telegram.push(callback);
+      const completed = await telegram.waitForRequest(r => r.method === "editMessageText"
+        && JSON.stringify(r.payload.rich_message).includes("compacted"));
       const progress = telegram.calls("sendRichMessage");
-      expect(progress).toHaveLength(1);
-      expect(progress[0]!.payload.rich_message.blocks[0].type).toBe("paragraph");
-      expect(edits[0]!.payload.rich_message).toEqual({
+      expect(progress).toHaveLength(2);
+      expect(progress[1]!.payload.rich_message.blocks[0].type).toBe("paragraph");
+      expect(completed.payload.rich_message).toEqual({
         blocks: [{ type: "paragraph", text: "✓ Conversation compacted" }],
       });
       expect(telegram.calls("sendRichMessageDraft")).toHaveLength(0);
