@@ -13,7 +13,7 @@ import type { OutputMode } from "../src/types";
 import { withTimeout } from "../src/timeout";
 import { normalizeMessageUpdate } from "../src/telegram/normalize";
 
-async function harness(options: { failedLoad?: boolean; output?: OutputMode; group?: boolean; recoveredClear?: boolean } = {}) {
+async function harness(options: { failedLoad?: boolean; output?: OutputMode; group?: boolean; topicId?: number; recoveredClear?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "tgfx-controls-"));
   const home = process.env.TGFX_HOME;
   process.env.TGFX_HOME = join(root, "home");
@@ -27,9 +27,10 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
   ].join("\n"));
   await chmod(binary, 0o700);
   const telegram = new FakeTelegram();
-  const state = new StateStore(paths.database);
+  const state = new StateStore(paths.database, paths.workspace);
   const chat = options.group ? "-42" : "42";
-  const route = { key: `100:${chat}:0`, botId: "100", chatId: chat, topicId: "0", chatKind: options.group ? "supergroup" as const : "private" as const };
+  const topicId = String(options.topicId ?? 0);
+  const route = { key: `100:${chat}:${topicId}`, botId: "100", chatId: chat, topicId, chatKind: options.group ? "supergroup" as const : "private" as const };
   if (options.failedLoad) {
     state.ensureRoute(route);
     state.setRouteSession(route.key, "stale-session");
@@ -68,12 +69,13 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
       running = app.run();
       await telegram.waitForCalls("getUpdates", polls + 1);
     },
-    send(text: string) {
+    send(text: string, mention = true) {
       if (!options.group) return telegram.sendUserMessage({ userId: 42, text });
-      const body = text.startsWith("/") ? text : `@fake_bot ${text}`;
+      const body = text.startsWith("/") || !mention ? text : `@fake_bot ${text}`;
       return telegram.push({ message: {
         message_id: 100 + telegram.requests.length, date: Math.floor(Date.now() / 1000),
         chat: { id: Number(chat), type: "supergroup", title: "Test" },
+        ...(options.topicId ? { message_thread_id: options.topicId, is_topic_message: true } : {}),
         from: { id: 42, is_bot: false, first_name: "User" }, text: body,
         entities: body.startsWith("@") ? [{ type: "mention", offset: 0, length: 9 }] : [],
       } } as Omit<Update, "update_id">);
@@ -116,6 +118,80 @@ test.each(["format", "cost", "model"])("/%s preserves the running task's context
     expect(h.state.activeContext(h.route.key)?.context_ref).toBe(context.context_ref);
     h.send("/stop"); await h.status("finished");
     expect(h.state.activeContext(h.route.key)).toBeUndefined();
+  } finally { await h.close(); }
+});
+
+test.each([false, true])("queued requests get one notice and /stop bypasses the queue (group=%s)", async group => {
+  const h = await harness({ output: "answer", group });
+  const notices = () => h.telegram.calls("sendMessage").filter(r => String(r.payload.text).includes("queued"));
+  try {
+    h.send("WAIT IGNORE_CANCEL"); await h.status("started");
+    const context = h.state.activeContext(h.route.key)?.context_ref;
+    h.send("first follow-up");
+    const notice = await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("queued"));
+    const second = h.send("second follow-up"); await h.accepted(second);
+    expect(notices()).toHaveLength(1);
+    expect(notice.payload.chat_id).toBe(h.route.chatId);
+    expect(notice.payload.text).toContain(group ? "/stop@fake_bot" : "/stop");
+    expect(h.state.activeContext(h.route.key)?.context_ref).toBe(context);
+    expect((await h.events()).filter(e => e.event === "prompt")).toHaveLength(1);
+    h.send(group ? "/stop@fake_bot" : "/stop"); await h.status("finished");
+    h.send("WAIT"); await h.status("started", 2);
+    h.send("another follow-up");
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && notices().length >= 2);
+    expect(notices()).toHaveLength(2);
+  } finally { await h.close(); }
+}, 15000);
+
+test("background group discussion is archived without a queue notice during a task", async () => {
+  const h = await harness({ output: "answer", group: true });
+  try {
+    h.send("WAIT"); await h.status("started");
+    const updateId = h.send("Background discussion", false);
+    await h.accepted(updateId);
+    const history = h.state.history.read(h.route.key, h.state.history.latestSeq(h.route.key));
+    expect(history.messages.some(message => message.text === "Background discussion")).toBeTrue();
+    expect(h.telegram.calls("sendMessage").filter(r => String(r.payload.text).includes("queued"))).toHaveLength(0);
+  } finally { await h.close(); }
+});
+
+test("a queued forum request receives its notice in the same topic", async () => {
+  const h = await harness({ output: "answer", group: true, topicId: 17 });
+  try {
+    h.send("WAIT"); await h.status("started");
+    h.send("follow-up");
+    const notice = await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("queued"));
+    expect(notice.payload.chat_id).toBe(h.route.chatId);
+    expect(notice.payload.message_thread_id).toBe(17);
+  } finally { await h.close(); }
+});
+
+test("/format changes only new tasks while a final-answer task is running", async () => {
+  const h = await harness({ output: "answer" });
+  try {
+    h.send("WAIT"); await h.status("started");
+    const context = h.state.activeContext(h.route.key)?.context_ref;
+    expect(h.telegram.calls("sendRichMessageDraft")).toHaveLength(0);
+    h.click("fmt:progress");
+    await h.telegram.waitForCalls("editMessageText");
+    expect(h.telegram.calls("sendRichMessageDraft")).toHaveLength(0);
+    expect(h.state.activeContext(h.route.key)?.context_ref).toBe(context);
+    expect((await h.events()).filter(e => e.event === "prompt")).toHaveLength(1);
+    h.send("/stop"); await h.status("finished");
+    h.send("next task");
+    await h.telegram.waitForCalls("sendRichMessageDraft");
+    await h.status("finished", 2);
+  } finally { await h.close(); }
+});
+
+test("changing reply style during a group task never enables private drafts", async () => {
+  const h = await harness({ output: "answer", group: true });
+  try {
+    h.send("WAIT"); await h.status("started");
+    h.click("fmt:live");
+    await h.telegram.waitForCalls("editMessageText");
+    expect(h.telegram.calls("sendRichMessageDraft")).toHaveLength(0);
+    h.send("/stop@fake_bot"); await h.status("finished");
   } finally { await h.close(); }
 });
 
