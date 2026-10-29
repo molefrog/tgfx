@@ -180,7 +180,7 @@ export class TelegramApi {
 
   async sendMedia(
     kind: "document" | "photo" | "voice" | "video_note",
-    chatId: string, path: string, filename: string, caption?: string, topicId = "0",
+    chatId: string, path: string | Uint8Array, filename: string, caption?: string, topicId = "0",
   ) {
     const file = new InputFile(path, filename);
     const topic = topicId === "0" ? {} : { message_thread_id: Number(topicId) };

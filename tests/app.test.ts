@@ -11,7 +11,10 @@ import type { TelegramApi } from "../src/telegram/api";
 import type { OutputMode, TgfxConfig } from "../src/types";
 
 const temporary: string[] = [];
+const originalSharedFiles = process.env.TGFX_SHARED_FILES;
 afterEach(async () => {
+  if (originalSharedFiles === undefined) delete process.env.TGFX_SHARED_FILES;
+  else process.env.TGFX_SHARED_FILES = originalSharedFiles;
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -208,10 +211,16 @@ describe("tgfx host pipeline", () => {
     expect(JSON.stringify(disabled.final)).not.toContain("custom_emoji");
   });
 
-  test("downloads sticker images before teaching the agent their name and file ID", async () => {
+  test.each([{ shared: false }, { shared: true }])("downloads readable sticker images before prompting FX (shared=$shared)", async ({ shared }) => {
+    process.env.TGFX_SHARED_FILES = shared ? "1" : "0";
     const workspace = await mkdtemp(join(tmpdir(), "tgfx-app-sticker-"));
     temporary.push(workspace);
     const paths = testPaths(workspace);
+    if (shared) {
+      const downloads = await mkdtemp(join(tmpdir(), "tgfx-shared-stickers-"));
+      temporary.push(downloads);
+      paths.files = join(downloads, "100");
+    }
     const logPath = join(workspace, "fx-events.jsonl");
     const fxBinary = await fakeFx(workspace, logPath);
     const config: TgfxConfig = {
@@ -265,6 +274,7 @@ describe("tgfx host pipeline", () => {
     const imagePath = envelope.attachments[0].sticker.image.path;
     expect(await realpath(imagePath)).toStartWith(await realpath(tmpdir()));
     expect(await realpath(imagePath)).not.toStartWith(await realpath(paths.workspace));
+    if (shared) expect(await realpath(imagePath)).toStartWith(`${await realpath(paths.files)}/`);
     expect(await readFile(imagePath, "utf8")).toBe("webp!!!");
     await app.stop();
     await running;
