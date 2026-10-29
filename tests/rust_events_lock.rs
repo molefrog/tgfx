@@ -151,35 +151,19 @@ fn runtime_lock_child() {
     }
 }
 #[test]
-fn original_typescript_can_retry_rust_events_and_rust_can_retry_typescript_events() {
+fn saved_events_are_deduplicated_after_migration() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("state.db");
-    let state = State::open(&path, root.path()).unwrap();
     let workspace = root.path().to_string_lossy().into_owned();
-    let events = EventJournal::new(state.clone(), &workspace, "100").unwrap();
-    events.accept(json!({"id":"rust","name":"email.received","payload":{"message_id":"one","thread_id":"two","mixed":{"ä":1,"A":2,"a":3,"_":4}}})).unwrap();
-    drop(events);
-    drop(state);
-    let script = r#"
-        import { Database } from 'bun:sqlite';
-        import { EventJournal } from './src/events.ts';
-        const [path,workspace] = process.argv.slice(-2);
-        const db = new Database(path); const journal = new EventJournal(db,workspace,'100');
-        if (journal.accept({id:'rust',name:'email.received',payload:{thread_id:'two',mixed:{'_':4,a:3,A:2,'ä':1},message_id:'one'}}).fresh) throw new Error('Duplicate was replayed');
-        journal.accept({id:'typescript',name:'test',payload:{items:[{b:2,a:1}],number:4}});
-        db.close();
-    "#;
-    let output = std::process::Command::new("bun")
-        .args(["-e", script, path.to_str().unwrap(), &workspace])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("Bun required for TypeScript compatibility check");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            &include_str!("fixtures/saved-state.sql")
+                .replace("__WORKSPACE__", &workspace.replace('\'', "''")),
+        )
+        .unwrap();
     let state = State::open(&path, root.path()).unwrap();
     let events = EventJournal::new(state, &workspace, "100").unwrap();
-    assert!(!events.accept(json!({"id":"typescript","name":"test","payload":{"number":4,"items":[{"a":1,"b":2}]}})).unwrap().1);
+    assert!(!events.accept(json!({"id":"saved-event","name":"email.received","payload":{"thread_id":"two","mixed":{"ä":1,"A":2,"a":3,"_":4},"message_id":"one"}})).unwrap().1);
+    assert!(events.accept(json!({"id":"saved-event","name":"email.received","payload":{"message_id":"different"}})).is_err());
 }

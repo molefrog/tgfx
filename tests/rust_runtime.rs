@@ -72,6 +72,7 @@ struct Running {
     server: tokio::task::JoinHandle<()>,
     events: Arc<Mutex<Vec<Value>>>,
     event_changed: Arc<Notify>,
+    command: Command,
 }
 impl Running {
     async fn start(output: &str) -> Self {
@@ -149,7 +150,8 @@ impl Running {
             mock.hang_sends
                 .store(true, std::sync::atomic::Ordering::Release);
         }
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tgfx"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tgfx"));
+        command
             .args([
                 "--json",
                 "--no-tui",
@@ -173,11 +175,33 @@ impl Running {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+            .kill_on_drop(true);
         let events = Arc::new(Mutex::new(vec![]));
         let changed = Arc::new(Notify::new());
+        let child = Self::spawn(&mut command, &events, &changed);
+        let running = Self {
+            root,
+            child,
+            updates: tx,
+            mock,
+            server,
+            events,
+            event_changed: changed,
+            command,
+        };
+        if !recovery {
+            running
+                .event(|v| v["type"] == "boot" && v["step"] == "polling")
+                .await;
+        }
+        running
+    }
+    fn spawn(
+        command: &mut Command,
+        events: &Arc<Mutex<Vec<Value>>>,
+        changed: &Arc<Notify>,
+    ) -> tokio::process::Child {
+        let mut child = command.spawn().unwrap();
         let es = events.clone();
         let ec = changed.clone();
         let out = child.stdout.take().unwrap();
@@ -197,27 +221,24 @@ impl Running {
                 eprintln!("runtime: {line}");
             }
         });
-        let running = Self {
-            root,
-            child,
-            updates: tx,
-            mock,
-            server,
-            events,
-            event_changed: changed,
-        };
-        if !recovery {
-            running
-                .event(|v| v["type"] == "boot" && v["step"] == "polling")
-                .await;
-        }
-        running
+        child
     }
     fn message(&self, id: i64, chat: i64, text: &str) {
         self.updates.send(json!({"update_id":id,"message":{"message_id":id,"date":id,"chat":{"id":chat,"type":if chat<0{"supergroup"}else{"private"}},"from":{"id":if chat>0{chat}else{42},"is_bot":false,"first_name":"Ada"},"text":text}})).unwrap();
     }
     fn callback(&self, id: i64, data: &str, card: i64) {
-        self.updates.send(json!({"update_id":id,"callback_query":{"id":format!("cb{id}"),"from":{"id":42,"is_bot":false,"first_name":"Ada"},"data":data,"message":{"message_id":card,"date":1,"chat":{"id":42,"type":"private"}}}})).unwrap();
+        self.callback_in(id, data, card, 42);
+    }
+    fn callback_in(&self, id: i64, data: &str, card: i64, chat: i64) {
+        self.updates.send(json!({
+            "update_id":id,
+            "callback_query":{
+                "id":format!("cb{id}"),
+                "from":{"id":42,"is_bot":false,"first_name":"Ada"},
+                "data":data,
+                "message":{"message_id":card,"date":1,"chat":{"id":chat,"type":if chat<0{"supergroup"}else{"private"}}}
+            }
+        })).unwrap();
     }
     async fn event(&self, predicate: impl Fn(&Value) -> bool) -> Value {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -245,6 +266,13 @@ impl Running {
         })
     }
     async fn call(&self, predicate: impl Fn(&str, &Value) -> bool) -> (String, Value) {
+        self.call_after(0, predicate).await
+    }
+    async fn call_after(
+        &self,
+        after: usize,
+        predicate: impl Fn(&str, &Value) -> bool,
+    ) -> (String, Value) {
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let notified = self.mock.changed.notified();
@@ -254,6 +282,7 @@ impl Running {
                     .lock()
                     .unwrap()
                     .iter()
+                    .skip(after)
                     .find(|(m, p)| predicate(m, p))
                     .cloned()
                 {
@@ -280,7 +309,7 @@ impl Running {
     fn db(&self) -> rusqlite::Connection {
         rusqlite::Connection::open(self.root.path().join("home/state/100.db")).unwrap()
     }
-    async fn stop(mut self) {
+    async fn stop_process(&mut self) {
         unsafe {
             libc::kill(self.child.id().unwrap() as i32, libc::SIGTERM);
         }
@@ -289,11 +318,269 @@ impl Running {
             .unwrap()
             .unwrap();
         assert!(status.success(), "runtime exited {status}");
+    }
+    async fn restart(&mut self) {
+        self.stop_process().await;
+        self.events.lock().unwrap().clear();
+        self.mock.calls.lock().unwrap().clear();
+        self.child = Self::spawn(&mut self.command, &self.events, &self.event_changed);
+        self.event(|v| v["type"] == "boot" && v["step"] == "polling")
+            .await;
+    }
+    async fn stop(mut self) {
+        self.stop_process().await;
         self.server.abort();
     }
 }
 fn text(value: &Value) -> String {
     value.to_string()
+}
+fn callback_data(value: &Value, prefix: &str) -> Option<String> {
+    value["reply_markup"]["inline_keyboard"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|button| button["callback_data"].as_str())
+        .find(|data| data.starts_with(prefix))
+        .map(str::to_owned)
+}
+async fn model_menu(r: &Running) -> String {
+    r.message(1, 42, "/model");
+    let (_, menu) = r
+        .call(|m, p| m == "sendMessage" && callback_data(p, "model:").is_some())
+        .await;
+    callback_data(&menu, "model:")
+        .unwrap()
+        .split(':')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(":")
+}
+async fn model_click(r: &Running, id: &mut i64, prefix: &str, action: &str) -> Value {
+    *id += 1;
+    let before = r.mock.calls.lock().unwrap().len();
+    r.callback(*id, &format!("{prefix}:{action}"), 1000);
+    r.call_after(before, |m, _| m == "editMessageText").await.1
+}
+#[tokio::test]
+async fn model_settings_apply_through_acp_and_keep_the_current_page() {
+    let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
+    let prefix = model_menu(&r).await;
+    let mut id = 1;
+    model_click(&r, &mut id, &prefix, "v.2.1").await;
+    model_click(&r, &mut id, &prefix, "c.e").await;
+    let effort = model_click(&r, &mut id, &prefix, "a.e.1").await;
+    assert!(callback_data(&effort, &format!("{prefix}:v.2.0")).is_some());
+    assert!(text(&effort).contains("Effort · High"));
+    for (index, label) in [(1, "Fast"), (2, "Ultrafast"), (0, "Regular")] {
+        let submenu = model_click(&r, &mut id, &prefix, "c.f").await;
+        assert_eq!(
+            submenu["reply_markup"]["inline_keyboard"][0]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let view = model_click(&r, &mut id, &prefix, &format!("a.f.{index}")).await;
+        assert!(text(&view).contains(&format!("Speed · {label}")));
+        assert!(callback_data(&view, &format!("{prefix}:v.2.0")).is_some());
+    }
+    let writes: Vec<_> = r
+        .fx()
+        .into_iter()
+        .filter(|v| v["method"] == "session/set_config_option" && v["params"]["configId"] != "mode")
+        .map(|v| json!([v["params"]["configId"], v["params"]["value"]]))
+        .collect();
+    assert_eq!(
+        writes,
+        vec![
+            json!(["effort", "high"]),
+            json!(["fast", true]),
+            json!(["ultrafast", true]),
+            json!(["fast", false]),
+            json!(["ultrafast", false])
+        ]
+    );
+    r.stop().await;
+}
+#[tokio::test]
+async fn changing_model_refreshes_supported_controls_without_closing_the_menu() {
+    let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
+    let prefix = model_menu(&r).await;
+    let view = model_click(&r, &mut 1, &prefix, "s.1").await;
+    assert!(text(&view).contains("claude-opus"));
+    assert!(callback_data(&view, &format!("{prefix}:c.")).is_none());
+    assert!(callback_data(&view, &format!("{prefix}:x")).is_some());
+    r.stop().await;
+}
+#[tokio::test]
+async fn rejected_setting_keeps_the_menu_usable_and_does_not_claim_success() {
+    let r = Running::start_with_env(
+        "live",
+        &[
+            ("RUNTIME_MODEL_SETTINGS", "1"),
+            ("RUNTIME_REJECT_SETTINGS", "1"),
+        ],
+    )
+    .await;
+    let prefix = model_menu(&r).await;
+    let mut id = 1;
+    model_click(&r, &mut id, &prefix, "c.e").await;
+    r.callback(3, &format!("{prefix}:a.e.1"), 1000);
+    let (_, answer) = r
+        .call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb3")
+        .await;
+    assert!(text(&answer).contains("could not apply"));
+    id = 3;
+    let view = model_click(&r, &mut id, &prefix, "b").await;
+    assert!(text(&view).contains("Effort · Default"));
+    r.stop().await;
+}
+#[tokio::test]
+async fn effort_stays_unchanged_while_a_turn_is_running() {
+    let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
+    let prefix = model_menu(&r).await;
+    r.message(2, 42, "WAIT");
+    r.call(|m, p| m == "sendRichMessageDraft" && text(p).contains("WAIT_READY"))
+        .await;
+    r.callback(3, &format!("{prefix}:a.e.1"), 1000);
+    let (_, answer) = r
+        .call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb3")
+        .await;
+    assert!(text(&answer).contains("current turn"));
+    assert!(
+        !r.fx().iter().any(
+            |v| v["method"] == "session/set_config_option" && v["params"]["configId"] != "mode"
+        )
+    );
+    r.message(4, 42, "/stop");
+    r.stop().await;
+}
+#[tokio::test]
+async fn saved_chat_format_survives_restart_without_affecting_other_chats() {
+    let mut r = Running::start("live").await;
+    r.callback(1, "fmt:final", 1000);
+    r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb1")
+        .await;
+    r.restart().await;
+    r.message(2, 42, "SAVED_FORMAT");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("SAVED_FORMAT"))
+        .await;
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "sendRichMessageDraft" && p["chat_id"].as_str() == Some("42"))
+    );
+    r.message(3, 43, "WAIT");
+    r.call(|m, p| m == "sendRichMessageDraft" && p["chat_id"].as_str() == Some("43"))
+        .await;
+    r.message(4, 43, "/stop");
+    r.stop().await;
+}
+#[tokio::test]
+async fn groups_reject_format_changes_including_old_buttons() {
+    let r = Running::start("detailed").await;
+    r.message(1, -9, "/format@fixture_bot");
+    let (_, menu) = r
+        .call(|m, p| m == "sendMessage" && p["chat_id"].as_str() == Some("-9"))
+        .await;
+    assert!(text(&menu).contains("Final"));
+    assert!(callback_data(&menu, "fmt:").is_none());
+    r.callback_in(2, "fmt:live", 1000, -9);
+    let (_, answer) = r
+        .call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb2")
+        .await;
+    assert!(text(&answer).contains("Final"));
+    r.message(3, 42, "UNCHANGED_DM_FORMAT");
+    let (_, reply) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("UNCHANGED_DM_FORMAT"))
+        .await;
+    assert!(text(&reply).contains("details"));
+    r.stop().await;
+}
+#[tokio::test]
+async fn groups_send_only_the_final_answer_even_with_a_detailed_default() {
+    let r = Running::start_with_defaults("detailed", &[], json!({"groupReply":"all"})).await;
+    r.message(1, -9, "GROUP_ANSWER");
+    let (_, reply) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("GROUP_ANSWER"))
+        .await;
+    assert!(!text(&reply).contains("details"));
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "sendRichMessageDraft")
+    );
+    r.stop().await;
+}
+#[tokio::test]
+async fn external_events_use_the_destination_chat_format() {
+    let r = Running::start("detailed").await;
+    r.callback(1, "fmt:final", 1000);
+    r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb1")
+        .await;
+    let socket = r.root.path().join("runtime/events.sock");
+    for chat in ["42", "43", "-9"] {
+        let id = format!("format-{chat}");
+        tgfx::event_socket::event_request(
+            &socket,
+            &json!({"op":"emit","event":{"id":id,"name":"format.test","chatId":chat}}),
+        )
+        .await
+        .unwrap();
+        r.event(|v| v["event"] == "external.done" && v["id"] == id)
+            .await;
+        let (_, reply) = r
+            .call(|m, p| m == "sendRichMessage" && p["chat_id"].as_str() == Some(chat))
+            .await;
+        assert_eq!(text(&reply).contains("details"), chat == "43");
+    }
+    r.stop().await;
+}
+#[tokio::test]
+async fn unauthorized_messages_are_discarded_and_authorized_delivery_is_journaled() {
+    let mut r = Running::start("final").await;
+    r.message(1, 999, "MUST_NOT_STORE");
+    r.message(2, 42, "AUTHORIZED_ANSWER");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("AUTHORIZED_ANSWER"))
+        .await;
+    r.event(|v| v["type"] == "turn" && v["state"] == "finished")
+        .await;
+    assert!(!text(&json!(r.fx())).contains("MUST_NOT_STORE"));
+    r.stop_process().await;
+    let database = r.db();
+    let inbox: Vec<(String, Option<String>)> = database
+        .prepare("SELECT status, payload_json FROM telegram_inbox")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(inbox.iter().all(|(_, payload)| {
+        !payload
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MUST_NOT_STORE")
+    }));
+    assert!(inbox.iter().any(|(status, _)| status == "done"));
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT status FROM telegram_outbox ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "sent"
+    );
+    r.server.abort();
 }
 #[tokio::test]
 async fn shared_memory_tracks_chat_topics_and_background_sessions_independently() {

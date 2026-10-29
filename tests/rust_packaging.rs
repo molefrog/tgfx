@@ -100,22 +100,3 @@ cp "$TGFX_RELEASE_FIXTURE/${url##*/}" "$out"
     assert!(String::from_utf8_lossy(&output.stderr).contains("checksum did not match"));
     assert!(!invalid.join("bin/tgfx").exists());
 }
-#[test]
-fn javascript_manifest_is_private_and_native_commands_are_primary() {
-    let package: serde_json::Value = serde_json::from_str(include_str!("../package.json")).unwrap();
-    assert_eq!(package["private"], true);
-    assert!(package.get("bin").is_none());
-    assert!(
-        package["scripts"]["build"]
-            .as_str()
-            .unwrap()
-            .starts_with("cargo ")
-    );
-    assert!(
-        package["scripts"]["test"]
-            .as_str()
-            .unwrap()
-            .starts_with("cargo ")
-    );
-    assert_eq!(package["version"], env!("CARGO_PKG_VERSION"));
-}

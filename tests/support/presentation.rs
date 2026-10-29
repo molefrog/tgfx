@@ -1,11 +1,7 @@
-//! Test-only JSON seam used to run the existing TypeScript contracts against Rust.
+//! Presentation cases use the same public APIs as the runtime.
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::io::{self, Read};
-fn main() -> Result<()> {
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-    let a: Value = serde_json::from_str(&input)?;
+pub fn render(a: &Value) -> Result<Value> {
     let result = match a["op"].as_str().context("Missing op")? {
         "markdown" => {
             serde_json::to_value(tgfx::markdown::render(a["source"].as_str().unwrap_or(""))?)?
@@ -122,8 +118,7 @@ fn main() -> Result<()> {
             a["page"].as_u64().unwrap_or(0) as usize,
             true,
         ))?,
-        other => bail!("Unknown conformance op {other}"),
+        other => bail!("Unknown presentation case {other}"),
     };
-    println!("{result}");
-    Ok(())
+    Ok(result)
 }

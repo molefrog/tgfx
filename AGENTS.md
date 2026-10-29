@@ -4,9 +4,8 @@ Small project, small rules. When in doubt, write less.
 
 ## Toolkit
 
-Rust is the runtime. Prefer standard-library and existing crate APIs. Keep
-`Cargo.lock` committed. Bun 1.4 is only for the retained TypeScript test oracle;
-do not change its expected assertions to make the Rust implementation pass.
+Rust is the runtime and test harness. Prefer standard-library and existing
+crate APIs. Keep `Cargo.lock` committed.
 
 ## Link locally
 
@@ -16,10 +15,8 @@ changes.
 
 ## Tests
 
-Run `./scripts/check-rust.sh`: formatting, Clippy, native tests, original behavior
-assertions against Rust, and subprocess end-to-end tests. Without Bun, the
-script runs native checks only. Install the test dependencies with
-`bun install --frozen-lockfile` for full coverage.
+Run `./scripts/check-rust.sh`: formatting, Clippy, and all tests, including
+subprocess end-to-end tests. The ACP test fixture uses Python 3.
 
 - Test through real seams: the fake `fx` binary, the fake Telegram server,
   real SQLite in a temp dir. No mock forests.

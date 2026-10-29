@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-# Install an already-published native release without Node, Bun, or Cargo.
+# Install a prebuilt release.
 version=latest
 prefix=${HOME:?}/.local
 while [ "$#" -gt 0 ]; do

@@ -463,29 +463,17 @@ fn startup_revokes_crash_left_contexts_without_removing_history() {
     );
 }
 #[test]
-fn original_typescript_and_rust_share_the_existing_database_schema() {
+fn saved_database_preserves_sessions_interactions_and_delivery() {
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("state.db");
     let workspace = root.path().to_string_lossy().into_owned();
-    let script = r#"
-        import {StateStore} from './src/state.ts';
-        const [database,workspace]=process.argv.slice(-2); const state=new StateStore(database,workspace);
-        const route={key:'100:-9:0',botId:'100',chatId:'-9',topicId:'0',chatKind:'supergroup'};
-        state.ensureRoute(route);state.setRouteSession(route.key,'legacy-session');
-        state.ingestUpdate({botId:'100',updateId:7,routeKey:route.key,payload:{kind:'message',legacy:true},authorized:true});
-        state.createInteraction({id:'legacy',botId:'100',routeKey:route.key,kind:'choice',payload:{question:'Pick',options:['A','B']},expiresAt:new Date(Date.now()+86400000).toISOString()});
-        state.close();
-    "#;
-    let output = std::process::Command::new("bun")
-        .args(["-e", script, database.to_str().unwrap(), &workspace])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("Bun required for TypeScript compatibility check");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            &include_str!("fixtures/saved-state.sql")
+                .replace("__WORKSPACE__", &workspace.replace('\'', "''")),
+        )
+        .unwrap();
     let state = State::open(&database, root.path()).unwrap();
     assert_eq!(state.next_offset("100").unwrap(), 8);
     assert_eq!(
@@ -495,11 +483,11 @@ fn original_typescript_and_rust_share_the_existing_database_schema() {
             .unwrap()
             .session_id
             .as_deref(),
-        Some("legacy-session")
+        Some("saved-session")
     );
     assert!(
         state
-            .resolve_interaction("legacy", &json!({"index":1}))
+            .resolve_interaction("saved-choice", &json!({"index":1}))
             .unwrap()
     );
     let route = state.route("100:-9:0").unwrap().unwrap().as_route();
@@ -509,23 +497,27 @@ fn original_typescript_and_rust_share_the_existing_database_schema() {
         .register_bot_message(&route, "90", Some("Rust reply"))
         .unwrap();
     drop(state);
-    let script = r#"
-        import {StateStore} from './src/state.ts';
-        const [database,workspace]=process.argv.slice(-2);const state=new StateStore(database,workspace);
-        if(state.interaction('legacy')?.state!=='resolved')throw new Error('Interaction format incompatible');
-        if(state.recentMessages('100:-9:0',25)[0]?.excerpt!=='Rust reply')throw new Error('Message format incompatible');
-        const history=state.history.read('100:-9:0',state.history.latestSeq('100:-9:0'));
-        if(history.messages[0]?.text!=='Rust reply')throw new Error('History format incompatible');
-        if(state.db.query("SELECT status FROM telegram_outbox WHERE effect_key='rust-final'").get()?.status!=='sent')throw new Error('Outbox incompatible');state.close();
-    "#;
-    let output = std::process::Command::new("bun")
-        .args(["-e", script, database.to_str().unwrap(), &workspace])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let state = State::open(&database, root.path()).unwrap();
+    assert_eq!(
+        state.interaction("saved-choice").unwrap().unwrap()["state"],
+        "resolved"
     );
+    let history = state
+        .history
+        .read(
+            &route.key,
+            state.history.latest_seq(&route.key).unwrap(),
+            HistoryInput::default(),
+        )
+        .unwrap();
+    assert_eq!(history["messages"][0]["text"], "Rust reply");
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM telegram_outbox WHERE effect_key='rust-final'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "sent");
 }

@@ -3,6 +3,17 @@
 import json, os, sys, threading, time
 lock=threading.Lock(); permissions={}; wait=threading.Event(); cancelled=False; ignore_cancel=False
 config=[{"id":"model","name":"Model","type":"select","currentValue":"fixture","options":[{"value":"fixture","name":"Fixture"},{"value":"next","name":"Next"}]},{"id":"mode","name":"Mode","type":"select","currentValue":"ask","options":[{"value":"auto","name":"Auto"},{"value":"ask","name":"Ask"}]}]
+if os.environ.get("RUNTIME_MODEL_SETTINGS") == "1":
+ models=["fixture", "anthropic/claude-opus"]+[f"openai/model-{i}" for i in range(8)]
+ config[0]["options"]=[{"value":v,"name":v} for v in models]
+ config.extend([
+  {"id":"effort","name":"Reasoning effort","type":"select","currentValue":"auto","options":[{"value":v,"name":v} for v in ["auto","high","low"]]},
+  {"id":"fast","name":"Fast","type":"boolean","currentValue":False},
+  {"id":"ultrafast","name":"Ultrafast","type":"boolean","currentValue":False}])
+def visible_config():
+ if config[0]["currentValue"].startswith("anthropic/"):
+  return [o for o in config if o["id"] not in ["effort","fast","ultrafast"]]
+ return config
 def send(v):
  with lock: print(json.dumps(v),flush=True)
 def result(i,v):send({"jsonrpc":"2.0","id":i,"result":v})
@@ -51,14 +62,17 @@ for line in sys.stdin:
   continue
  i=r.get("id");p=r.get("params",{});m=r["method"]
  if m=="initialize":result(i,{"protocolVersion":1,"agentCapabilities":{"loadSession":True},"agentInfo":{"name":"fx-fixture","version":"0.0.15"},"authMethods":[]})
- elif m=="session/new":result(i,{"sessionId":"fixture","configOptions":config})
+ elif m=="session/new":result(i,{"sessionId":"fixture","configOptions":visible_config()})
  elif m=="session/load":
   if p["sessionId"]=="missing":send({"jsonrpc":"2.0","id":i,"error":{"code":-32602,"message":"missing session"}})
-  else:result(i,{"configOptions":config})
+  else:result(i,{"configOptions":visible_config()})
  elif m=="session/set_config_option":
+  if p["configId"] in ["effort","fast","ultrafast"] and os.environ.get("RUNTIME_REJECT_SETTINGS") == "1":
+   send({"jsonrpc":"2.0","id":i,"error":{"code":-32602,"message":"setting unavailable"}});continue
   for o in config:
    if o["id"]==p["configId"]:o["currentValue"]=p["value"]
-  result(i,{"configOptions":config})
+   elif p["configId"] in ["fast","ultrafast"] and p["value"] is True and o["id"] in ["fast","ultrafast"]:o["currentValue"]=False
+  result(i,{"configOptions":visible_config()})
  elif m=="session/prompt":threading.Thread(target=answer,args=(i,p),daemon=True).start()
  elif m=="session/cancel":
   cancelled=True
