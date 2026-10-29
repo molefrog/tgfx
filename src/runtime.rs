@@ -34,7 +34,10 @@ pub struct RuntimeOptions {
 #[derive(Debug, Clone)]
 pub enum RuntimeControl {
     Pause(bool),
-    Output(OutputMode),
+    Format {
+        chat_id: String,
+        mode: OutputMode,
+    },
     Icons(bool),
     Replies {
         chat_id: Option<String>,
@@ -306,7 +309,7 @@ impl Inner {
     }
     fn settings(&self) {
         let c = self.config();
-        self.emit(json!({"type":"settings","settings":{"output":c.output,"customIcons":c.custom_icons,"paused":self.paused.load(std::sync::atomic::Ordering::Acquire),"yolo":self.options.yolo,"dmReply":c.dm_reply,"groupReply":c.group_reply,"chatReplies":c.chat_replies,"allowedChats":c.access.user_ids.into_iter().chain(c.access.chat_ids).collect::<Vec<_>>()}}));
+        self.emit(json!({"type":"settings","settings":{"output":c.output,"customIcons":c.custom_icons,"paused":self.paused.load(std::sync::atomic::Ordering::Acquire),"yolo":self.options.yolo,"dmReply":c.dm_reply,"groupReply":c.group_reply,"chatReplies":c.chat_replies,"chatFormats":c.chat_formats,"allowedChats":c.access.user_ids.into_iter().chain(c.access.chat_ids).collect::<Vec<_>>()}}));
     }
     fn apply_control(&self, control: RuntimeControl) -> Result<()> {
         match control {
@@ -318,7 +321,7 @@ impl Inner {
             }
             other => {
                 let changed = match &other {
-                    RuntimeControl::Output(_) => "output",
+                    RuntimeControl::Format { .. } => "chatFormats",
                     RuntimeControl::Icons(_) => "customIcons",
                     RuntimeControl::Replies { chat_id, kind, .. } => {
                         if chat_id.is_some() {
@@ -333,7 +336,10 @@ impl Inner {
                 };
                 let mut c = lock(&self.config);
                 match other {
-                    RuntimeControl::Output(mode) => c.output = mode,
+                    RuntimeControl::Format { chat_id, mode } => {
+                        config::validate_id(&chat_id, false)?;
+                        c.chat_formats.insert(chat_id, mode);
+                    }
                     RuntimeControl::Icons(on) => c.custom_icons = on,
                     RuntimeControl::Replies {
                         chat_id,
@@ -1441,7 +1447,7 @@ impl Inner {
             draft_id: new_draft_id(),
         };
         lock(&self.active).insert(key.clone(), active.clone());
-        let mode = self.config().output;
+        let mode = self.config().output_for(&m.route);
         let start = Instant::now();
         self.emit(json!({"type":"turn","route":self.label(&m.route),"state":"started","who":m.sender.display_name,"text":m.text}));
         let result = async {
@@ -1660,7 +1666,6 @@ impl Inner {
         Ok(projector)
     }
     async fn run_external(self: &Arc<Self>, event: ExternalEvent) -> Result<()> {
-        let mode = self.config().output;
         let key = event_destination(&event, &self.options.bot.id);
         let route = event.chat_id.as_ref().map(|chat| {
             Route::new(
@@ -1674,6 +1679,10 @@ impl Inner {
                 },
             )
         });
+        let mode = route
+            .as_ref()
+            .map(|route| self.config().output_for(route))
+            .unwrap_or(OutputMode::Final);
         let active = Active {
             cancel: CancellationToken::new(),
             draft_id: new_draft_id(),
@@ -1823,10 +1832,20 @@ impl Inner {
         Ok(sent)
     }
     async fn open_format(&self, route: &Route) -> Result<()> {
+        if route.chat_kind != "private" {
+            self.options
+                .telegram
+                .send_text(
+                    route,
+                    "Groups always use Final. Choose a reply style in your DM.",
+                )
+                .await?;
+            return Ok(());
+        }
         self.send_card(
             route,
             "Reply style",
-            telegram::format_menu(self.config().output),
+            telegram::format_menu(self.config().output_for(route)),
         )
         .await?;
         Ok(())
@@ -1969,9 +1988,15 @@ impl Inner {
         let mut edit = json!({"chat_id":route.chat_id,"message_id":message_id});
         match kind {
             "fmt" | "format" => {
-                if let Ok(mode) = id.parse::<OutputMode>() {
-                    self.apply_control(RuntimeControl::Output(mode))?;
-                    self.answer_callback(callback_id, "Reply style saved for future turns")
+                if route.chat_kind != "private" {
+                    self.answer_callback(callback_id, "Groups always use Final")
+                        .await?;
+                } else if let Ok(mode) = id.parse::<OutputMode>() {
+                    self.apply_control(RuntimeControl::Format {
+                        chat_id: route.chat_id.clone(),
+                        mode,
+                    })?;
+                    self.answer_callback(callback_id, "Saved for future turns in this chat")
                         .await?;
                     edit["text"] = json!("Reply style");
                     edit["reply_markup"] = telegram::format_menu(mode);

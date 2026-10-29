@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 const root=resolve(import.meta.dir,"..");
 const dir=await mkdtemp(resolve(tmpdir(),"tgfx-rust-parity-"));
 try{
- for(const name of ["rich-markdown","projector","tools","normalize","model-picker","custom-icon-set","reply-style","session-confirmation","cost-report"]){
+ // The old four-style picker was replaced by the three-style contract in rust_formats.rs.
+ for(const name of ["rich-markdown","projector","tools","normalize","model-picker","custom-icon-set","session-confirmation","cost-report"]){
   let source=await Bun.file(resolve(root,`tests/${name}.test.ts`)).text();
   source=source.replace(/from "\.\.\/src\/([^\"]+)"/g,(_,path)=>`from ${JSON.stringify(["telegram/rich-markdown","fx/projector","fx/tools","telegram/normalize","telegram/model-picker","telegram/custom-icon-set","telegram/reply-style","telegram/session-confirmation","telegram/cost-report","fx/usage"].includes(path)?resolve(root,"scripts/rust-test-proxy.ts"):resolve(root,"src",path))}`);
   source=source.replace(/from "(\.\/[^\"]+)"/g,(_,path)=>`from ${JSON.stringify(resolve(root,"tests",path))}`);

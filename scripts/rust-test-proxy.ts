@@ -7,7 +7,9 @@ export function markdownToRichBlocks(source:string){return stripDefaults(request
 export class AcpProjector{
  private events:any[]=[];private started:number;
  constructor(private icons:Record<string,string>={},private clock:()=>number=Date.now){this.started=clock();}
- private state(output="live",final=false){return request({op:"projector",icons:this.icons,started:this.started,events:this.events,now:this.clock(),output,final});}
+ // Preserve the legacy renderer assertions under the three renamed styles.
+ // `report` shared Detailed's final projection; its delivery mode was removed.
+ private state(output="live",final=false){const modes:Record<string,string>={answer:"final",progress:"live",live:"detailed",report:"detailed"};return request({op:"projector",icons:this.icons,started:this.started,events:this.events,now:this.clock(),output:modes[output]??output,final});}
  apply(value:unknown){this.events.push({value,at:this.clock()});return this.state().change;}
  setWaiting(waiting:string|undefined){this.events.push({waiting:waiting??null,at:this.clock()});return this.state().change;}
  snapshot(){return this.state().snapshot;}

@@ -109,6 +109,9 @@ pub fn validate(config: &Config) -> Result<()> {
     for key in config.chat_replies.keys() {
         validate_id(key, true)?;
     }
+    for key in config.chat_formats.keys() {
+        validate_id(key, false)?;
+    }
     if config.memory.file.trim().is_empty() {
         bail!("Memory file cannot be empty")
     }
@@ -217,6 +220,7 @@ pub fn save_settings(workspace: &Path, config: &Config, changed: &[&str]) -> Res
         "dmReply",
         "groupReply",
         "chatReplies",
+        "chatFormats",
         "memory",
     ] {
         if changed.contains(&key) {

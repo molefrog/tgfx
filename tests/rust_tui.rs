@@ -1,7 +1,7 @@
 use ratatui::{Terminal, backend::TestBackend};
 use tgfx::{
     tui::{StatusView, UiCommand},
-    types::{Config, OutputMode},
+    types::Config,
 };
 fn config() -> Config {
     serde_json::from_value(serde_json::json!({"version":1,"activeBotId":"100","access":{"userIds":["42"],"chatIds":["-1"]},"approvals":{"chatId":"42"}})).unwrap()
@@ -19,17 +19,31 @@ fn real_status_events_render_unicode_queue_and_approval() {
     assert!(output.contains("+3 waiting"));
 }
 #[test]
-fn format_selection_is_a_command_and_escape_does_not_change_it() {
+fn format_is_not_a_terminal_control() {
     use crossterm::event::KeyCode;
     let mut view = StatusView::new(&config(), "bot".into(), false);
-    view.key(KeyCode::Char('f'));
+    assert!(view.key(KeyCode::Char('f')).is_none());
+    assert!(!view.reply_menu);
+    let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
+    terminal.draw(|f| view.draw(f)).unwrap();
+    assert!(!format!("{:?}", terminal.backend().buffer()).contains("format"));
+}
+#[test]
+fn reply_controls_still_support_select_and_cancel() {
+    use crossterm::event::KeyCode;
+    let mut view = StatusView::new(&config(), "bot".into(), false);
+    view.key(KeyCode::Char('r'));
     view.key(KeyCode::Down);
-    view.key(KeyCode::Esc);
-    assert_eq!(view.output, OutputMode::Live);
-    view.key(KeyCode::Char('f'));
-    view.key(KeyCode::Char('1'));
-    view.key(KeyCode::Enter);
-    assert!(matches!(view.output, OutputMode::Answer));
+    assert!(view.key(KeyCode::Esc).is_none());
+    assert!(!view.reply_menu);
+    view.key(KeyCode::Char('r'));
+    view.key(KeyCode::Tab);
+    view.key(KeyCode::Char('2'));
+    assert!(matches!(
+        view.key(KeyCode::Enter),
+        Some(UiCommand::Reply { target, policy: Some(policy) })
+            if target == "groups" && policy == "mention"
+    ));
     assert!(matches!(
         view.key(KeyCode::Char('p')),
         Some(UiCommand::Paused(true))

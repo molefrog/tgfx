@@ -295,8 +295,7 @@ fn text(value: &Value) -> String {
 }
 #[tokio::test]
 async fn shared_memory_tracks_chat_topics_and_background_sessions_independently() {
-    let r =
-        Running::start_with_defaults("answer", &[], json!({"memory":{"file":"notes.md"}})).await;
+    let r = Running::start_with_defaults("final", &[], json!({"memory":{"file":"notes.md"}})).await;
     let path = r.root.path().join("workspace/notes.md");
     let socket = r.root.path().join("home/state/100.events.sock");
     for (step, contents, expected) in [
@@ -369,7 +368,7 @@ async fn route_queues_controls_stop_and_format_remain_independent() {
     r.message(2, 42, "DISCARDED");
     r.call(|m, p| m == "sendMessage" && text(p).contains("queued"))
         .await;
-    r.callback(3, "fmt:answer", 1000);
+    r.callback(3, "fmt:final", 1000);
     r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb3")
         .await;
     assert_eq!(
@@ -432,7 +431,7 @@ async fn native_stop_matches_active_draft_without_discarding_queued_work() {
         .await;
     r.message(2, 42, "QUEUED_AFTER_NATIVE_STOP");
     r.updates.send(json!({"update_id":3,"stopped_message_generation":{"chat":{"id":42},"draft_id":"999999999"}})).unwrap();
-    r.callback(4, "fmt:progress", 1000);
+    r.callback(4, "fmt:live", 1000);
     r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb4")
         .await;
     assert_eq!(
@@ -452,7 +451,7 @@ async fn native_stop_matches_active_draft_without_discarding_queued_work() {
 }
 #[tokio::test]
 async fn background_events_are_durable_and_do_not_receive_telegram_capabilities() {
-    let r = Running::start("answer").await;
+    let r = Running::start("final").await;
     let socket = r.root.path().join("home/state/100.events.sock");
     let job=tgfx::event_socket::event_request(&socket,&json!({"op":"emit","event":{"id":"event-one","name":"email.received","payload":{"message_id":"separate-fetch"}}})).await.unwrap();
     assert_eq!(job["destination"], "100:background");
@@ -486,7 +485,7 @@ async fn background_events_are_durable_and_do_not_receive_telegram_capabilities(
 }
 #[tokio::test]
 async fn active_permission_can_be_answered_without_blocking_polling() {
-    let r = Running::start("answer").await;
+    let r = Running::start("final").await;
     r.message(1, 42, "PERMISSION");
     let (_, card) = r
         .call(|m, p| m == "sendMessage" && text(p).contains("fx permission"))
@@ -511,7 +510,7 @@ async fn active_permission_can_be_answered_without_blocking_polling() {
 
 #[tokio::test]
 async fn forwarded_stickers_keep_prepared_local_image_paths_in_each_envelope() {
-    let r = Running::start("answer").await;
+    let r = Running::start("final").await;
     r.updates.send(json!({"update_id":1,"message":{"message_id":1,"date":1,"chat":{"id":42,"type":"private"},"from":{"id":42,"is_bot":false,"first_name":"Ada"},"forward_origin":{"type":"user","date":1,"sender_user":{"id":99,"is_bot":false,"first_name":"Source"}},"sticker":{"file_id":"sticker-file","file_unique_id":"unique","width":512,"height":512,"is_animated":false,"is_video":false,"emoji":"🦀"}}})).unwrap();
     r.updates.send(json!({"update_id":2,"message":{"message_id":2,"date":2,"chat":{"id":42,"type":"private"},"from":{"id":42,"is_bot":false,"first_name":"Ada"},"forward_origin":{"type":"user","date":1,"sender_user":{"id":99,"is_bot":false,"first_name":"Source"}},"text":"FORWARDED_CAPTION"}})).unwrap();
     r.message(3, 42, "FLUSH_BATCH");
@@ -597,7 +596,7 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let config:Config=serde_json::from_value(json!({"version":1,"activeBotId":"100","access":{"userIds":["42"],"chatIds":[]},"approvals":{"chatId":"42","topicId":"0"},"output":"answer","customIcons":false})).unwrap();
+    let config:Config=serde_json::from_value(json!({"version":1,"activeBotId":"100","access":{"userIds":["42"],"chatIds":[]},"approvals":{"chatId":"42","topicId":"0"},"output":"final","customIcons":false})).unwrap();
     let database = root.path().join("state/100.db");
     let paths = WorkspacePaths {
         workspace: workspace.clone(),
@@ -698,7 +697,7 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
 }
 #[tokio::test]
 async fn cancelling_an_external_event_during_acp_startup_frees_the_route() {
-    let r = Running::start_with_env("answer", &[("RUNTIME_HANG_INITIALIZE_ONCE", "1")]).await;
+    let r = Running::start_with_env("final", &[("RUNTIME_HANG_INITIALIZE_ONCE", "1")]).await;
     let socket = r.root.path().join("home/state/100.events.sock");
     tgfx::event_socket::event_request(
         &socket,
@@ -721,7 +720,7 @@ async fn cancelling_an_external_event_during_acp_startup_frees_the_route() {
 }
 #[tokio::test]
 async fn cancelling_an_external_event_during_delivery_preserves_an_uncertain_outbox() {
-    let r = Running::start("answer").await;
+    let r = Running::start("final").await;
     r.mock
         .hang_sends
         .store(true, std::sync::atomic::Ordering::Release);
@@ -759,7 +758,7 @@ async fn cancelling_an_external_event_during_delivery_preserves_an_uncertain_out
 
 #[tokio::test]
 async fn shutdown_interrupts_startup_recovery_without_replaying_fx() {
-    let mut r = Running::start_with_env("answer", &[("RUNTIME_SEED_RECOVERY", "1")]).await;
+    let mut r = Running::start_with_env("final", &[("RUNTIME_SEED_RECOVERY", "1")]).await;
     r.call(|method, params| method == "sendRichMessage" && text(params).contains("RECOVERY"))
         .await;
     unsafe {
@@ -856,7 +855,7 @@ async fn session_controls_reserve_order_before_delayed_telegram_ui_calls() {
 }
 #[tokio::test]
 async fn nonstreaming_compaction_edits_its_visible_progress_message() {
-    let r = Running::start("answer").await;
+    let r = Running::start("final").await;
     r.message(1, 42, "/compact");
     let confirmation = r
         .event(|event| event["event"] == "session.confirmation" && event["action"] == "compact")
