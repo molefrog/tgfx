@@ -5,26 +5,24 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
-    Answer,
-    Report,
-    Progress,
+    Final,
     #[default]
     Live,
+    Detailed,
 }
 impl OutputMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Answer => "answer",
-            Self::Report => "report",
-            Self::Progress => "progress",
+            Self::Final => "final",
             Self::Live => "live",
+            Self::Detailed => "detailed",
         }
     }
     pub fn activity(self) -> bool {
-        matches!(self, Self::Report | Self::Live)
+        self == Self::Detailed
     }
     pub fn streams(self) -> bool {
-        matches!(self, Self::Progress | Self::Live)
+        matches!(self, Self::Live | Self::Detailed)
     }
 }
 impl std::fmt::Display for OutputMode {
@@ -36,10 +34,9 @@ impl std::str::FromStr for OutputMode {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> anyhow::Result<Self> {
         Ok(match s {
-            "answer" => Self::Answer,
-            "report" => Self::Report,
-            "progress" => Self::Progress,
+            "final" => Self::Final,
             "live" => Self::Live,
+            "detailed" => Self::Detailed,
             _ => anyhow::bail!("Unknown output mode {s}"),
         })
     }
@@ -102,6 +99,8 @@ pub struct Config {
     #[serde(default)]
     pub chat_replies: HashMap<String, String>,
     #[serde(default)]
+    pub chat_formats: HashMap<String, OutputMode>,
+    #[serde(default)]
     pub memory: MemoryOptions,
 }
 fn dm_reply() -> String {
@@ -111,6 +110,16 @@ fn group_reply() -> String {
     "mention".into()
 }
 impl Config {
+    pub fn output_for(&self, route: &Route) -> OutputMode {
+        if route.chat_kind == "private" {
+            self.chat_formats
+                .get(&route.chat_id)
+                .copied()
+                .unwrap_or(self.output)
+        } else {
+            OutputMode::Final
+        }
+    }
     pub fn allows(&self, user: Option<&str>, chat: &str) -> bool {
         self.access.chat_ids.iter().any(|c| c == chat)
             || user.is_some_and(|u| self.access.user_ids.iter().any(|v| v == u))

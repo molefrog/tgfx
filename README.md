@@ -12,7 +12,7 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 
 - [x] Rich replies: markdown, tables, code blocks, spoilers, TeX math
 - [x] Live streaming while the agent works, renders tool calls nicely
-- [x] Four reply styles (`/format`), from a quiet final answer to a live draft with tool activity
+- [x] Three reply styles saved per DM (`/format`): Final, Live, and Detailed
 - [x] Can work in DMs and groups
 - [x] Can send stickers and react to messages
 - [x] Interactive model picker (`/model`)
@@ -175,42 +175,34 @@ as context for later requests; it cannot fetch messages from before it joined.
 
 ## Reply style
 
-𝒕𝒈(𝒇x) has four reply styles, depending on whether you want the answer
-streamed and whether you want to see the full history of tool calls.
-
-By default, it streams the text using Telegram's new
+Send `/format` in a DM to choose a reply style for that chat. **Live** is the
+default, using Telegram's
 [live message drafts](https://telegram.org/blog/ai-bot-revolution-11-new-features#streaming-text-for-bots).
-Tool calls are rendered as collapsible groups, in the order they happen.
+Changes apply to new turns. Groups always use **Final**.
 
 <table>
   <tr>
-    <th align="center">Live with activity</th>
-    <th align="center">Live answer</th>
-    <th align="center">No streaming</th>
+    <th align="center">Detailed</th>
+    <th align="center">Live (default)</th>
+    <th align="center">Final</th>
   </tr>
   <tr>
-    <td width="240" align="center"><img src="assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="240" height="300"></td>
-    <td width="240" align="center"><img src="assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="240" height="300"></td>
-    <td width="240" align="center"><img src="assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-live.webp" alt="Detailed: stream prose and tool calls as they happen" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-progress.webp" alt="Live: show status, then stream the answer" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-answer.webp" alt="Final: send the answer when the turn finishes" width="240" height="300"></td>
   </tr>
   <tr>
-    <td align="center"><code>live</code> (default)<br>Stream the answer and tool activity as they happen</td>
-    <td align="center"><code>progress</code><br>Show live status drafts, then stream the final answer</td>
-    <td align="center"><code>answer</code><br>Send the answer only when the full turn finishes</td>
+    <td align="center">Stream the answer and tool calls</td>
+    <td align="center">Show status, then stream the answer</td>
+    <td align="center">Send the answer when the turn finishes</td>
   </tr>
 </table>
 
-There is also **Final with activity** (`report`): the final answer with the
-tool activity collapsed underneath it. Groups always get one message.
-
-How to pick a reply style:
-
-- Start 𝒕𝒈(𝒇x) with `--output <mode>` for one run
-- Press <kbd>f</kbd> in the running terminal, or send `/format` to the bot and tap a button
-- Set a machine-wide default in `~/.fx/telegram/config.json`:
+To override the default for DMs without a saved choice, use
+`--output final|live|detailed`, or set `~/.fx/telegram/config.json`:
 
 ```json
-{ "defaults": { "output": "progress" } }
+{ "defaults": { "output": "live" } }
 ```
 
 ## Custom icons
@@ -237,7 +229,7 @@ are not inherited automatically in ACP mode.
 ```text
 tgfx           run fx in this folder (sets up on first run)
 tgfx --yolo    same, without fx permission checks
-tgfx --output  answer · report · progress · live
+tgfx --output  final · live · detailed (DM default)
 tgfx allow     let more users or chats talk to the bot (no id: pair by QR code)
 tgfx auth      add, rotate, or remove the bot token
 tgfx doctor    diagnostics: token, chats, rights, fx

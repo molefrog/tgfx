@@ -206,24 +206,15 @@ pub fn selected_model(model: &Value) -> Value {
 }
 pub fn reply_style_picker(current: crate::types::OutputMode) -> Value {
     let modes = [
+        ("final", "Final", "Send the answer when the turn finishes"),
         (
-            "answer",
-            "Final answer",
-            "Send the answer when the turn finishes",
-        ),
-        (
-            "report",
-            "Final with activity",
-            "Send the answer with collapsed tool activity",
-        ),
-        (
-            "progress",
-            "Live answer",
+            "live",
+            "Live",
             "Show live status, then stream the final answer",
         ),
         (
-            "live",
-            "Live with activity",
+            "detailed",
+            "Detailed",
             "Stream the answer and tool activity as they happen",
         ),
     ];

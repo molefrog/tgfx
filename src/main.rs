@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Parser)]
 #[command(version, about = "Run a local fx agent through Telegram")]
 struct Cli {
+    /// Default reply style for DMs without a saved choice
     #[arg(long, value_enum, global = true)]
     output: Option<OutputMode>,
     #[arg(long, global = true)]
@@ -394,7 +395,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 )
                 .collect::<Vec<_>>();
             let sessions=routes.iter().map(|r|json!({"chat":r["chat_id"],"topic":r["topic_id"],"session":r["session_id"],"generation":r["generation"],"lastActive":r["updated_at"]})).collect::<Vec<_>>();
-            let value = json!({"bot":c.active_bot_id,"workspace":w,"access":principals,"approvals":c.approvals,"settings":{"output":c.output,"customIcons":c.custom_icons,"dmReply":c.dm_reply,"groupReply":c.group_reply,"chatReplies":c.chat_replies},"sessions":sessions});
+            let value = json!({"bot":c.active_bot_id,"workspace":w,"access":principals,"approvals":c.approvals,"settings":{"output":c.output,"customIcons":c.custom_icons,"dmReply":c.dm_reply,"groupReply":c.group_reply,"chatReplies":c.chat_replies,"chatFormats":c.chat_formats},"sessions":sessions});
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
@@ -637,7 +638,6 @@ async fn execute(cli: Cli) -> Result<()> {
                     while let Some(cmd) = rx.recv().await {
                         use tgfx::{runtime::RuntimeControl as R, tui::UiCommand as U};
                         let mapped = match cmd {
-                            U::Output(x) => R::Output(x),
                             U::Paused(x) => R::Pause(x),
                             U::Icons(x) => R::Icons(x),
                             U::Reply { target, policy } => R::Replies {

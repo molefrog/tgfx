@@ -245,5 +245,16 @@ pub async fn deliver(
     }
 }
 pub fn format_menu(output: crate::types::OutputMode) -> Value {
-    json!({"inline_keyboard":([[("answer","Final answer"),("report","Final with activity")],[("progress","Live answer"),("live","Live with activity")]].map(|row|row.map(|(mode,label)|json!({"text":format!("{}{}",if mode==output.as_str(){"✓ "}else{""},label),"callback_data":format!("fmt:{mode}")}))))})
+    let row = [
+        ("final", "Final"),
+        ("live", "Live"),
+        ("detailed", "Detailed"),
+    ]
+    .map(|(mode, label)| {
+        json!({
+            "text": format!("{}{}", if mode == output.as_str() { "✓ " } else { "" }, label),
+            "callback_data": format!("fmt:{mode}")
+        })
+    });
+    json!({"inline_keyboard": [row]})
 }

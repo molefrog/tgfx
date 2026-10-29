@@ -389,7 +389,7 @@ if let Some(at)=t.finished_at{v["finishedAt"]=json!(at)}v}).collect();
             } else {
                 String::new()
             };
-            let line = if output == OutputMode::Progress {
+            let line = if output == OutputMode::Live {
                 self.status()
             } else {
                 "Thinking…".into()

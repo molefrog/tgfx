@@ -1,8 +1,5 @@
 //! Inline terminal status. Runtime state stays in the controller; the UI sends commands.
-use crate::{
-    secrets::redact,
-    types::{Config, OutputMode},
-};
+use crate::{secrets::redact, types::Config};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -24,7 +21,6 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
 pub enum UiCommand {
-    Output(OutputMode),
     Paused(bool),
     Icons(bool),
     Reply {
@@ -44,7 +40,6 @@ pub struct RouteView {
 }
 pub struct StatusView {
     pub bot: String,
-    pub output: OutputMode,
     pub paused: bool,
     pub icons: bool,
     pub yolo: bool,
@@ -53,7 +48,7 @@ pub struct StatusView {
     pub routes: BTreeMap<String, RouteView>,
     pub logs: VecDeque<String>,
     pub show_logs: bool,
-    pub menu: Option<char>,
+    pub reply_menu: bool,
     pub selection: usize,
     pub frame: u64,
     pub dm_reply: String,
@@ -65,7 +60,6 @@ impl StatusView {
     pub fn new(config: &Config, bot: String, yolo: bool) -> Self {
         Self {
             bot,
-            output: config.output,
             paused: false,
             icons: config.custom_icons,
             yolo,
@@ -74,7 +68,7 @@ impl StatusView {
             routes: BTreeMap::new(),
             logs: VecDeque::new(),
             show_logs: false,
-            menu: None,
+            reply_menu: false,
             selection: 0,
             frame: 0,
             dm_reply: config.dm_reply.clone(),
@@ -109,9 +103,6 @@ impl StatusView {
         }
         if kind == "settings" {
             let s = v.get("settings").unwrap_or(v);
-            if let Some(x) = s["output"].as_str().and_then(|s| s.parse().ok()) {
-                self.output = x;
-            }
             if let Some(x) = s["paused"].as_bool() {
                 self.paused = x;
             }
@@ -191,30 +182,19 @@ impl StatusView {
         }
     }
     pub fn key(&mut self, key: KeyCode) -> Option<UiCommand> {
-        if let Some(menu) = self.menu {
+        if self.reply_menu {
             match key {
-                KeyCode::Esc => self.menu = None,
+                KeyCode::Esc => self.reply_menu = false,
                 KeyCode::Up => self.selection = self.selection.saturating_sub(1),
-                KeyCode::Down => {
-                    self.selection = (self.selection + 1).min(if menu == 'f' { 3 } else { 2 })
-                }
-                KeyCode::Tab if menu == 'r' => {
+                KeyCode::Down => self.selection = (self.selection + 1).min(2),
+                KeyCode::Tab => {
                     self.reply_target = (self.reply_target + 1) % (self.chats.len() + 2);
                 }
-                KeyCode::Char(c) if ('1'..='4').contains(&c) => {
+                KeyCode::Char(c) if ('1'..='3').contains(&c) => {
                     self.selection = c as usize - '1' as usize;
                 }
                 KeyCode::Enter => {
-                    self.menu = None;
-                    if menu == 'f' {
-                        self.output = [
-                            OutputMode::Answer,
-                            OutputMode::Report,
-                            OutputMode::Progress,
-                            OutputMode::Live,
-                        ][self.selection.min(3)];
-                        return Some(UiCommand::Output(self.output));
-                    }
+                    self.reply_menu = false;
                     let target = if self.reply_target == 0 {
                         "dm".into()
                     } else if self.reply_target == 1 {
@@ -234,17 +214,8 @@ impl StatusView {
             return None;
         }
         match key {
-            KeyCode::Char('f') => {
-                self.menu = Some('f');
-                self.selection = match self.output {
-                    OutputMode::Answer => 0,
-                    OutputMode::Report => 1,
-                    OutputMode::Progress => 2,
-                    OutputMode::Live => 3,
-                };
-            }
             KeyCode::Char('r') => {
-                self.menu = Some('r');
+                self.reply_menu = true;
                 self.selection = 0;
             }
             KeyCode::Char('l') => self.show_logs = !self.show_logs,
@@ -276,8 +247,7 @@ impl StatusView {
                 )),
             ]),
             Line::from(format!(
-                "{} · icons {}{}",
-                self.output,
+                "icons {}{}",
                 if self.icons { "on" } else { "off" },
                 if self.yolo { " · YOLO" } else { "" }
             )),
@@ -304,31 +274,18 @@ impl StatusView {
         if self.routes.is_empty() {
             lines.push(Line::from("  Waiting for Telegram messages…"));
         }
-        if let Some(menu) = self.menu {
-            let choices = if menu == 'f' {
-                vec![
-                    "Final answer",
-                    "Final with activity",
-                    "Live answer",
-                    "Live with activity",
-                ]
-            } else {
-                vec!["Every message", "Mentions or replies", "Inherit"]
-            };
-            let title = if menu == 'f' {
-                "Format · future tasks".to_owned()
-            } else {
-                format!(
-                    "Replies · {} (Tab changes target)",
-                    if self.reply_target == 0 {
-                        "DMs"
-                    } else if self.reply_target == 1 {
-                        "groups"
-                    } else {
-                        &self.chats[self.reply_target - 2]
-                    }
-                )
-            };
+        if self.reply_menu {
+            let choices = ["Every message", "Mentions or replies", "Inherit"];
+            let title = format!(
+                "Replies · {} (Tab changes target)",
+                if self.reply_target == 0 {
+                    "DMs"
+                } else if self.reply_target == 1 {
+                    "groups"
+                } else {
+                    &self.chats[self.reply_target - 2]
+                }
+            );
             lines.push(Line::from(title));
             for (i, c) in choices.iter().enumerate() {
                 lines.push(Line::styled(
@@ -343,7 +300,7 @@ impl StatusView {
             lines.push(Line::from("↑↓ select · Enter apply · Esc cancel"));
         } else {
             lines.push(Line::styled(
-                "f format · r replies · p pause · i icons · l logs · q quit",
+                "r replies · p pause · i icons · l logs · q quit",
                 self.style(Color::DarkGray),
             ));
         }
@@ -400,7 +357,7 @@ pub fn run(
             && let Event::Key(k) = event::read()?
             && k.kind == KeyEventKind::Press
         {
-            if k.code == KeyCode::Char('q') && view.menu.is_none()
+            if k.code == KeyCode::Char('q') && !view.reply_menu
                 || k.code == KeyCode::Char('c')
                     && k.modifiers.contains(event::KeyModifiers::CONTROL)
             {

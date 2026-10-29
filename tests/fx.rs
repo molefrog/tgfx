@@ -359,8 +359,8 @@ fn projector_selects_final_answer_and_never_reopens_finished_tools() {
         p.apply(&v);
     }
     assert_eq!(p.tool_states()[0].status, "completed");
-    assert_eq!(p.plain_final(OutputMode::Answer), "Final **answer**");
-    let live = p.rich(OutputMode::Live, true);
+    assert_eq!(p.plain_final(OutputMode::Final), "Final **answer**");
+    let live = p.rich(OutputMode::Detailed, true);
     assert!(
         live["blocks"]
             .as_array()
@@ -370,7 +370,7 @@ fn projector_selects_final_answer_and_never_reopens_finished_tools() {
                 && b["summary"].as_str().unwrap_or("").contains("Read 1 file"))
     );
     assert!(
-        !p.rich(OutputMode::Answer, true)
+        !p.rich(OutputMode::Final, true)
             .to_string()
             .contains("Let me look")
     );
@@ -381,7 +381,7 @@ fn projector_suppresses_bootstrap_and_filters_diagnostics() {
     p.apply(&json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Reading guidelines now"}}));
     p.apply(&json!({"sessionUpdate":"tool_call","toolCallId":"g","name":"mcp_features","status":"completed","rawInput":{"uri":"telegram://guidelines"}}));
     p.apply(&json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello\n[context] internal warning"}}));
-    let rich = p.rich(OutputMode::Live, true).to_string();
+    let rich = p.rich(OutputMode::Detailed, true).to_string();
     assert!(!rich.contains("Reading guidelines now"));
     assert!(!rich.contains("internal warning"));
     assert!(rich.contains("Hello"));

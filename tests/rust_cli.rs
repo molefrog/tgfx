@@ -31,7 +31,7 @@ fn global_settings_and_project_override_are_compatible() {
     let p = setup(d.path());
     std::fs::write(
         d.path().join("home/config.json"),
-        json!({"version":1,"defaults":{"output":"answer","dmReply":"mention","customIcons":false}})
+        json!({"version":1,"defaults":{"output":"final","dmReply":"mention","customIcons":false}})
             .to_string(),
     )
     .unwrap();
@@ -133,7 +133,7 @@ fn unrelated_access_edit_keeps_global_defaults_inherited() {
     let defaults = d.path().join("home/config.json");
     std::fs::write(
         &defaults,
-        json!({"version":1,"defaults":{"output":"answer","dmReply":"mention","customIcons":false}})
+        json!({"version":1,"defaults":{"output":"final","dmReply":"mention","customIcons":false}})
             .to_string(),
     )
     .unwrap();
@@ -149,7 +149,7 @@ fn unrelated_access_edit_keeps_global_defaults_inherited() {
     }
     std::fs::write(
         defaults,
-        json!({"version":1,"defaults":{"output":"report","dmReply":"all","customIcons":true}})
+        json!({"version":1,"defaults":{"output":"detailed","dmReply":"all","customIcons":true}})
             .to_string(),
     )
     .unwrap();
