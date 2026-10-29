@@ -266,6 +266,33 @@ describe("tgfx CLI", () => {
     expect(await loadConfig(paths)).toMatchObject({ access: { chatIds: ["-9"] }, chatReplies: { "-9": "all" } });
   });
 
+  test.each(["42", "-9"])("allow updates replies for policy-granted %s without changing access", async (id) => {
+    const paths = await workspace();
+    const policy = { ...(await loadConfig(paths))!, access: { userIds: ["42"], chatIds: ["-9"] } };
+    const policyPath = join(paths.workspace, "policy.json");
+    await Bun.write(policyPath, JSON.stringify(policy));
+    const result = await tgfx(["allow", id, "--reply", "mention"], {
+      cwd: paths.workspace, env: { TGFX_POLICY_FILE: policyPath },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(await loadConfig(paths)).toMatchObject({ access: policy.access, chatReplies: { [id]: "mention" } });
+    expect(await Bun.file(policyPath).json()).toEqual(policy);
+  });
+
+  test("allow reply overrides cannot grant new policy access", async () => {
+    const paths = await workspace();
+    const before = await Bun.file(paths.config).text();
+    const policyPath = join(paths.workspace, "policy.json");
+    await Bun.write(policyPath, before);
+    const result = await tgfx(["allow", "42", "99", "--reply", "mention"], {
+      cwd: paths.workspace, env: { TGFX_POLICY_FILE: policyPath },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("managed");
+    expect(await Bun.file(paths.config).text()).toBe(before);
+    expect(await Bun.file(policyPath).text()).toBe(before);
+  });
+
   test("allow inherit resumes the group default and preserves other overrides", async () => {
     const paths = await workspace();
     await tgfx(["allow", "-9", "-10", "--reply", "all"], { cwd: paths.workspace });

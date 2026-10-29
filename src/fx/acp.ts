@@ -35,6 +35,8 @@ const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
 export function sanitizeFxEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const clean = { ...environment };
   delete clean.TELEGRAM_BOT_TOKEN;
+  delete clean.TGFX_POLICY_FILE;
+  delete clean.TGFX_HOME;
   for (const name of Object.keys(clean)) {
     if (name.startsWith("TGFX_MCP_") || name.startsWith("TGFX_INTERNAL_TELEGRAM_")) delete clean[name];
   }
@@ -127,6 +129,7 @@ export class FxRouteSession {
     /** How long a cancelled turn may keep running before the process is terminated. Default: two seconds. */
     cancelGraceMs?: number;
     previousSessionId?: string;
+    onDispose?: () => void;
     mcp?: McpOptions;
   }) {}
 
@@ -375,6 +378,7 @@ export class FxRouteSession {
 
   private async disposeOnce(options: { closeSession?: boolean }): Promise<void> {
     this.closed = true;
+    this.options.onDispose?.();
     // Also release callers waiting for a handshake that will never finish.
     if (this.connectTask) this.ready.reject(new Error("fx ACP session is closed"));
     if (options.closeSession && this.context && this.sessionId) {
