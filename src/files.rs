@@ -1,6 +1,8 @@
 use crate::state::private_mode;
 use anyhow::{Result, ensure};
 use futures::StreamExt;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     fs::OpenOptions,
     io::Read,
@@ -35,7 +37,6 @@ pub fn safe_name(value: &str) -> String {
 fn shared(path: &Path) -> Result<bool> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         // New bot and context directories inherit the operator's setgid root.
         for parent in path.ancestors() {
             match std::fs::symlink_metadata(parent) {
@@ -117,7 +118,6 @@ pub async fn write_response_limited(
     };
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         options.mode(mode).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
@@ -125,7 +125,8 @@ pub async fn write_response_limited(
         path: path.to_owned(),
         complete: false,
     };
-    private_mode(path, mode)?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     let mut file = tokio::fs::File::from_std(file);
     let result = async {
         let mut total = 0;
