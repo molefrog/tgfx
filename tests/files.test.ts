@@ -27,6 +27,7 @@ describe("Telegram attachment files", () => {
 
   test("shares downloads for group reading without granting write access", async () => {
     const previous = process.env.TGFX_SHARED_FILES;
+    const previousMask = process.umask(0o077);
     process.env.TGFX_SHARED_FILES = "1";
     try {
       const directory = await root();
@@ -37,6 +38,7 @@ describe("Telegram attachment files", () => {
       expect((await stat(join(files, "ctx_shared"))).mode & 0o7777).toBe(0o2750);
       expect((await stat(path)).mode & 0o777).toBe(0o640);
     } finally {
+      process.umask(previousMask);
       if (previous === undefined) delete process.env.TGFX_SHARED_FILES;
       else process.env.TGFX_SHARED_FILES = previous;
     }
