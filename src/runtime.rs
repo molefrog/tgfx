@@ -1568,6 +1568,7 @@ impl Inner {
         if self.config().custom_icons {
             projector.set_icons(crate::fx::projector::default_icons());
         }
+        let projector = Arc::new(Mutex::new(projector));
         let compact = blocks.last().is_some_and(|b| b["text"] == "/compact");
         let (events, mut receiver) = mpsc::unbounded_channel();
         let mut prompt = Box::pin(session.prompt(blocks, events));
@@ -1589,6 +1590,12 @@ impl Inner {
         if compact && let Some(draft) = &draft {
             draft.offer(json!({"blocks":[{"type":"thinking","text":"Compacting conversation…"}]}));
         }
+        let offer_draft = || {
+            if let Some(draft) = &draft {
+                let projector = projector.clone();
+                draft.offer_lazy(move || lock(&projector).rich(mode, false));
+            }
+        };
         let mut typing = tokio::time::interval(Duration::from_secs(4));
         let result = loop {
             tokio::select! {
@@ -1596,21 +1603,21 @@ impl Inner {
                 event = receiver.recv(), if receiver_open => {
                     match event {
                         Some(FxEvent::Update(update)) => {
-                            projector.apply(&update);
-                            if let Some(draft) = &draft { draft.offer(projector.rich(mode, false)); }
+                            lock(&projector).apply(&update);
+                            offer_draft();
                             if let Some(route) = route {
                                 let inner = update.get("update").unwrap_or(&update);
                                 let glyph = match inner["sessionUpdate"].as_str() {
                                     Some("agent_thought_chunk") => "⋯", Some("agent_message_chunk") => "·",
                                     Some("tool_call") => "▪", Some("tool_call_update") => if inner["status"] == "failed" {"✗"} else {"▫"}, _ => "",
                                 };
-                                self.emit(json!({"type":"turn","route":self.label(route),"state":"event","status":projector.status(),"glyph":glyph}));
+                                self.emit(json!({"type":"turn","route":self.label(route),"state":"event","status":lock(&projector).status(),"glyph":glyph}));
                             }
                         }
                         Some(FxEvent::Permission {request, respond}) => {
                             if let Some(route) = route {
-                                projector.set_waiting(Some(if route.key == self.approvals_route().key { "Waiting for your approval above…" } else { "fx is waiting for approval in the approvals chat…" }.into()));
-                                if let Some(draft) = &draft { draft.offer(projector.rich(mode, false)); }
+                                lock(&projector).set_waiting(Some(if route.key == self.approvals_route().key { "Waiting for your approval above…" } else { "fx is waiting for approval in the approvals chat…" }.into()));
+                                offer_draft();
                                 let inner = self.clone(); let route = route.clone(); let cancel = active.cancel.clone();
                                 lock(&self.tasks).push(tokio::spawn(async move {
                                     if let Err(e) = inner.permission(&route, request, respond, cancel).await { inner.log("permission.failed", json!({"error":e.to_string()})); }
@@ -1631,7 +1638,7 @@ impl Inner {
                     break Err(anyhow::anyhow!("TGFX stopped"));
                 }
                 result = &mut prompt => {
-                    while let Ok(FxEvent::Update(update)) = receiver.try_recv() { projector.apply(&update); }
+                    while let Ok(FxEvent::Update(update)) = receiver.try_recv() { lock(&projector).apply(&update); }
                     break result.and_then(|v| {
                         if v["stopReason"] == "cancelled" { active.cancel.cancel(); bail!("Turn cancelled"); }
                         Ok(())
@@ -1647,6 +1654,7 @@ impl Inner {
         if let Some(draft) = draft {
             draft.stop().await;
         }
+        let mut projector = std::mem::take(&mut *lock(&projector));
         projector.set_waiting(None);
         result?;
         Ok(projector)

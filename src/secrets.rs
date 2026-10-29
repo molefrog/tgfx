@@ -8,8 +8,9 @@ fn path(bot: &str) -> Result<PathBuf> {
         .join(format!("{bot}.token")))
 }
 pub fn redact(text: &str) -> String {
-    regex::Regex::new(r"\d{6,}:[A-Za-z0-9_-]{20,}")
-        .unwrap()
+    static TOKEN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\d{6,}:[A-Za-z0-9_-]{20,}").unwrap());
+    TOKEN
         .replace_all(text, "[redacted Telegram token]")
         .into_owned()
 }

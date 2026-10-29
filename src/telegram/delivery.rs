@@ -67,15 +67,20 @@ impl PeerDraftLimiter {
     }
 }
 pub type SharedDraftLimiter = Arc<Mutex<PeerDraftLimiter>>;
-/// Offers never await Telegram. Only the latest pending tree survives coalescing.
+#[derive(Clone)]
+enum DraftFrame {
+    Rich(Value),
+    Deferred(Arc<dyn Fn() -> Value + Send + Sync>),
+}
+/// Offers never await Telegram. Deferred frames render only when ready to send.
 pub struct DraftStream {
-    sender: watch::Sender<Option<Value>>,
+    sender: watch::Sender<Option<DraftFrame>>,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 impl DraftStream {
     pub fn start(api: TelegramApi, route: Route, id: i64, limiter: SharedDraftLimiter) -> Self {
-        let (sender, mut receiver) = watch::channel(None::<Value>);
+        let (sender, mut receiver) = watch::channel(None::<DraftFrame>);
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let task = tokio::spawn(async move {
@@ -90,13 +95,15 @@ impl DraftStream {
             let mut keepalive = Instant::now() + Duration::from_secs(20);
             loop {
                 if pending.is_none() {
-                    tokio::select! {_ =stop.cancelled()=>break,r=receiver.changed()=>{if r.is_err(){break}pending=receiver.borrow_and_update().clone();},_=tokio::time::sleep_until(keepalive),if committed.is_some()=>{pending=committed.clone();}}
+                    tokio::select! {_ =stop.cancelled()=>break,r=receiver.changed()=>{if r.is_err(){break}pending=receiver.borrow_and_update().clone();},_=tokio::time::sleep_until(keepalive),if committed.is_some()=>{pending=committed.clone().map(DraftFrame::Rich);}}
                     pending_since = now();
                 }
                 if pending.is_none() {
                     continue;
                 }
-                if pending == committed && Instant::now() < keepalive {
+                if matches!(&pending, Some(DraftFrame::Rich(frame)) if Some(frame) == committed.as_ref())
+                    && Instant::now() < keepalive
+                {
                     pending = None;
                     continue;
                 }
@@ -108,6 +115,13 @@ impl DraftStream {
                 let Some(frame) = pending.take() else {
                     continue;
                 };
+                let frame = match frame {
+                    DraftFrame::Rich(frame) => frame,
+                    DraftFrame::Deferred(render) => render(),
+                };
+                if committed.as_ref() == Some(&frame) && Instant::now() < keepalive {
+                    continue;
+                }
                 limiter.lock().unwrap().record_attempt(now());
                 let sent = tokio::select! {_=stop.cancelled()=>break,result=api.draft(&route,id,frame.clone())=>result};
                 match sent {
@@ -123,7 +137,7 @@ impl DraftStream {
                         if typed.is_none_or(TelegramError::retryable) {
                             let retry = typed.and_then(|t| t.retry_after).unwrap_or(1) * 1000;
                             limiter.lock().unwrap().record_flood(now(), retry);
-                            pending = Some(frame);
+                            pending = Some(DraftFrame::Rich(frame));
                         } else {
                             errors += 1;
                             if errors >= 3 {
@@ -142,7 +156,12 @@ impl DraftStream {
         }
     }
     pub fn offer(&self, rich: Value) {
-        let _ = self.sender.send(Some(rich));
+        let _ = self.sender.send(Some(DraftFrame::Rich(rich)));
+    }
+    pub fn offer_lazy(&self, render: impl Fn() -> Value + Send + Sync + 'static) {
+        let _ = self
+            .sender
+            .send(Some(DraftFrame::Deferred(Arc::new(render))));
     }
     pub async fn stop(mut self) {
         self.cancel.cancel();
