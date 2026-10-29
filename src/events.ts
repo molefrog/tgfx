@@ -73,7 +73,7 @@ export class EventJournal {
     return this.db.transaction(() => {
       const existing = this.row(event.id);
       if (existing) {
-        if (existing.payload !== serialized) throw new Error("Event ID already used with different content");
+        if (canonical(JSON.parse(existing.payload)) !== serialized) throw new Error("Event ID already used with different content");
         return { event, fresh: false };
       }
       const now = new Date().toISOString();

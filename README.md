@@ -26,29 +26,46 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 
 ## Install
 
-You need [Bun 1.4+](https://bun.sh), an authenticated `fx 0.0.8+`, and a bot
-token from [@BotFather](https://t.me/BotFather).
+TGFX is a native Rust executable for macOS and Linux. It needs an authenticated
+[𝒇x](https://fx.sh) installation and a bot token from
+[@BotFather](https://t.me/BotFather). FX 0.0.8+ is supported; use 0.0.15+ for
+external-event steering.
 
-Install [𝒇x](https://fx.sh) and sign in with `fx login` (Vercel),
-`fx login codex` (ChatGPT), or `fx login grok` (Grok):
+Build and install this checkout with [Rust 1.99+](https://rustup.rs):
 
-```bash
-# 0. Ensure fx is installed and authenticated
-curl -fsSL https://fx.sh/setup.sh | bash
-fx login
+```sh
+./scripts/install.sh
+```
 
-# 1. Install the package
-bun add -g @molefrog/tgfx
+Or use Cargo directly:
 
-# 2. Grab a bot token from @BotFather, then run tgfx in your project folder.
-#    It walks you through authorization on the first run.
+```sh
+cargo install --locked --path . --force
+```
+
+Then sign in to FX and run TGFX in the folder where the agent should work:
+
+```sh
+fx login grok  # or fx login / fx login codex
+cd /path/to/project
 tgfx
 ```
 
-Set `TELEGRAM_BOT_TOKEN` to override the saved token.
+The first run privately prompts for the bot token and pairs your Telegram
+account. `TELEGRAM_BOT_TOKEN` overrides a saved token without saving the
+environment token. Bun and Node.js are not needed to run the bot.
 
->  Why we depend on Bun? We use it to keep everything minimal and fast,
->  reusing as much of Bun's built-ins as possible (SQLite, image compression etc.).
+Versioned releases provide native archives and checksums for Apple Silicon and
+Intel Macs, and ARM64/x86-64 Linux. After a Rust release is published, install
+one with:
+
+```sh
+./scripts/install-release.sh --version v0.3.0
+```
+
+The JavaScript manifest is private and retained for compatibility tests; this
+rewrite is distributed through Cargo and native release archives. See
+[building, releases, and migration](doc/RUST.md).
 
 ## How it works
 
@@ -96,7 +113,7 @@ global-default settings:
 `file` is relative to the working directory and must remain inside it, including
 through symlinks. Set `enabled` to `false` to disable automatic loading. All
 content in this file is shared across conversations; private conversation
-details should not be copied into it.
+details should not be copied into it unless the person asks to share them.
 
 ## External events
 
@@ -227,8 +244,10 @@ To turn it off, start with `tgfx --no-icons`.
 
 ## MCP
 
-𝒇x doesn't inherit MCP servers from your config automatically in ACP mode that Telegram channel uses.
-We're working on adding this soon! 
+Each conversation receives TGFX's Telegram MCP server through a scoped Unix
+broker. It supplies Telegram files, reactions, stickers, choices, polls, history,
+and available group administration tools. Other MCP servers in your FX config
+are not inherited automatically in ACP mode.
 
 ## Commands
 
@@ -257,7 +276,7 @@ traverse. tgfx then runs credentialed Telegram MCP processes itself and gives
 fx only a Unix-socket proxy and a revocable capability scoped to its session.
 The agent cannot choose the bot token, route, or approval destination in the
 proxy handshake. Session disposal revokes its capability and connections.
-Without this option, the existing direct MCP launch is unchanged.
+Without this option, TGFX creates a private temporary broker directory.
 
 Set `TGFX_POLICY_FILE` to an operator-owned JSON file with `version`,
 `activeBotId`, `access`, and `approvals` (the same shape as the project config).
@@ -272,3 +291,23 @@ service-owned setgid download root, and keep its parent protected from agent
 writes. The agent can copy downloads into its writable workspace to edit them.
 These options provide hooks for an OS boundary; they do not create a sandbox
 or isolate agents that still run as the same user.
+
+## Development
+
+```sh
+cargo build --locked
+cargo test --locked --all-targets
+```
+
+For the full verification suite, install Bun 1.4+ for the retained TypeScript
+behavior tests, then run:
+
+```sh
+bun install --frozen-lockfile
+./scripts/check-rust.sh
+```
+
+The TypeScript sources remain a compatibility reference. The primary executable
+is `src/main.rs`; `bin/tgfx` runs a locally built native binary. See
+[the Rust implementation notes](doc/RUST.md) for module boundaries and release
+commands.

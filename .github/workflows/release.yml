@@ -1,0 +1,75 @@
+name: Native release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag and build
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          cargo test --locked --all-targets
+          cargo build --locked --release --target '${{ matrix.target }}' --bin tgfx
+          'target/${{ matrix.target }}/release/tgfx' --version
+      - name: Archive
+        shell: bash
+        run: |
+          mkdir release
+          cp 'target/${{ matrix.target }}/release/tgfx' release/tgfx
+          cp LICENSE README.md release/
+          cd release
+          tar -czf 'tgfx-${{ matrix.target }}.tar.gz' tgfx LICENSE README.md
+          if command -v sha256sum >/dev/null; then
+            sha256sum 'tgfx-${{ matrix.target }}.tar.gz' > 'tgfx-${{ matrix.target }}.sha256'
+          else
+            shasum -a 256 'tgfx-${{ matrix.target }}.tar.gz' > 'tgfx-${{ matrix.target }}.sha256'
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tgfx-${{ matrix.target }}
+          path: |
+            release/*.tar.gz
+            release/*.sha256
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tgfx-*
+          merge-multiple: true
+          path: release
+      - name: Publish archives and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat release/*.sha256 | sort -k2 > release/SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/SHA256SUMS --verify-tag --generate-notes --title "TGFX $GITHUB_REF_NAME"

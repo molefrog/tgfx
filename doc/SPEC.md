@@ -13,7 +13,9 @@ screenshots are in the [README](../README.md).
 One tgfx process serves one bot in one workspace. Run it from the folder where
 fx should work. Sessions start lazily when a conversation needs the agent.
 
-The runtime requires Bun 1.4 or newer and an authenticated fx installation.
+The runtime is a native Rust executable for macOS and Linux and requires an
+authenticated fx installation. Building from source needs Rust 1.99 or newer.
+Bun 1.4 is used only for retained TypeScript compatibility tests.
 Startup checks fx's version and diagnostic report, validates the Telegram bot,
 and acquires a local lock before polling. See the README for the recommended
 fx version.
@@ -242,8 +244,8 @@ polls do not become prompts. Choice clicks and supported poll votes created by
 tgfx tools arrive as later, authorized events and can start new turns. Join
 requests are retained for a later explicit group task; they do not wake fx.
 
-For exact fields, see [normalization](../src/telegram/normalize.ts) and
-[message types](../src/types.ts).
+For exact fields, see [normalization](../src/telegram/normalize.rs) and
+[message types](../src/types.rs).
 
 ## Telegram tools available to fx
 
@@ -311,7 +313,7 @@ be moderation targets.
 
 There is no generic Bot API tool, arbitrary destination chat, unpin-all action,
 or invite-link management. Exact tool schemas live in the
-[MCP server](../src/mcp/server.ts).
+[MCP server](../src/mcp/server.rs).
 
 ## Approvals
 
@@ -425,12 +427,12 @@ Keep product behavior here and implementation detail beside the code:
 
 | Area | Source |
 | --- | --- |
-| Commands and setup | [index](../src/index.ts) |
-| Routing, turns, controls, approvals | [app](../src/app.ts) |
-| Persistence and recovery states | [state](../src/state.ts) |
-| fx session lifecycle | [ACP client](../src/fx/acp.ts) |
-| Telegram presentation and delivery | [renderer](../src/telegram/renderer.ts) |
-| Settings | [config](../src/config.ts) |
+| Commands and setup | [main](../src/main.rs) |
+| Routing, turns, controls, approvals | [runtime](../src/runtime.rs) |
+| Persistence and recovery states | [state](../src/state.rs) |
+| fx session lifecycle | [ACP client](../src/fx/mod.rs) |
+| Telegram presentation and delivery | [transport](../src/telegram/mod.rs), [drafts](../src/telegram/delivery.rs), [Markdown](../src/markdown.rs) |
+| Settings | [config](../src/config.rs) |
 
 Regression tests use a fake fx executable, a fake Telegram server, and real
 SQLite in temporary directories. They cover authorization, routing, controls,
@@ -438,5 +440,26 @@ session recovery, rendering, file boundaries, and action deduplication. They do
 not establish how every Telegram client renders a message or how every real
 fx tool behaves under cancellation.
 
-Run `bun run check && bun run test` for code changes, and `bun run build` before
-using the linked executable.
+Run `./scripts/check-rust.sh` for code changes. It checks formatting, Clippy,
+native tests, and, when Bun is installed, the original behavior assertions
+against Rust plus the subprocess end-to-end suite. `cargo build --release --locked` builds the executable. Migration and distribution details are in
+[the Rust notes](RUST.md).
+
+
+## Rust migration
+
+The native executable keeps the existing project/global configuration, token
+lookup order, environment variables, SQLite tables, route keys, action refs,
+and recovery rules. Stop the Bun process before starting Rust with the same
+bot. A bot must have only one long-polling owner.
+
+Existing `.ts` sources and assertions remain as the compatibility oracle, not
+the executable entry point. Frankenstein provides the Bot API transport;
+raw JSON at the update/sticker boundary tolerates new fields and the removed
+`contains_masks` sticker-set field. Comrak handles Markdown, Ratatui handles
+the terminal, and the official ACP and MCP Rust SDKs handle agent protocols.
+
+A release switch changes the executable. It does not automatically replay
+interrupted agent work or copy conversation details between routes. Keep a
+private snapshot of the journal and settings before a production switch;
+[the migration guide](RUST.md#migrating-an-existing-bot) explains rollback.
