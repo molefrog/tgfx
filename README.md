@@ -63,27 +63,11 @@ is written into the project.
 
 ## Persistent memory
 
-When `MEMORY.md` exists in the project directory, TGFX automatically loads it
-into the bot's context and checks for updates before each new turn. Edit it
-yourself or ask the bot to update it; other chats pick up changes on their next
-turn.
+When `MEMORY.md` exists in your project, TGFX loads it into the bot's context
+and refreshes it before new turns. This gives your assistant shared memory
+across chats. You or the bot can update the file.
 
-This lets you build personal assistants with shared memory per project across
-DMs, groups, and background tasks. Preferences, decisions, and useful facts can
-carry between chats while conversations stay separate. Everything in the file
-is shared, so only add private conversation details when the person asks to
-share them.
-
-Memory loading is on by default. To turn it off for a project, set this in its
-TGFX config under `~/.fx/telegram/projects/`:
-
-```json
-{ "memory": { "enabled": false } }
-```
-
-Use `memory.file` to choose another filename in the project. You can also put
-these settings under `defaults` in `~/.fx/telegram/config.json` to apply them to
-all projects.
+To turn it off, set `"memory": { "enabled": false }` in the project's TGFX config.
 
 ## External events
 
