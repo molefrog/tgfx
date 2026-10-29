@@ -537,8 +537,7 @@ fn child_environment_excludes_service_credentials_and_control_endpoints() {
     let names = [
         "TELEGRAM_BOT_TOKEN",
         "TGFX_HOME",
-        "TGFX_POLICY_FILE",
-        "TGFX_EVENTS_SOCKET",
+        "TGFX_RUNTIME_DIR",
         "TGFX_MCP_SECRET",
         "TGFX_INTERNAL_TELEGRAM_TOKEN",
         "PATH",

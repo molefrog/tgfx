@@ -15,7 +15,7 @@ pub fn sanitize_environment_from(
             let n = name.to_string_lossy();
             !matches!(
                 n.as_ref(),
-                "TELEGRAM_BOT_TOKEN" | "TGFX_POLICY_FILE" | "TGFX_HOME" | "TGFX_EVENTS_SOCKET"
+                "TELEGRAM_BOT_TOKEN" | "TGFX_HOME" | "TGFX_RUNTIME_DIR"
             ) && !n.starts_with("TGFX_MCP_")
                 && !n.starts_with("TGFX_INTERNAL_TELEGRAM_")
                 && !n.starts_with("TGFX_TOKEN")

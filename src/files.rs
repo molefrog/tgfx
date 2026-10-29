@@ -32,23 +32,38 @@ pub fn safe_name(value: &str) -> String {
         out
     }
 }
-fn shared() -> bool {
-    std::env::var("TGFX_SHARED_FILES").as_deref() == Ok("1")
+fn shared(path: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // New bot and context directories inherit the operator's setgid root.
+        for parent in path.ancestors() {
+            match std::fs::symlink_metadata(parent) {
+                Ok(meta) => return Ok(meta.is_dir() && meta.permissions().mode() & 0o2000 != 0),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(false)
 }
 fn download_root(root: &Path) -> Result<PathBuf> {
+    let shared = shared(root)?;
     std::fs::create_dir_all(root)?;
     ensure!(
         !std::fs::symlink_metadata(root)?.file_type().is_symlink(),
         "The tgfx attachment directory must not be a symbolic link"
     );
-    private_mode(root, if shared() { 0o2750 } else { 0o700 })?;
+    private_mode(root, if shared { 0o2750 } else { 0o700 })?;
     Ok(root.canonicalize()?)
 }
 pub fn temporary_download_directory(root: &Path, prefix: &str) -> Result<tempfile::TempDir> {
     let mut b = tempfile::Builder::new();
     b.prefix(prefix);
-    Ok(if shared() {
-        b.tempdir_in(download_root(root)?)?
+    Ok(if shared(root)? {
+        let directory = b.tempdir_in(download_root(root)?)?;
+        private_mode(directory.path(), 0o2750)?;
+        directory
     } else {
         b.tempdir()?
     })
@@ -71,7 +86,7 @@ pub fn safe_download_path(root: &Path, context: &str, filename: &str) -> Result<
             .is_symlink(),
         "The attachment context directory must not be a symbolic link"
     );
-    private_mode(&directory, if shared() { 0o2750 } else { 0o700 })?;
+    private_mode(&directory, if shared(&root)? { 0o2750 } else { 0o700 })?;
     let actual = directory.canonicalize()?;
     ensure!(
         actual == directory && actual.starts_with(&root),
@@ -95,19 +110,22 @@ pub async fn write_response_limited(
     );
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
+    let mode = if shared(path.parent().unwrap_or(Path::new(".")))? {
+        0o640
+    } else {
+        0o600
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(if shared() { 0o640 } else { 0o600 })
-            .custom_flags(libc::O_NOFOLLOW);
+        options.mode(mode).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
     let mut partial = PartialDownload {
         path: path.to_owned(),
         complete: false,
     };
-    private_mode(path, if shared() { 0o640 } else { 0o600 })?;
+    private_mode(path, mode)?;
     let mut file = tokio::fs::File::from_std(file);
     let result = async {
         let mut total = 0;

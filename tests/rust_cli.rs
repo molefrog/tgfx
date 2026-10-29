@@ -5,7 +5,7 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("TGFX_HOME", dir.join("home"))
-        .env_remove("TGFX_POLICY_FILE")
+        .env_remove("TGFX_RUNTIME_DIR")
         .env_remove("TELEGRAM_BOT_TOKEN")
         .output()
         .unwrap()
@@ -89,20 +89,46 @@ fn operator_policy_fails_closed_and_blocks_mutation() {
         .args(["deny", "42"])
         .current_dir(d.path())
         .env("TGFX_HOME", d.path().join("home"))
-        .env("TGFX_POLICY_FILE", &policy)
+        .env("TGFX_RUNTIME_DIR", d.path())
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("TGFX_POLICY_FILE"));
-    std::fs::remove_file(&policy).unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("policy.json"));
+    std::fs::write(&policy, "{broken").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_tgfx"))
         .args(["access", "--json"])
         .current_dir(d.path())
         .env("TGFX_HOME", d.path().join("home"))
-        .env("TGFX_POLICY_FILE", &policy)
+        .env("TGFX_RUNTIME_DIR", d.path())
         .output()
         .unwrap();
     assert!(!out.status.success());
+}
+#[test]
+fn runtime_directory_without_policy_keeps_normal_project_config() {
+    let d = tempfile::tempdir().unwrap();
+    let config = setup(d.path());
+    let runtime = d.path().join("runtime");
+    std::fs::create_dir(&runtime).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tgfx"))
+        .args(["allow", "77"])
+        .current_dir(d.path())
+        .env("TGFX_HOME", d.path().join("home"))
+        .env("TGFX_RUNTIME_DIR", runtime)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&std::fs::read(config).unwrap()).unwrap();
+    assert!(
+        value["access"]["userIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("77"))
+    );
 }
 #[test]
 fn private_config_permissions_survive_restrictive_umask() {
@@ -192,7 +218,7 @@ fn managed_access_allows_reply_preferences_but_never_new_grants() {
             .args(args)
             .current_dir(d.path())
             .env("TGFX_HOME", d.path().join("home"))
-            .env("TGFX_POLICY_FILE", &policy)
+            .env("TGFX_RUNTIME_DIR", d.path())
             .output()
             .unwrap()
     };

@@ -37,7 +37,10 @@ impl RuntimeLock {
             );
         }
         private_mode(lock, 0o600)?;
-        let data = json!({"pid":std::process::id(),"botId":bot,"workspace":workspace,"startedAt":crate::types::now()});
+        let events_socket = crate::config::absolute(&crate::event_socket::events_socket_path(
+            &lock.with_extension("db"),
+        ))?;
+        let data = json!({"pid":std::process::id(),"botId":bot,"workspace":workspace,"startedAt":crate::types::now(),"eventsSocket":events_socket});
         std::fs::write(info, format!("{data}\n"))?;
         private_mode(info, 0o600)?;
         Ok(Self {
