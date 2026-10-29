@@ -1217,8 +1217,11 @@ export class TgfxApp {
         kind: "session_action", action: data.action, generation: data.generation,
         message: { ...data.message, historySeq: this.state.history.latestSeq(route.key) },
       } : undefined;
-      // Make confirmed work discardable by /stop before waiting on Telegram.
-      if (payload) this.state.requeueInbox(row.id, payload);
+      // Reserve its place before Telegram's UI calls let newer requests arrive.
+      if (payload) {
+        this.state.requeueInbox(row.id, payload);
+        if (!this.stopping) this.schedule(row.id, route.key, payload);
+      }
       await this.options.telegram.answerCallback(callback.id, value === "cancel" ? "Cancelled" : "Confirmed")
         .catch(() => undefined);
       await this.options.telegram.editRich(route.chatId, callback.message.message_id, {
@@ -1226,9 +1229,8 @@ export class TgfxApp {
           ? "Cancelled. The conversation is unchanged."
           : data.action === "clear" ? "Clearing conversation…" : "Compaction queued…" }],
       }).catch(error => this.log(`Could not update the confirmation card · ${redactSecrets(String(error))}`));
-      if (!payload) return;
-      if (!this.stopping) this.schedule(row.id, route.key, payload);
-      return "deferred";
+      if (payload) return "deferred";
+      return;
     }
     const inApprovalsRoute = route.chatId === this.config.approvals.chatId
       && route.topicId === this.config.approvals.topicId;
