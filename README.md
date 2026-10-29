@@ -26,42 +26,37 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 
 ## Install
 
-TGFX is a native Rust executable for macOS and Linux. It needs an authenticated
-[𝒇x](https://fx.sh) installation and a bot token from
-[@BotFather](https://t.me/BotFather). FX 0.0.8+ is supported; use 0.0.15+ for
-external-event steering.
-
-Build and install this checkout with [Rust 1.99+](https://rustup.rs) and a C compiler:
+**Recommended** (macOS and Linux):
 
 ```sh
-./scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/molefrog/tgfx/main/scripts/install-release.sh | sh
 ```
 
-Or use Cargo directly:
+**Cargo** (requires Rust and a C compiler):
 
 ```sh
-cargo install --locked --path . --force
+cargo install --locked --git https://github.com/molefrog/tgfx.git
 ```
 
-Then sign in to FX and run TGFX in the folder where the agent should work:
+**Build from source** (binary: `target/release/tgfx`):
 
 ```sh
-fx login grok  # or fx login / fx login codex
+git clone https://github.com/molefrog/tgfx.git
+cd tgfx
+cargo build --release --locked
+```
+
+## Run
+
+Install [𝒇x](https://fx.sh) and create a bot with [@BotFather](https://t.me/BotFather), then:
+
+```sh
+fx login
 cd /path/to/project
 tgfx
 ```
 
-The first run privately prompts for the bot token and pairs your Telegram
-account. `TELEGRAM_BOT_TOKEN` overrides a saved token without saving the
-environment token. Bun and Node.js are not needed to run the bot.
-
-Versioned releases provide native archives and checksums for Apple Silicon and
-Intel Macs, and ARM64/x86-64 Linux. After a Rust release is published, install
-one with:
-
-```sh
-./scripts/install-release.sh --version v0.3.0
-```
+The first run asks for your bot token and pairs your Telegram account.
 
 ## How it works
 
