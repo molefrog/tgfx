@@ -74,51 +74,21 @@ To turn it off, set `"memory": { "enabled": false }` in the project's TGFX confi
 
 ## External events
 
-`tgfx emit` submits an event to the running TGFX instance for the current folder.
-Use `--cwd /path/to/workspace` from another directory. The command does not
-start a second bot or open the journal itself: a private Unix socket admits and
-persists events in the running controller. A stopped instance returns an error.
+Your bot can react to things outside Telegram: incoming emails, scheduled
+checks, or updates from other apps. Call `tgfx emit` from the project folder
+while 𝒕𝒈(𝒇x) is running:
 
 ```sh
-tgfx emit email.received --id mail-123 --payload '{"inbox_id":"agent@example.com","message_id":"123"}'
-tgfx emit email.received --cwd /path/to/workspace --chat -1001234567890 --topic 42 --payload-file event.json
-tgfx emit check.completed --payload-file - --wait < event.json
-tgfx emit feedback --steer --payload '{"note":"Prioritize the deadline"}'
-tgfx emit --status mail-123
+# Handle a new email in the background
+tgfx emit email.received --payload '{"message_id":"123"}'
+
+# Ask for an update in a Telegram chat
+tgfx emit daily.check --chat -1001234567890 --prompt "Review today's tasks and send a summary."
 ```
 
-Without `--chat`, events use one persistent background conversation for the
-workspace, with no Telegram MCP credentials and no Telegram delivery. Responses
-are stored in the event journal and available through `--status` or `--wait`.
-Explicit chat destinations must be allowed by the bot's access policy. They
-reuse that chat/topic's session, Telegram tools, and reply format. Events have
-no Telegram sender or current message; message-relative tools need an explicit
-message reference. Queued events wait behind
-existing chat work; `--steer` joins a running turn at FX's next input boundary,
-or queues a new turn if none is active. Steering requires FX's ACP steering
-extension (supported by FX 0.0.15).
-
-The agent receives a distinct `external_event` envelope with the event name,
-ID, destination, and arbitrary JSON payload. It is not fabricated as a Telegram
-user message. Optional `--prompt` supplies the local integration's task guidance;
-payload data cannot grant owner approval or change the access policy.
-
-An explicit `--id` makes retries idempotent. The same ID with different contents
-is rejected. Queued events survive restarts; interrupted running events are
-marked `interrupted`, never automatically replayed because tools may already
-have produced side effects. Outputs are local job results, not an exactly-once
-guarantee for external side effects.
-
-`/stop` and confirmed `/clear` cancel events already queued for that chat/topic.
-Cancelled events stay cancelled across restarts and idempotent retries. Events
-submitted after the command's cancellation boundary wait for it to finish.
-
-The default socket is beside the bot journal and is owner-only. For a separate
-trusted emitter user, set `TGFX_EVENTS_SOCKET` on the controller and emitter,
-and create a private setgid parent directory accessible only to those two
-users. The socket is then mode 0660. Do not share that directory or group with
-the agent/tool user. FX's environment strips this variable; filesystem
-permissions enforce the boundary even if the agent learns the socket path.
+Use `--chat` to choose where the bot replies. Without it, the bot works in the
+background. Events wait their turn if it's busy; add `--steer` to update its
+current task instead.
 
 ## Groups and reply settings
 
