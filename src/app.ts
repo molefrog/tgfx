@@ -1,7 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { rm, stat } from "node:fs/promises";
+import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, rejectedPermission, type FxPermissionMode } from "./fx/acp";
@@ -58,7 +57,7 @@ import type {
 } from "./types";
 import { isOutputMode, REPLY_STYLES, routeKey } from "./types";
 import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type WorkspacePaths } from "./config";
-import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
+import { safeDownloadPath, temporaryDownloadDirectory, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
   command: "stop",
@@ -909,7 +908,7 @@ export class TgfxApp {
   private async prepareStickerImages(message: InboundMessage, signal?: AbortSignal): Promise<void> {
     const stickers = message.attachments.filter((attachment) => attachment.kind === "sticker");
     if (!stickers.length) return;
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-stickers-"));
+    const temporaryRoot = await temporaryDownloadDirectory(this.options.paths.files, "tgfx-stickers-");
     this.stickerTemporaryDirectories.add(temporaryRoot);
     try {
       await Promise.all(stickers.map(async (sticker) => {

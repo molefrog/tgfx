@@ -1,14 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { mkdir, realpath, rm } from "node:fs/promises";
+import { basename, extname, resolve } from "node:path";
 import * as z from "zod/v4";
 import { StateStore } from "../state";
 import { adminCapabilitiesForMember, TelegramApi } from "../telegram/api";
 import type { AdminCapability, AttachmentRef } from "../types";
 import { VERSION } from "../version";
-import { readSendableFile, safeDownloadPath, safeName, writeResponseLimited } from "./files";
+import { readSendableFile, safeDownloadPath, safeName, temporaryDownloadDirectory, writeResponseLimited } from "./files";
 import { TELEGRAM_GUIDELINES_TEXT, TELEGRAM_GUIDELINES_URI } from "./guidelines";
 
 type McpEnvironment = {
@@ -362,14 +361,14 @@ export async function runTelegramMcpServer(): Promise<void> {
 
   server.registerTool("get_sticker_pack", {
     title: "Get Telegram sticker pack",
-    description: "Load part of a Telegram sticker pack by its short name. Returns metadata by default. Set download_images to inspect system-temporary image previews before selecting a sticker for send_sticker_by_id.",
+    description: "Load part of a Telegram sticker pack by its short name. Returns metadata by default. Set download_images to inspect temporary image previews before selecting a sticker for send_sticker_by_id.",
     inputSchema: {
       name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/)
         .describe("Sticker pack short name, for example from t.me/addstickers/<name>"),
       offset: z.number().int().min(0).default(0),
       limit: z.number().int().min(1).max(50).default(20),
       download_images: z.boolean().default(false)
-        .describe("Download the selected stickers into system temporary storage for inspection"),
+        .describe("Download temporary previews of the selected stickers for inspection"),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   }, async (args) => result(await perform("telegram_get_sticker_pack", args, async () => {
@@ -386,7 +385,7 @@ export async function runTelegramMcpServer(): Promise<void> {
     }));
     const stickers = args.download_images
       ? await withStickerPackDownloadMutex(async () => {
-        const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-sticker-pack-"));
+        const temporaryRoot = await temporaryDownloadDirectory(env.files, "tgfx-sticker-pack-");
         stickerTemporaryDirectories.add(temporaryRoot);
         const downloaded: Array<(typeof metadata)[number] & { image: { path: string; mime: string } }> = [];
         try {

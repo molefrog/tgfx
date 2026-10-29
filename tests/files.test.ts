@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readSendableFile, safeDownloadPath, safeName, writeResponseLimited } from "../src/mcp/files";
+import { readSendableFile, safeDownloadPath, safeName, temporaryDownloadDirectory, writeResponseLimited } from "../src/mcp/files";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -41,6 +41,30 @@ describe("Telegram attachment files", () => {
       else process.env.TGFX_SHARED_FILES = previous;
     }
   });
+
+  test.skipIf(process.platform === "win32" || !process.getgroups?.().some((gid) => gid !== process.getgid?.()))(
+    "temporary previews inherit the configured shared group instead of the service group", async () => {
+      const previous = process.env.TGFX_SHARED_FILES;
+      process.env.TGFX_SHARED_FILES = "1";
+      try {
+        const directory = await root();
+        const serviceGroup = (await stat(directory)).gid;
+        const sharedGroup = process.getgroups!().find((gid) => gid !== serviceGroup)!;
+        await chown(directory, process.getuid!(), sharedGroup);
+        await chmod(directory, 0o2750);
+        const preview = await temporaryDownloadDirectory(join(directory, "100"), "sticker-");
+        const path = await safeDownloadPath(preview, "ctx_shared", "preview.webp");
+        await writeResponseLimited(new Response("image"), path, 10);
+        expect((await stat(preview)).gid).toBe(sharedGroup);
+        expect((await stat(path)).gid).toBe(sharedGroup);
+        expect((await stat(preview)).mode & 0o7777).toBe(0o2750);
+        expect((await stat(path)).mode & 0o777).toBe(0o640);
+      } finally {
+        if (previous === undefined) delete process.env.TGFX_SHARED_FILES;
+        else process.env.TGFX_SHARED_FILES = previous;
+      }
+    },
+  );
 
   test("removes a partial file when a streamed response crosses the size limit", async () => {
     const directory = await root();
