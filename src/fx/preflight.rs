@@ -80,8 +80,8 @@ pub fn assert_supported_version(version: &str) -> Result<()> {
         c[2].parse::<u64>()?,
         c[3].parse::<u64>()?,
     );
-    if current < (0, 0, 8) {
-        bail!("fx 0.0.8 or newer is required (found {version}). Run fx upgrade --channel stable.")
+    if current < (0, 0, 15) {
+        bail!("fx 0.0.15 or newer is required (found {version}). Run fx upgrade --channel stable.")
     }
     Ok(())
 }
