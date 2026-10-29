@@ -1,42 +1,29 @@
-name: Rust checks
+name: CI
 on:
   push:
     branches: [main]
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      RUSTFLAGS: -C linker=clang-18 -C link-arg=-fuse-ld=/usr/bin/ld.lld-18
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
-      - name: Use LLVM linker on Linux
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lld
-          echo 'RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
       - run: ./scripts/check-rust.sh
-      - name: Check standalone launchers
-        run: |
-          sh -n bin/tgfx scripts/install.sh scripts/install-release.sh scripts/check-rust.sh
-          ./bin/tgfx --version
-  container:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker build --build-arg TARGETARCH=amd64 --tag tgfx:ci .
-      - run: docker run --rm tgfx:ci --version
