@@ -158,3 +158,32 @@ tgfx doctor    diagnostics: token, chats, rights, fx
 
 Details, guarantees, and the rest of the commands live in the
 [specification](https://github.com/molefrog/tgfx/blob/main/doc/SPEC.md).
+
+### Separate service and agent users
+
+An optional Linux deployment can keep tgfx's Telegram credentials and journal
+under a service user while running fx under a separate agent user. Set
+`FX_BINARY` to an operator-owned wrapper that switches to the agent user,
+clears the environment, drops privileges, and then execs fx. The wrapper is
+also used for preflight and usage checks.
+
+Set `TGFX_MCP_SOCKET_DIR` to a service-owned directory that the agent can
+traverse. tgfx then runs credentialed Telegram MCP processes itself and gives
+fx only a Unix-socket proxy and a revocable capability scoped to its session.
+The agent cannot choose the bot token, route, or approval destination in the
+proxy handshake. Session disposal revokes its capability and connections.
+Without this option, the existing direct MCP launch is unchanged.
+
+Set `TGFX_POLICY_FILE` to an operator-owned JSON file with `version`,
+`activeBotId`, `access`, and `approvals` (the same shape as the project config).
+It overrides those fields and rejects CLI access/approval changes; missing or
+invalid policy fails closed. Presentation and reply preferences remain mutable.
+Protect both the policy and tgfx's data directory from the agent at OS level.
+
+For shared attachment reading, `TGFX_FILES_DIR` selects a separate download
+root (with a bot-ID subdirectory), and `TGFX_SHARED_FILES=1` uses directories
+`2750` and files `0640`. Give the service and agent a shared group, use a
+service-owned setgid download root, and keep its parent protected from agent
+writes. The agent can copy downloads into its writable workspace to edit them.
+These options provide hooks for an OS boundary; they do not create a sandbox
+or isolate agents that still run as the same user.

@@ -41,6 +41,21 @@ export const configSchema = coreSchema.extend({
 
 export type GlobalConfig = z.infer<typeof globalSchema>;
 
+export function assertAccessPolicyWritable(): void {
+  if (process.env.TGFX_POLICY_FILE) {
+    throw new Error("Telegram access is managed by TGFX_POLICY_FILE; edit that policy as its owner");
+  }
+}
+
+/** Optional operator-owned identity and access policy, separate from mutable preferences. */
+async function loadPolicy(): Promise<z.infer<typeof coreSchema> | undefined> {
+  const path = process.env.TGFX_POLICY_FILE;
+  if (!path) return undefined;
+  const policy = await readJson(resolve(path), coreSchema);
+  if (!policy) throw new Error(`Required Telegram policy file is missing: ${path}`);
+  return policy;
+}
+
 /**
  * Everything lives under one fx-convention directory; a workspace stays clean:
  *
@@ -85,7 +100,9 @@ export function botPaths(botId: string): BotPaths {
     database: join(state, `${botId}.db`),
     lock: join(state, `${botId}.lock`),
     lockInfo: join(state, `${botId}.info.json`),
-    files: join(tgfxHome(), "files", botId),
+    files: process.env.TGFX_FILES_DIR
+      ? join(resolve(process.env.TGFX_FILES_DIR), botId)
+      : join(tgfxHome(), "files", botId),
   };
 }
 
@@ -150,9 +167,13 @@ function storedRecord(paths: ProjectPaths, stored: StoredConfig): Record<string,
 
 export async function loadConfig(paths: ProjectPaths): Promise<TgfxConfig | undefined> {
   const stored = await readJson(paths.config, storedConfigSchema);
-  if (!stored) return undefined;
+  const policy = await loadPolicy();
+  if (!stored && !policy) return undefined;
+  if (stored && policy && stored.activeBotId !== policy.activeBotId) {
+    throw new Error("Telegram policy and workspace bot identities differ");
+  }
   const { defaults } = await loadGlobalConfig();
-  return configSchema.parse({ ...defaults, ...stored });
+  return configSchema.parse({ ...defaults, ...stored, ...policy });
 }
 
 /**
@@ -167,6 +188,10 @@ export async function saveConfig(
   overrides: Partial<ProjectSettings> = {},
 ): Promise<void> {
   const { output, customIcons, dmReply, groupReply, chatReplies, ...core } = configSchema.parse(config);
+  const policy = await loadPolicy();
+  if (policy && JSON.stringify(coreSchema.parse(core)) !== JSON.stringify(policy)) {
+    throw new Error("Telegram access is managed by TGFX_POLICY_FILE; edit that policy as its owner");
+  }
   const changes = { ...overrides };
   await serializeWrite(paths.config, async () => {
     const current = await readJson(paths.config, storedConfigSchema);

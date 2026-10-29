@@ -1,7 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { rm, stat } from "node:fs/promises";
+import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, rejectedPermission, type FxPermissionMode } from "./fx/acp";
@@ -9,6 +8,7 @@ import { AcpProjector } from "./fx/projector";
 import { describeTool } from "./fx/tools";
 import { isFxUsagePeriod, readFxUsage, type FxUsagePeriod } from "./fx/usage";
 import { StateStore, type InboxRow } from "./state";
+import type { TelegramMcpBroker } from "./mcp/broker";
 import { adminCapabilitiesForMember, TelegramApi, TelegramError } from "./telegram/api";
 import { costReport, type CostReportView } from "./telegram/cost-report";
 import { TGFX_CUSTOM_ICON_SET } from "./telegram/custom-icon-set";
@@ -58,7 +58,7 @@ import type {
 } from "./types";
 import { isOutputMode, REPLY_STYLES, routeKey } from "./types";
 import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type WorkspacePaths } from "./config";
-import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
+import { safeDownloadPath, temporaryDownloadDirectory, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
   command: "stop",
@@ -235,6 +235,7 @@ export class TgfxApp {
   private readonly stickerTemporaryDirectories = new Set<string>();
   private readonly routeLabels = new Map<string, RouteLabel>();
   private readonly queueWaiting = new Map<string, number>();
+  private readonly queueNotified = new Set<string>();
   private resumePolling?: () => void;
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
@@ -263,6 +264,7 @@ export class TgfxApp {
     /** How long a cancelled fx turn may keep running before its process is terminated. Default: two seconds. */
     cancelGraceMs?: number;
     mcpLaunch?: { command: string; args: string[] };
+    mcpBroker?: TelegramMcpBroker;
     /** Run-time overrides of the configured settings, from flags or the terminal view. */
     output?: OutputMode;
     customIcons?: boolean;
@@ -689,25 +691,48 @@ export class TgfxApp {
       || (callback && ["fxp", "mcp", "model", "cost", REPLY_STYLE_CALLBACK, SESSION_ACTION_CALLBACK].includes(callback))
       || (payload.kind === "session_action" && payload.action === "clear");
     if (!control) {
-      this.enqueue(inboxId, key);
+      this.enqueue(inboxId, key, payload.kind === "message" ? payload.message.route : undefined);
       return;
     }
     const task = this.dispatch(inboxId).finally(() => this.controls.delete(task));
     this.controls.add(task);
   }
 
-  private enqueue(inboxId: number, routeKeyValue: string): void {
+  private enqueue(inboxId: number, routeKeyValue: string, messageRoute?: Route): void {
     const previous = this.queueTails.get(routeKeyValue) ?? Promise.resolve();
     // Waiting counts everything behind the item the route is busy with.
     const busy = this.queueTails.has(routeKeyValue);
     if (busy) this.setWaiting(routeKeyValue, (this.queueWaiting.get(routeKeyValue) ?? 0) + 1);
+    if (busy && messageRoute && !this.queueNotified.has(routeKeyValue)) {
+      this.queueNotified.add(routeKeyValue);
+      const stop = messageRoute.chatKind !== "private" && this.options.bot.username
+        ? `/stop@${this.options.bot.username}` : "/stop";
+      const notice = this.options.telegram.sendText(
+        messageRoute.chatId,
+        `Your message is queued. I'm still working on the previous request. Send ${stop} to cancel it and discard queued requests.`,
+        messageRoute.topicId,
+        {},
+        this.pollAbort.signal,
+      ).then(() => undefined).catch(error => {
+        if (!this.stopping) this.log({
+          event: "queue.notice_failed",
+          message: `Could not acknowledge queued message · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+          chat: messageRoute.chatId,
+          topic: messageRoute.topicId,
+        });
+      }).finally(() => this.controls.delete(notice));
+      this.controls.add(notice);
+    }
     const next = previous.catch(() => undefined).then(() => {
       if (busy) this.setWaiting(routeKeyValue, (this.queueWaiting.get(routeKeyValue) ?? 1) - 1);
       return this.dispatch(inboxId);
     });
     let tail!: Promise<void>;
     tail = next.finally(() => {
-      if (this.queueTails.get(routeKeyValue) === tail) this.queueTails.delete(routeKeyValue);
+      if (this.queueTails.get(routeKeyValue) === tail) {
+        this.queueTails.delete(routeKeyValue);
+        this.queueNotified.delete(routeKeyValue);
+      }
     });
     this.queueTails.set(routeKeyValue, tail);
   }
@@ -755,7 +780,8 @@ export class TgfxApp {
       this.state.coalesceInbox(primary.row.id, {
         kind: "forwarded", messages: messages.map(({ payload }) => payload.message),
       } satisfies PersistedPayload, messages.slice(1).map(({ row }) => row.id));
-      this.enqueue(primary.row.id, key);
+      this.enqueue(primary.row.id, key, messages.some(({ payload }) => this.invokesAgent(payload.message))
+        ? primary.payload.message.route : undefined);
       return;
     }
     const combined = {
@@ -782,7 +808,7 @@ export class TgfxApp {
       { kind: "message", message: combined } satisfies PersistedPayload,
       messages.slice(1).map(({ row }) => row.id),
     );
-    this.enqueue(primary.row.id, key);
+    this.enqueue(primary.row.id, key, this.invokesAgent(combined) ? combined.route : undefined);
   }
 
   private async dispatch(inboxId: number): Promise<void> {
@@ -911,7 +937,7 @@ export class TgfxApp {
   private async prepareStickerImages(message: InboundMessage, signal?: AbortSignal): Promise<void> {
     const stickers = message.attachments.filter((attachment) => attachment.kind === "sticker");
     if (!stickers.length) return;
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-stickers-"));
+    const temporaryRoot = await temporaryDownloadDirectory(this.options.paths.files, "tgfx-stickers-");
     this.stickerTemporaryDirectories.add(temporaryRoot);
     try {
       await Promise.all(stickers.map(async (sticker) => {
@@ -1558,7 +1584,10 @@ export class TgfxApp {
       if (clear && !this.stopping) await this.runClear(message.route, message.historySeq);
     } finally {
       done.resolve();
-      if (this.queueTails.get(message.route.key) === barrier) this.queueTails.delete(message.route.key);
+      if (this.queueTails.get(message.route.key) === barrier) {
+        this.queueTails.delete(message.route.key);
+        this.queueNotified.delete(message.route.key);
+      }
     }
   }
 
@@ -1809,6 +1838,30 @@ export class TgfxApp {
       command: process.execPath,
       args: [fileURLToPath(new URL("./index.ts", import.meta.url)), "mcp"],
     };
+    const mcpEnvironment = {
+      TGFX_MCP_TOKEN: this.options.token,
+      TGFX_MCP_BOT_ID: this.options.bot.id,
+      TGFX_MCP_ROUTE_KEY: route.key,
+      TGFX_MCP_ROUTE_LABEL: this.labelFor(route).chat,
+      TGFX_MCP_WORKSPACE: this.options.paths.workspace,
+      TGFX_MCP_HOME: tgfxHome(),
+      TGFX_MCP_DATABASE: this.options.paths.database,
+      TGFX_MCP_FILES: this.options.paths.files,
+      TGFX_MCP_APPROVALS_CHAT: this.config.approvals.chatId,
+      TGFX_MCP_APPROVALS_TOPIC: this.config.approvals.topicId,
+      TGFX_MCP_ALLOWED_CHATS: JSON.stringify(this.config.access.chatIds),
+      ...(process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT
+        ? { TGFX_INTERNAL_TELEGRAM_API_ROOT: process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT }
+        : {}),
+      ...(process.env.TGFX_INTERNAL_TELEGRAM_FILE_ROOT
+        ? { TGFX_INTERNAL_TELEGRAM_FILE_ROOT: process.env.TGFX_INTERNAL_TELEGRAM_FILE_ROOT }
+        : {}),
+      TGFX_MCP_PROTECTED_USERS: JSON.stringify([
+        this.options.bot.id,
+        ...this.config.access.userIds,
+      ]),
+    };
+    const lease = this.options.mcpBroker?.lease(mcpEnvironment);
     const session = new FxRouteSession({
       workspace: this.options.paths.workspace,
       binary: this.options.fxBinary,
@@ -1816,33 +1869,8 @@ export class TgfxApp {
       permissionMode: this.options.permissionMode,
       cancelGraceMs: this.options.cancelGraceMs,
       previousSessionId: row.session_id ?? undefined,
-      mcp: {
-        command: mcpLaunch.command,
-        args: mcpLaunch.args,
-        env: {
-          TGFX_MCP_TOKEN: this.options.token,
-          TGFX_MCP_BOT_ID: this.options.bot.id,
-          TGFX_MCP_ROUTE_KEY: route.key,
-          TGFX_MCP_ROUTE_LABEL: this.labelFor(route).chat,
-          TGFX_MCP_WORKSPACE: this.options.paths.workspace,
-          TGFX_MCP_HOME: tgfxHome(),
-          TGFX_MCP_DATABASE: this.options.paths.database,
-          TGFX_MCP_FILES: this.options.paths.files,
-          TGFX_MCP_APPROVALS_CHAT: this.config.approvals.chatId,
-          TGFX_MCP_APPROVALS_TOPIC: this.config.approvals.topicId,
-          TGFX_MCP_ALLOWED_CHATS: JSON.stringify(this.config.access.chatIds),
-          ...(process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT
-            ? { TGFX_INTERNAL_TELEGRAM_API_ROOT: process.env.TGFX_INTERNAL_TELEGRAM_API_ROOT }
-            : {}),
-          ...(process.env.TGFX_INTERNAL_TELEGRAM_FILE_ROOT
-            ? { TGFX_INTERNAL_TELEGRAM_FILE_ROOT: process.env.TGFX_INTERNAL_TELEGRAM_FILE_ROOT }
-            : {}),
-          TGFX_MCP_PROTECTED_USERS: JSON.stringify([
-            this.options.bot.id,
-            ...this.config.access.userIds,
-          ]),
-        },
-      },
+      mcp: lease?.launch ?? { ...mcpLaunch, env: mcpEnvironment },
+      onDispose: lease?.revoke,
     });
     this.sessions.set(route.key, session);
     this.status({ type: "session", route: this.labelFor(route), state: "starting" });

@@ -14,9 +14,12 @@ import type { TgfxConfig } from "../src/types";
 
 const temporary: string[] = [];
 const originalHome = process.env.TGFX_HOME;
+const originalPolicy = process.env.TGFX_POLICY_FILE;
 afterEach(() => {
   if (originalHome === undefined) delete process.env.TGFX_HOME;
   else process.env.TGFX_HOME = originalHome;
+  if (originalPolicy === undefined) delete process.env.TGFX_POLICY_FILE;
+  else process.env.TGFX_POLICY_FILE = originalPolicy;
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
@@ -45,6 +48,35 @@ function bare(): Omit<TgfxConfig, "output" | "customIcons"> {
 }
 
 describe("workspace config", () => {
+  test("operator policy overrides stored access while keeping preferences writable", async () => {
+    const root = isolate("tgfx-policy-");
+    const paths = projectPaths(root);
+    await saveConfig(paths, config());
+    const policy = { ...bare(), access: { userIds: ["42"], chatIds: ["-9"] } };
+    const policyPath = join(root, "policy.json");
+    writeFileSync(policyPath, JSON.stringify(policy));
+    process.env.TGFX_POLICY_FILE = policyPath;
+    const loaded = (await loadConfig(paths))!;
+    expect(loaded.access).toEqual(policy.access);
+    await saveConfig(paths, { ...loaded, output: "answer" }, { output: "answer" });
+    expect((await loadConfig(paths))?.output).toBe("answer");
+    await expect(saveConfig(paths, { ...loaded, access: { userIds: ["99"], chatIds: [] } }))
+      .rejects.toThrow();
+    await expect(saveConfig(paths, { ...loaded, approvals: { chatId: "99", topicId: "0" } }))
+      .rejects.toThrow("managed");
+    expect(await Bun.file(policyPath).json()).toEqual(policy);
+  });
+
+  test("a configured policy can initialize a workspace and fails closed when missing or invalid", async () => {
+    const root = isolate("tgfx-policy-required-");
+    const paths = projectPaths(root);
+    process.env.TGFX_POLICY_FILE = join(root, "policy.json");
+    await expect(loadConfig(paths)).rejects.toThrow("missing");
+    writeFileSync(process.env.TGFX_POLICY_FILE, JSON.stringify(bare()));
+    expect(await loadConfig(paths)).toMatchObject(config());
+    writeFileSync(process.env.TGFX_POLICY_FILE, '{"access":{"chatIds":[]}}');
+    await expect(loadConfig(paths)).rejects.toThrow();
+  });
   test("lives under the tgfx home, named after the folder, and never stores a bot token", async () => {
     const root = isolate("tgfx-config-");
     const workspace = join(root, "my project");

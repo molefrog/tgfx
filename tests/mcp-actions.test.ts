@@ -70,12 +70,17 @@ type CoreContext = {
   close: () => Promise<void>;
 };
 
-async function coreContext(topicId = "0"): Promise<CoreContext> {
+async function coreContext(topicId = "0", sharedFiles = false): Promise<CoreContext> {
   const workspace = await mkdtemp(join(tmpdir(), "tgfx-mcp-actions-"));
   temporary.push(workspace);
   const home = join(workspace, "tgfx-home");
   const database = join(home, "state", "100.db");
-  const files = join(home, "files", "100");
+  let files = join(home, "files", "100");
+  if (sharedFiles) {
+    const downloads = await mkdtemp(join(tmpdir(), "tgfx-shared-pack-"));
+    temporary.push(downloads);
+    files = join(downloads, "100");
+  }
   const state = new StateStore(database);
   state.ensurePollState("100");
   const inbound: InboundMessage = {
@@ -165,6 +170,7 @@ async function coreContext(topicId = "0"): Promise<CoreContext> {
       TGFX_MCP_HOME: home,
       TGFX_MCP_DATABASE: database,
       TGFX_MCP_FILES: files,
+      TGFX_SHARED_FILES: sharedFiles ? "1" : "0",
       TGFX_MCP_APPROVALS_CHAT: "42",
       TGFX_MCP_APPROVALS_TOPIC: "0",
       TGFX_MCP_ALLOWED_CHATS: "[]",
@@ -350,6 +356,19 @@ describe("Telegram MCP actions", () => {
     } finally {
       await context.close();
     }
+  });
+
+  test.each([{ shared: false }, { shared: true }])("cleans up readable sticker-pack previews (shared=$shared)", async ({ shared }) => {
+    const context = await coreContext("0", shared);
+    let path!: string;
+    try {
+      const pack = await context.call("get_sticker_pack", { name: "FriendlyFrogs", download_images: true });
+      path = pack.structuredContent.stickers[0].image.path;
+      if (shared) expect(await realpath(path)).toStartWith(`${await realpath(context.files)}/`);
+      else expect(await realpath(path)).not.toStartWith(`${await realpath(context.workspace)}/`);
+      expect(await readFile(path, "utf8")).toBe("hello");
+    } finally { await context.close(); }
+    await expect(readFile(path)).rejects.toThrow();
   });
 
   test("executes every enabled admin tool only after its required approval", async () => {
