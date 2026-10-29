@@ -12,6 +12,7 @@ const settingsSchema = z.object({
   dmReply: z.enum(REPLY_POLICIES),
   groupReply: z.enum(REPLY_POLICIES),
   chatReplies: z.record(decimalId, z.enum(REPLY_POLICIES)),
+  memory: z.object({ enabled: z.boolean().default(true), file: z.string().min(1).default("MEMORY.md") }),
 });
 const coreSchema = z.object({
   version: z.literal(1),
@@ -37,6 +38,7 @@ export const configSchema = coreSchema.extend({
   dmReply: settingsSchema.shape.dmReply.default("all"),
   groupReply: settingsSchema.shape.groupReply.default("mention"),
   chatReplies: settingsSchema.shape.chatReplies.default({}),
+  memory: settingsSchema.shape.memory.optional(),
 }) satisfies z.ZodType<TgfxConfig>;
 
 export type GlobalConfig = z.infer<typeof globalSchema>;
@@ -158,7 +160,7 @@ export async function saveGlobalConfig(config: GlobalConfig): Promise<void> {
 }
 
 type StoredConfig = z.infer<typeof storedConfigSchema>;
-export type ProjectSettings = z.infer<typeof settingsSchema>;
+export type ProjectSettings = z.input<typeof settingsSchema>;
 
 function storedRecord(paths: ProjectPaths, stored: StoredConfig): Record<string, unknown> {
   const { version, activeBotId, access, approvals, ...settings } = stored;
@@ -187,7 +189,7 @@ export async function saveConfig(
   config: TgfxConfig,
   overrides: Partial<ProjectSettings> = {},
 ): Promise<void> {
-  const { output, customIcons, dmReply, groupReply, chatReplies, ...core } = configSchema.parse(config);
+  const { output, customIcons, dmReply, groupReply, chatReplies, memory, ...core } = configSchema.parse(config);
   const policy = await loadPolicy();
   if (policy && JSON.stringify(coreSchema.parse(core)) !== JSON.stringify(policy)) {
     throw new Error("Telegram access is managed by TGFX_POLICY_FILE; edit that policy as its owner");
@@ -195,7 +197,7 @@ export async function saveConfig(
   const changes = { ...overrides };
   await serializeWrite(paths.config, async () => {
     const current = await readJson(paths.config, storedConfigSchema);
-    const settings = { output, customIcons, dmReply, groupReply, chatReplies, ...changes };
+    const settings = { output, customIcons, dmReply, groupReply, chatReplies, memory, ...changes };
     const persisted: Record<string, unknown> = { ...core };
     for (const key of Object.keys(settingsSchema.shape) as Array<keyof ProjectSettings>) {
       if (Object.hasOwn(changes, key)) persisted[key] = settings[key];

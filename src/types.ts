@@ -58,6 +58,7 @@ export type TgfxConfig = {
   dmReply?: ReplyPolicy;
   groupReply?: ReplyPolicy;
   chatReplies?: Record<string, ReplyPolicy>;
+  memory?: { enabled?: boolean; file?: string };
 };
 
 export type Route = {

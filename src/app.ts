@@ -824,6 +824,7 @@ export class TgfxApp {
           await this.background?.dispose();
           this.background = new FxRouteSession({
             workspace: this.options.paths.workspace, binary: this.options.fxBinary,
+            memory: this.config.memory,
             model: this.options.model, permissionMode: this.options.permissionMode,
             previousSessionId: this.events.session(), cancelGraceMs: this.options.cancelGraceMs,
           });
@@ -1991,6 +1992,7 @@ export class TgfxApp {
     const lease = this.options.mcpBroker?.lease(mcpEnvironment);
     const session = new FxRouteSession({
       workspace: this.options.paths.workspace,
+      memory: this.config.memory,
       binary: this.options.fxBinary,
       model: this.options.model,
       permissionMode: this.options.permissionMode,
