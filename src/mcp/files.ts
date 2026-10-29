@@ -56,6 +56,8 @@ export async function writeResponseLimited(response: Response, path: string, max
   let total = 0;
   let complete = false;
   try {
+    // The service's private umask must not strip explicitly enabled group access.
+    await handle.chmod(process.env.TGFX_SHARED_FILES === "1" ? 0o640 : 0o600);
     const reader = response.body.getReader();
     for (;;) {
       const { done, value } = await reader.read();
