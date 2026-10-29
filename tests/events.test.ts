@@ -164,3 +164,17 @@ test("emit CLI submits structured payloads over the socket", async () => {
       payload: { message_id: "one" }, steer: false } });
   } finally { await server.close(); }
 });
+
+test("emit --wait exits with failure when a queued event is cancelled", async () => {
+  const socket = join(await directory(), "events.sock");
+  const server = await listenEvents(socket, async request => ({ id: "cancelled", destination: "100:42:0",
+    status: (request as { op: string }).op === "emit" ? "queued" : "cancelled" }));
+  try {
+    const child = Bun.spawn([process.execPath, resolve("src/index.ts"), "emit", "test", "--wait"], {
+      env: { ...process.env, TGFX_EVENTS_SOCKET: socket }, stdout: "pipe", stderr: "pipe",
+    });
+    const output = await new Response(child.stdout).text();
+    expect(await child.exited).toBe(1);
+    expect(JSON.parse(output).status).toBe("cancelled");
+  } finally { await server.close(); }
+});

@@ -323,20 +323,64 @@ test("a pending confirmation survives restart and compacts only after its button
   } finally { await h.close(); }
 });
 
-test("stop discards confirmed compaction queued behind an active task", async () => {
+test.each(["answerCallbackQuery", "editMessageText"])("confirmed clear preserves later requests while %s is delayed", async method => {
   const h = await harness();
+  let release = () => {};
+  try {
+    h.send("WAIT"); await h.status("started");
+    h.send("/clear");
+    const card = await h.confirmation();
+    release = h.telegram.holdNextResponse(method);
+    h.click(card.confirm, card);
+    await h.telegram.waitForCalls(method);
+    const id = h.send("after clear");
+    await h.accepted(id);
+    release();
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
+    expect(h.state.db.query("SELECT status FROM telegram_inbox WHERE update_id=?").get(id)).not.toEqual({ status: "discarded" });
+    await h.status("finished", 2);
+    const prompts = (await h.events()).filter(e => e.event === "prompt");
+    expect(prompts.at(-1)!.value.prompt.at(-1).text).toBe("after clear");
+  } finally { release(); await h.close(); }
+});
+
+test.each(["answerCallbackQuery", "editMessageText"])("confirmed compaction stays ahead of later requests while %s is delayed", async method => {
+  const h = await harness();
+  let release = () => {};
+  try {
+    h.send("PERMISSION");
+    const approval = await h.telegram.waitForRequest(r => r.method === "sendMessage" && r.payload.reply_markup);
+    h.send("/compact");
+    const card = await h.confirmation();
+    release = h.telegram.holdNextResponse(method);
+    h.click(card.confirm, card);
+    await h.telegram.waitForCalls(method);
+    const id = h.send("after compact");
+    await h.accepted(id);
+    h.click(approval.payload.reply_markup.inline_keyboard[0][0].callback_data);
+    await h.status("finished", 2);
+    const prompts = (await h.events()).filter(e => e.event === "prompt");
+    expect(prompts[1]!.value.prompt).toEqual([{ type: "text", text: "/compact" }]);
+    expect(prompts.at(-1)!.value.prompt.at(-1).text).toBe("after compact");
+  } finally { release(); await h.close(); }
+});
+
+test.each(["answerCallbackQuery", "editMessageText"])("stop discards confirmed compaction while %s is delayed", async method => {
+  const h = await harness();
+  let release = () => {};
   try {
     h.send("WAIT"); await h.status("started");
     h.send("/compact");
     const card = await h.confirmation();
+    release = h.telegram.holdNextResponse(method);
     h.click(card.confirm, card);
-    await h.telegram.waitForRequest(r => r.method === "editMessageText" && JSON.stringify(r.payload).includes("queued"));
+    await h.telegram.waitForCalls(method);
     h.send("/stop"); await h.status("finished");
     h.send("next"); await h.status("finished", 2);
     const prompts = (await h.events()).filter(e => e.event === "prompt");
     expect(prompts).toHaveLength(2);
     expect(prompts.every(p => p.value.prompt[0]?.text !== "/compact")).toBeTrue();
-  } finally { await h.close(); }
+  } finally { release(); await h.close(); }
 });
 
 test("confirmed compaction waits for the current task to finish", async () => {

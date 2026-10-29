@@ -80,7 +80,9 @@ Without `--chat`, events use one persistent background conversation for the
 workspace, with no Telegram MCP credentials and no Telegram delivery. Responses
 are stored in the event journal and available through `--status` or `--wait`.
 Explicit chat destinations must be allowed by the bot's access policy. They
-reuse that chat/topic's session and reply format. Queued events wait behind
+reuse that chat/topic's session, Telegram tools, and reply format. Events have
+no Telegram sender or current message; message-relative tools need an explicit
+message reference. Queued events wait behind
 existing chat work; `--steer` joins a running turn at FX's next input boundary,
 or queues a new turn if none is active. Steering requires FX's ACP steering
 extension (supported by FX 0.0.15).
@@ -95,6 +97,10 @@ is rejected. Queued events survive restarts; interrupted running events are
 marked `interrupted`, never automatically replayed because tools may already
 have produced side effects. Outputs are local job results, not an exactly-once
 guarantee for external side effects.
+
+`/stop` and confirmed `/clear` cancel events already queued for that chat/topic.
+Cancelled events stay cancelled across restarts and idempotent retries. Events
+submitted after the command's cancellation boundary wait for it to finish.
 
 The default socket is beside the bot journal and is owner-only. For a separate
 trusted emitter user, set `TGFX_EVENTS_SOCKET` on the controller and emitter,

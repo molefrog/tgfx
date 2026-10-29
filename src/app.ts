@@ -1,7 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { rm, stat } from "node:fs/promises";
+import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, rejectedPermission, type FxPermissionMode } from "./fx/acp";
@@ -62,7 +61,7 @@ import type {
 } from "./types";
 import { isOutputMode, REPLY_STYLES, routeKey } from "./types";
 import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type WorkspacePaths } from "./config";
-import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
+import { safeDownloadPath, temporaryDownloadDirectory, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
   command: "stop",
@@ -753,7 +752,8 @@ export class TgfxApp {
     const key = eventDestination(event, this.options.bot.id);
     if (event.chatId) this.flushBatch(key);
     const session = event.chatId ? this.sessions.get(key) : this.background;
-    if (event.steer && session?.canSteer && this.activeTurns.has(key)) {
+    const active = this.activeTurns.get(key);
+    if (event.steer && session?.canSteer && active && !active.signal.aborted) {
       this.events.mark(event.id, "running");
       const task = session.steer(eventPrompt(event)).then(() => {
         this.events.mark(event.id, "done");
@@ -778,6 +778,7 @@ export class TgfxApp {
     const controller = new AbortController();
     this.activeTurns.set(key, controller);
     this.events.mark(event.id, "running");
+    const contextRef = uuid("ctx");
     let renderer: TurnRenderer | undefined;
     let remove: (() => void) | undefined;
     try {
@@ -788,8 +789,9 @@ export class TgfxApp {
       let session: FxRouteSession;
       if (route) {
         session = await this.session(route, controller.signal);
-        const old = this.state.activeContext(key);
-        if (old) this.state.deactivateContext(key, old.context_ref);
+        controller.signal.throwIfAborted();
+        this.state.registerEventContext(route, contextRef);
+        this.state.history.snapshot(key, contextRef);
       } else {
         if (!this.background?.usable) {
           await this.background?.dispose();
@@ -807,6 +809,7 @@ export class TgfxApp {
       if (route) {
         renderer = new TurnRenderer(this.options.telegram, this.state, route, this.output, projector,
           controller.signal, this.draftLimiter(route.chatId));
+        this.activeDraftIds.set(key, renderer.draftId);
         renderer.start();
       }
       remove = session.onUpdate(update => { const snapshot = projector.apply(update); renderer?.changed(snapshot); });
@@ -829,6 +832,8 @@ export class TgfxApp {
       this.log({ event: "external.failed", message: `external event failed · ${event.id}`, id: event.id, error: redactSecrets(String(error)) });
     } finally {
       remove?.(); await renderer?.abort(); this.activeTurns.delete(key);
+      this.activeDraftIds.delete(key);
+      this.state.deactivateContext(key, contextRef);
     }
   }
 
@@ -1031,7 +1036,7 @@ export class TgfxApp {
   private async prepareStickerImages(message: InboundMessage, signal?: AbortSignal): Promise<void> {
     const stickers = message.attachments.filter((attachment) => attachment.kind === "sticker");
     if (!stickers.length) return;
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-stickers-"));
+    const temporaryRoot = await temporaryDownloadDirectory(this.options.paths.files, "tgfx-stickers-");
     this.stickerTemporaryDirectories.add(temporaryRoot);
     try {
       await Promise.all(stickers.map(async (sticker) => {
@@ -1337,8 +1342,11 @@ export class TgfxApp {
         kind: "session_action", action: data.action, generation: data.generation,
         message: { ...data.message, historySeq: this.state.history.latestSeq(route.key) },
       } : undefined;
-      // Make confirmed work discardable by /stop before waiting on Telegram.
-      if (payload) this.state.requeueInbox(row.id, payload);
+      // Reserve its place before Telegram's UI calls let newer requests arrive.
+      if (payload) {
+        this.state.requeueInbox(row.id, payload);
+        if (!this.stopping) this.schedule(row.id, route.key, payload);
+      }
       await this.options.telegram.answerCallback(callback.id, value === "cancel" ? "Cancelled" : "Confirmed")
         .catch(() => undefined);
       await this.options.telegram.editRich(route.chatId, callback.message.message_id, {
@@ -1346,9 +1354,8 @@ export class TgfxApp {
           ? "Cancelled. The conversation is unchanged."
           : data.action === "clear" ? "Clearing conversation…" : "Compaction queued…" }],
       }).catch(error => this.log(`Could not update the confirmation card · ${redactSecrets(String(error))}`));
-      if (!payload) return;
-      if (!this.stopping) this.schedule(row.id, route.key, payload);
-      return "deferred";
+      if (payload) return "deferred";
+      return;
     }
     const inApprovalsRoute = route.chatId === this.config.approvals.chatId
       && route.topicId === this.config.approvals.topicId;
@@ -1664,7 +1671,7 @@ export class TgfxApp {
     const barrier = (previous ?? Promise.resolve()).catch(() => undefined).then(() => done.promise);
     this.queueTails.set(message.route.key, barrier);
     const active = this.activeTurns.get(message.route.key);
-    const discarded = this.state.discardQueued(message.route.key, row.id);
+    const discarded = this.state.discardQueued(message.route.key, row.id) + this.events.cancelQueued(message.route.key);
     active?.abort(new Error("Stopped from Telegram command"));
     try {
       if (active || !clear) {

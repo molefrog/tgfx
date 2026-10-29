@@ -14,7 +14,7 @@ export const eventSchema = z.object({
 }).strict().refine(e => e.chatId !== undefined || e.topicId === undefined, "A topic requires a chat");
 export type ExternalEvent = z.output<typeof eventSchema> & { id: string };
 export type EventJob = {
-  id: string; status: "queued" | "running" | "done" | "failed" | "interrupted";
+  id: string; status: "queued" | "running" | "done" | "failed" | "interrupted" | "cancelled";
   destination: string; result?: string; error?: string;
 };
 type Row = { id: string; destination: string; payload: string; status: EventJob["status"]; result: string | null; error: string | null };
@@ -85,6 +85,11 @@ export class EventJournal {
   mark(id: string, status: EventJob["status"], result: string | null = null, error: string | null = null): void {
     this.db.query("UPDATE external_events SET status=?,result=?,error=?,updated_at=? WHERE workspace=? AND bot=? AND id=?")
       .run(status, result, error, new Date().toISOString(), this.workspace, this.bot, id);
+  }
+  cancelQueued(destination: string): number {
+    return this.db.query(`UPDATE external_events SET status='cancelled',error='Stopped from Telegram command',updated_at=?
+      WHERE workspace=? AND bot=? AND destination=? AND status='queued'`)
+      .run(new Date().toISOString(), this.workspace, this.bot, destination).changes;
   }
   recover(): ExternalEvent[] {
     this.db.query("UPDATE external_events SET status='interrupted',error='Runtime stopped during this event; not replayed automatically' WHERE workspace=? AND bot=? AND status='running'")

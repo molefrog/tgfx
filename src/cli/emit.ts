@@ -28,5 +28,5 @@ export async function emitCommand(args: string[]): Promise<void> {
     job = await eventRequest(path, { op: "get", id: job.id }) as typeof job;
   }
   console.log(JSON.stringify(job));
-  if (["failed", "interrupted"].includes(job.status)) process.exitCode = 1;
+  if (["failed", "interrupted", "cancelled"].includes(job.status)) process.exitCode = 1;
 }

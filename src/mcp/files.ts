@@ -1,13 +1,13 @@
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, realpath, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, realpath, stat, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 
 export function safeName(value: string): string {
   return basename(value).replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 160) || "attachment";
 }
 
-export async function safeDownloadPath(root: string, contextRef: string, filename: string): Promise<string> {
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(contextRef)) throw new Error("Invalid attachment context reference.");
+async function downloadRoot(root: string): Promise<string> {
   const expectedRoot = resolve(root);
   const mode = process.env.TGFX_SHARED_FILES === "1" ? 0o2750 : 0o700;
   await mkdir(expectedRoot, { recursive: true, mode });
@@ -15,8 +15,20 @@ export async function safeDownloadPath(root: string, contextRef: string, filenam
     throw new Error("The tgfx attachment directory must not be a symbolic link.");
   }
   await chmod(expectedRoot, mode);
-  const actualRoot = await realpath(expectedRoot);
-  const expectedDirectory = join(expectedRoot, contextRef);
+  return realpath(expectedRoot);
+}
+
+/** Shared previews inherit the configured download directory's group. */
+export async function temporaryDownloadDirectory(root: string, prefix: string): Promise<string> {
+  if (process.env.TGFX_SHARED_FILES !== "1") return mkdtemp(join(tmpdir(), prefix));
+  return mkdtemp(join(await downloadRoot(root), prefix));
+}
+
+export async function safeDownloadPath(root: string, contextRef: string, filename: string): Promise<string> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(contextRef)) throw new Error("Invalid attachment context reference.");
+  const actualRoot = await downloadRoot(root);
+  const mode = process.env.TGFX_SHARED_FILES === "1" ? 0o2750 : 0o700;
+  const expectedDirectory = join(actualRoot, contextRef);
   await mkdir(expectedDirectory, { recursive: true, mode });
   if ((await lstat(expectedDirectory)).isSymbolicLink()) {
     throw new Error("The attachment context directory must not be a symbolic link.");
