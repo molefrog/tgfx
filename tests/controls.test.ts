@@ -45,7 +45,7 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
   const statuses: StatusEvent[] = [];
   const listeners = new Set<() => void>();
   const contexts: Array<string | undefined> = [];
-  const app = new TgfxApp({
+  const createApp = () => new TgfxApp({
     paths, config: { version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: options.group ? [chat] : [] },
       approvals: { chatId: "42", topicId: "0" }, output: options.output ?? "live", customIcons: false },
     bot: { id: "100", username: "fake_bot", displayName: "Fake" }, token: "100:offline", fxBinary: binary, cancelGraceMs: 250,
@@ -56,10 +56,18 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
       for (const listener of listeners) listener();
     },
   });
-  const running = app.run();
+  let app = createApp();
+  let running = app.run();
   await telegram.waitForCalls("getUpdates");
   return {
-    app, state, telegram, route, contexts, paths,
+    get app() { return app; }, state, telegram, route, contexts, paths,
+    async restart() {
+      await app.stop(); await running;
+      const polls = telegram.calls("getUpdates").length;
+      app = createApp();
+      running = app.run();
+      await telegram.waitForCalls("getUpdates", polls + 1);
+    },
     send(text: string) {
       if (!options.group) return telegram.sendUserMessage({ userId: 42, text });
       const body = text.startsWith("/") ? text : `@fake_bot ${text}`;
@@ -180,6 +188,22 @@ test("a recovered clear command does not wait on its own queue", async () => {
   try {
     await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
     h.send("hello"); await h.status("finished");
+    expect(h.telegram.calls("sendRichMessage")).toHaveLength(1);
+  } finally { await h.close(); }
+});
+
+test("clear survives a restart before the next message without resuming an empty session", async () => {
+  const h = await harness({ failedLoad: true });
+  try {
+    h.send("/clear");
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
+    await h.restart();
+    expect(h.state.ensureRoute(h.route).session_id).toBeNull();
+    h.send("hello after restart"); await h.status("finished");
+    const events = await h.events();
+    expect(events.filter(e => e.event === "new")).toHaveLength(1);
+    expect(events.filter(e => e.event === "load")).toHaveLength(0);
+    expect(h.telegram.calls("sendMessage").some(r => String(r.payload.text).includes("resumed"))).toBeFalse();
     expect(h.telegram.calls("sendRichMessage")).toHaveLength(1);
   } finally { await h.close(); }
 });

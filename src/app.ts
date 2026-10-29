@@ -1480,7 +1480,8 @@ export class TgfxApp {
     this.sessions.delete(route.key);
     this.state.resetRoute(route.key);
     this.state.history.reset(route.key, through);
-    await this.session(route);
+    // FX does not persist an empty session. Start it with the next request so
+    // a restart after /clear cannot leave us trying to resume a missing ID.
     await this.options.telegram.sendText(route.chatId, "✓ Started a fresh conversation", route.topicId);
     this.log({
       event: "session.cleared",
