@@ -42,6 +42,86 @@ async fn wait_ready(rx: &mut mpsc::UnboundedReceiver<FxEvent>) {
     .await
     .unwrap()
 }
+async fn echoed_prompt(session: &FxSession) -> serde_json::Value {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    session
+        .prompt(vec![json!({"type":"text","text":"BLOCKS"})], tx)
+        .await
+        .unwrap();
+    let mut text = String::new();
+    while let Some(FxEvent::Update(v)) = rx.recv().await {
+        if v["update"]["sessionUpdate"] == "agent_message_chunk" {
+            text.push_str(v["update"]["content"]["text"].as_str().unwrap());
+        }
+    }
+    serde_json::from_str(&text).unwrap()
+}
+#[tokio::test]
+async fn cancelled_and_failed_prompts_do_not_advance_the_memory_cursor() {
+    for request in ["WAIT", "MAX"] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("MEMORY.md"), "# Rule\nKeep this fact.").unwrap();
+        let session = FxSession::start(options(root.path())).await.unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let running = session.clone();
+        let task = tokio::spawn(async move {
+            running
+                .prompt(vec![json!({"type":"text","text":request})], tx)
+                .await
+        });
+        if request == "WAIT" {
+            wait_ready(&mut rx).await;
+            session.cancel().await.unwrap();
+            assert_eq!(task.await.unwrap().unwrap()["stopReason"], "cancelled");
+        } else {
+            assert!(task.await.unwrap().is_err());
+        }
+        assert!(
+            echoed_prompt(&session).await[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("<memory ")
+        );
+        session.close().await.unwrap();
+    }
+}
+#[tokio::test]
+async fn steering_leaves_memory_updates_for_the_next_ordinary_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("MEMORY.md");
+    std::fs::write(&path, "# Rule\nFirst fact.").unwrap();
+    let session = FxSession::start(options(root.path())).await.unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let running = session.clone();
+    let task = tokio::spawn(async move {
+        running
+            .prompt(vec![json!({"type":"text","text":"WAIT"})], tx)
+            .await
+    });
+    wait_ready(&mut rx).await;
+    std::fs::write(&path, "# Rule\nFirst fact.\n\n# Added\nSecond fact.").unwrap();
+    session
+        .steer(vec![json!({"type":"text","text":"BLOCKS"})])
+        .await
+        .unwrap();
+    task.await.unwrap().unwrap();
+    let mut text = String::new();
+    while let Some(FxEvent::Update(v)) = rx.recv().await {
+        if v["update"]["sessionUpdate"] == "agent_message_chunk" {
+            text.push_str(v["update"]["content"]["text"].as_str().unwrap());
+        }
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+        json!([{"type":"text","text":"BLOCKS"}])
+    );
+    let next = echoed_prompt(&session).await;
+    let update = next[0]["text"].as_str().unwrap();
+    assert!(update.contains("action=\"append\""));
+    assert!(update.contains("Second fact."));
+    assert!(!update.contains("First fact."));
+    session.close().await.unwrap();
+}
 #[tokio::test]
 async fn official_acp_reloads_and_retains_unknown_envelopes() {
     let root = tempfile::tempdir().unwrap();

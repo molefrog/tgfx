@@ -12,6 +12,7 @@ def answer(i,p):
  blocks=p.get("prompt",[]); text=blocks[-1].get("text","") if blocks else ""
  update({"sessionUpdate":"fixture_future_update","_meta":{"unknown":True}})
  if p.get("_meta",{}).get("fx",{}).get("steer"):
+  if text=="BLOCKS":update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":json.dumps(blocks)}})
   cancelled=False;wait.set();result(i,{"stopReason":"end_turn"});return
  if text=="WAIT" or text=="IGNORE_CANCEL":
   wait.clear();cancelled=False;ignore_cancel=text=="IGNORE_CANCEL";update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"WAIT_READY"}})
