@@ -195,6 +195,52 @@ async fn draft_offers_coalesce_to_latest_and_stop_promptly() {
     );
     server.abort();
 }
+#[tokio::test]
+async fn deferred_drafts_render_only_the_latest_frame_after_rate_limit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (mock, api, server) = mock(false).await;
+    let limiter = Arc::new(Mutex::new(PeerDraftLimiter::default()));
+    limiter.lock().unwrap().record_flood(0, 3_600_000);
+    let stream = DraftStream::start(
+        api,
+        Route::new("123", "42", "0", "private"),
+        11,
+        limiter.clone(),
+    );
+    let renders = Arc::new(AtomicUsize::new(0));
+    for i in 0..100 {
+        let renders = renders.clone();
+        stream.offer_lazy(move || {
+            renders.fetch_add(1, Ordering::Relaxed);
+            json!({"blocks":[{"type":"paragraph","text":format!("discard-{i}")}]})
+        });
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(renders.load(Ordering::Relaxed), 0);
+    *limiter.lock().unwrap() = PeerDraftLimiter::default();
+    let final_renders = renders.clone();
+    stream.offer_lazy(move || {
+        final_renders.fetch_add(1, Ordering::Relaxed);
+        json!({"blocks":[{"type":"paragraph","text":"latest"}]})
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let notified = mock.notify.notified();
+            if mock.calls.lock().unwrap().iter().any(|(method, value)| {
+                method == "sendRichMessageDraft"
+                    && value["rich_message"]["blocks"][0]["text"] == "latest"
+            }) {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .unwrap();
+    stream.stop().await;
+    assert_eq!(renders.load(Ordering::Relaxed), 1);
+    server.abort();
+}
 #[test]
 fn sticker_conversion_enforces_dimensions_and_size() {
     let image = image::RgbaImage::from_pixel(1200, 200, image::Rgba([255, 0, 0, 255]));
