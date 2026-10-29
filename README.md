@@ -5,7 +5,7 @@ Telegram. Works with your locally installed 𝒇x and supports as many of the la
 
 ## Features
 
-<img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/tgfx-primary.webp" alt="tgfx in Telegram: rich replies, a model picker, stickers, and a transcribed voice message" width="240" align="right">
+<img src="assets/tgfx-primary.webp" alt="tgfx in Telegram: rich replies, a model picker, stickers, and a transcribed voice message" width="240" align="right">
 
 Most Telegram adapters for popular harnesses only scratch the surface of what Telegram can do.
 Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way you would from its TUI.
@@ -31,7 +31,7 @@ TGFX is a native Rust executable for macOS and Linux. It needs an authenticated
 [@BotFather](https://t.me/BotFather). FX 0.0.8+ is supported; use 0.0.15+ for
 external-event steering.
 
-Build and install this checkout with [Rust 1.99+](https://rustup.rs):
+Build and install this checkout with [Rust 1.99+](https://rustup.rs) and a C compiler:
 
 ```sh
 ./scripts/install.sh
@@ -62,10 +62,6 @@ one with:
 ```sh
 ./scripts/install-release.sh --version v0.3.0
 ```
-
-The JavaScript manifest is private and retained for compatibility tests; this
-rewrite is distributed through Cargo and native release archives. See
-[building, releases, and migration](doc/RUST.md).
 
 ## How it works
 
@@ -206,9 +202,9 @@ Tool calls are rendered as collapsible groups, in the order they happen.
     <th align="center">No streaming</th>
   </tr>
   <tr>
-    <td width="240" align="center"><img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="240" height="300"></td>
-    <td width="240" align="center"><img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="240" height="300"></td>
-    <td width="240" align="center"><img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-live.webp" alt="Live with activity: the draft grows with prose and tool calls as they happen" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-progress.webp" alt="Live answer: a status line while fx works, then the answer streams in" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-answer.webp" alt="Final answer: one message with the answer once the turn finishes" width="240" height="300"></td>
   </tr>
   <tr>
     <td align="center"><code>live</code> (default)<br>Stream the answer and tool activity as they happen</td>
@@ -232,7 +228,7 @@ How to pick a reply style:
 
 ## Custom icons
 
-<img src="https://raw.githubusercontent.com/molefrog/tgfx/main/doc/assets/custom-icons.png" alt="Tool calls rendered with custom emoji icons" width="340" align="right">
+<img src="assets/custom-icons.png" alt="Tool calls rendered with custom emoji icons" width="340" align="right">
 
 The bot renders tool calls nicely with the
 [tgfx icons](https://t.me/addemoji/ai_provider_labs_by_fxharness_bot) premium custom
@@ -260,8 +256,7 @@ tgfx auth      add, rotate, or remove the bot token
 tgfx doctor    diagnostics: token, chats, rights, fx
 ```
 
-Details, guarantees, and the rest of the commands live in the
-[specification](https://github.com/molefrog/tgfx/blob/main/doc/SPEC.md).
+Run `tgfx --help` for all commands and options.
 
 ### Separate service and agent users
 
@@ -308,6 +303,4 @@ bun install --frozen-lockfile
 ```
 
 The TypeScript sources remain a compatibility reference. The primary executable
-is `src/main.rs`; `bin/tgfx` runs a locally built native binary. See
-[the Rust implementation notes](doc/RUST.md) for module boundaries and release
-commands.
+is `src/main.rs`; `bin/tgfx` runs a locally built native binary.
