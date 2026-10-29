@@ -42,8 +42,9 @@ jobs:
           mkdir release
           cp 'target/${{ matrix.target }}/release/tgfx' release/tgfx
           cp LICENSE README.md release/
+          cp -R assets release/
           cd release
-          tar -czf 'tgfx-${{ matrix.target }}.tar.gz' tgfx LICENSE README.md
+          tar -czf 'tgfx-${{ matrix.target }}.tar.gz' tgfx LICENSE README.md assets
           if command -v sha256sum >/dev/null; then
             sha256sum 'tgfx-${{ matrix.target }}.tar.gz' > 'tgfx-${{ matrix.target }}.sha256'
           else
