@@ -1,6 +1,6 @@
 {
   "name": "@molefrog/tgfx",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run a local fx agent through Telegram",
   "license": "MIT",
   "repository": {
@@ -9,30 +9,23 @@
   },
   "homepage": "https://github.com/molefrog/tgfx#readme",
   "bugs": "https://github.com/molefrog/tgfx/issues",
-  "keywords": ["telegram", "fx", "ai", "coding-agent", "cli"],
-  "files": [
-    "bin",
-    "dist",
-    "README.md"
+  "keywords": [
+    "telegram",
+    "fx",
+    "ai",
+    "coding-agent",
+    "cli"
   ],
   "type": "module",
-  "bin": {
-    "tgfx": "bin/tgfx"
-  },
-  "engines": {
-    "bun": ">=1.4.0"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
-    "build": "bun scripts/build.ts",
-    "dev": "bun --watch src/index.ts",
-    "start": "bun src/index.ts",
-    "check": "bunx tsc --noEmit",
-    "test": "bun test --parallel tests/*.test.ts",
-    "prepack": "bun run build",
-    "prepublishOnly": "bun run check && bun run test"
+    "build": "cargo build --locked --release",
+    "dev": "cargo run --locked --",
+    "start": "cargo run --locked --",
+    "check": "cargo fmt --all --check && cargo clippy --locked --all-targets -- -D warnings",
+    "test": "cargo test --locked --all-targets",
+    "test:parity": "cargo build --locked --example conformance && bun scripts/check-rust-parity.ts",
+    "verify": "sh scripts/check-rust.sh",
+    "install:local": "sh scripts/install.sh"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
@@ -49,5 +42,6 @@
     "react": "19.2.8",
     "typescript": "latest",
     "zod": "4.4.3"
-  }
+  },
+  "private": true
 }

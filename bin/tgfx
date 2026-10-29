@@ -1,21 +1,13 @@
 #!/bin/sh
-
-if ! command -v bun >/dev/null 2>&1 || ! bun -e 'process.exit(Bun.semver.satisfies(Bun.version, ">=1.4.0") ? 0 : 1)' >/dev/null 2>&1; then
-  printf '%s\n' \
-    'tgfx requires Bun 1.4 or newer.' \
-    'Install Bun: https://bun.com/docs/installation' >&2
-  exit 127
-fi
-
-launcher=$0
-while [ -L "$launcher" ]; do
-  launcher_dir=$(CDPATH= cd -P "$(dirname "$launcher")" && pwd)
-  link_target=$(readlink "$launcher")
-  case $link_target in
-    /*) launcher=$link_target ;;
-    *) launcher=$launcher_dir/$link_target ;;
-  esac
+set -eu
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# Development helper. Installed and release builds are the native executable.
+target=${CARGO_TARGET_DIR:-"$root/target"}
+case "$target" in /*) ;; *) target="$root/$target" ;; esac
+for profile in release debug; do
+  if [ -x "$target/$profile/tgfx" ]; then
+    exec "$target/$profile/tgfx" "$@"
+  fi
 done
-launcher_dir=$(CDPATH= cd -P "$(dirname "$launcher")" && pwd)
-
-exec bun "$launcher_dir/../dist/tgfx.js" "$@"
+echo 'Build TGFX first: cargo build --release --locked' >&2
+exit 1

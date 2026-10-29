@@ -1,0 +1,36 @@
+name: Rust checks
+on:
+  push:
+    branches: [main, 'rewrite/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: ./scripts/check-rust.sh
+      - name: Check standalone launchers
+        run: |
+          sh -n bin/tgfx scripts/install.sh scripts/install-release.sh scripts/check-rust.sh
+          ./bin/tgfx --version
+  container:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg TARGETARCH=amd64 --tag tgfx:ci .
+      - run: docker run --rm tgfx:ci --version

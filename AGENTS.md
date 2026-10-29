@@ -4,19 +4,22 @@ Small project, small rules. When in doubt, write less.
 
 ## Toolkit
 
-Bun for everything: runtime, tests, builds, scripts, its built-in APIs
-before any package. Keep the project small and the dependency list short —
-but don't reinvent what a good, well-maintained lib already does.
+Rust is the runtime. Prefer standard-library and existing crate APIs. Keep
+`Cargo.lock` committed. Bun 1.4 is only for the retained TypeScript test oracle;
+do not change its expected assertions to make the Rust implementation pass.
 
 ## Link locally
 
-`bun link` in the checkout puts `tgfx` on PATH. The bin runs `dist/`,
-so `bun run build` first — and again after changes.
+`./scripts/install.sh` installs the native binary with Cargo. For development,
+`cargo build --locked` followed by `bin/tgfx` runs the local build. Rebuild after
+changes.
 
 ## Tests
 
-`bun run check && bun run test` (Bun ≥ 1.4; the script runs test files
-in parallel). Keep the suite fast. Wait on promises, never sleep and hope.
+Run `./scripts/check-rust.sh`: formatting, Clippy, native tests, original behavior
+assertions against Rust, and subprocess end-to-end tests. Without Bun, the
+script runs native checks only. Install the test dependencies with
+`bun install --frozen-lockfile` for full coverage.
 
 - Test through real seams: the fake `fx` binary, the fake Telegram server,
   real SQLite in a temp dir. No mock forests.
