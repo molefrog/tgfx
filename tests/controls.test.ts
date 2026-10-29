@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -121,6 +122,18 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
     async events(): Promise<Array<{ event: string; value: any }>> {
       const text = await readFile(log, "utf8").catch(error => { if (error.code === "ENOENT") return ""; throw error; });
       return text.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+    },
+    async promptReceived() {
+      const ready = Promise.withResolvers<void>();
+      const check = async () => {
+        const text = await readFile(log, "utf8").catch(() => "");
+        if (text.split("\n").some(line => line && JSON.parse(line).event === "prompt")) ready.resolve();
+      };
+      const watcher = watch(root, () => { void check(); });
+      try {
+        await check();
+        await withTimeout(ready.promise, 5000, () => { throw new Error("Missing FX prompt"); });
+      } finally { watcher.close(); }
     },
     async close() {
       await app.stop(); await running; state.close(); await telegram.stop();
@@ -255,6 +268,7 @@ test.each(["clear", "compact"])("/%s waits for confirmation and cancellation pre
   const h = await harness();
   try {
     h.send("WAIT"); await h.status("started");
+    await h.promptReceived();
     const context = h.state.activeContext(h.route.key)!.context_ref;
     h.send(`/${action}`);
     const card = await h.confirmation();

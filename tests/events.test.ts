@@ -71,7 +71,7 @@ async function fixture() {
     } as unknown as TelegramApi,
     log: event => { if (event.event === "external.done" || event.event === "external.failed") waiters.get(String(event.id))?.(); },
   });
-  return { app, log, delivered, done(id: string) {
+  return { app, log, delivered, directory: d, done(id: string) {
     return new Promise<void>(resolve => { waiters.set(id, resolve); if (["done", "failed"].includes(app.eventJob(id)?.status ?? "")) resolve(); });
   } };
 }
@@ -87,6 +87,28 @@ test("background events persist results without Telegram delivery or MCP credent
     const records = (await readFile(f.log, "utf8")).trim().split("\n").map(x => JSON.parse(x));
     const session = records.find(x => x.event === "new");
     expect(session.value.mcpServers).toEqual([]);
+  } finally { await f.app.stop(); await running; }
+});
+
+test("chat and background sessions independently receive shared memory updates", async () => {
+  const f = await fixture();
+  const path = join(f.directory, "MEMORY.md");
+  await writeFile(path, "# First\nShared fact.\n");
+  const running = f.app.run();
+  try {
+    for (const [id, chatId] of [["dm-first", "42"], ["bg-first", undefined]] as const) {
+      f.app.emitExternal({ id, name: "test", ...(chatId ? { chatId } : {}) });
+      await f.done(id);
+    }
+    await writeFile(path, "# First\nShared fact.\n\n# Second\nNew fact.\n");
+    for (const [id, chatId] of [["dm-next", "42"], ["bg-next", undefined]] as const) {
+      f.app.emitExternal({ id, name: "test", ...(chatId ? { chatId } : {}) });
+      await f.done(id);
+    }
+    const prompts = (await readFile(f.log, "utf8")).trim().split("\n").map(x => JSON.parse(x))
+      .filter(x => x.event === "prompt").map(x => x.value.prompt[0].text);
+    expect(prompts.slice(0, 2).every(text => text.includes('<memory source="MEMORY.md">'))).toBe(true);
+    expect(prompts.slice(2).every(text => text.includes('action="append"') && !text.includes("Shared fact"))).toBe(true);
   } finally { await f.app.stop(); await running; }
 });
 
