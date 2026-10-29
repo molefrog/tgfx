@@ -1,7 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { rm, stat } from "node:fs/promises";
+import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotCommand, CallbackQuery, InputRichMessageWithoutUpload, Update } from "grammy/types";
 import { FxRouteSession, rejectedPermission, type FxPermissionMode } from "./fx/acp";
@@ -59,7 +58,7 @@ import type {
 } from "./types";
 import { isOutputMode, REPLY_STYLES, routeKey } from "./types";
 import { pruneBotFiles, saveConfig, tgfxHome, type ProjectSettings, type WorkspacePaths } from "./config";
-import { safeDownloadPath, writeResponseLimited } from "./mcp/files";
+import { safeDownloadPath, temporaryDownloadDirectory, writeResponseLimited } from "./mcp/files";
 
 const COMMANDS: BotCommand[] = [{
   command: "stop",
@@ -913,7 +912,7 @@ export class TgfxApp {
   private async prepareStickerImages(message: InboundMessage, signal?: AbortSignal): Promise<void> {
     const stickers = message.attachments.filter((attachment) => attachment.kind === "sticker");
     if (!stickers.length) return;
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "tgfx-stickers-"));
+    const temporaryRoot = await temporaryDownloadDirectory(this.options.paths.files, "tgfx-stickers-");
     this.stickerTemporaryDirectories.add(temporaryRoot);
     try {
       await Promise.all(stickers.map(async (sticker) => {
@@ -1219,8 +1218,11 @@ export class TgfxApp {
         kind: "session_action", action: data.action, generation: data.generation,
         message: { ...data.message, historySeq: this.state.history.latestSeq(route.key) },
       } : undefined;
-      // Make confirmed work discardable by /stop before waiting on Telegram.
-      if (payload) this.state.requeueInbox(row.id, payload);
+      // Reserve its place before Telegram's UI calls let newer requests arrive.
+      if (payload) {
+        this.state.requeueInbox(row.id, payload);
+        if (!this.stopping) this.schedule(row.id, route.key, payload);
+      }
       await this.options.telegram.answerCallback(callback.id, value === "cancel" ? "Cancelled" : "Confirmed")
         .catch(() => undefined);
       await this.options.telegram.editRich(route.chatId, callback.message.message_id, {
@@ -1228,9 +1230,8 @@ export class TgfxApp {
           ? "Cancelled. The conversation is unchanged."
           : data.action === "clear" ? "Clearing conversation…" : "Compaction queued…" }],
       }).catch(error => this.log(`Could not update the confirmation card · ${redactSecrets(String(error))}`));
-      if (!payload) return;
-      if (!this.stopping) this.schedule(row.id, route.key, payload);
-      return "deferred";
+      if (payload) return "deferred";
+      return;
     }
     const inApprovalsRoute = route.chatId === this.config.approvals.chatId
       && route.topicId === this.config.approvals.topicId;

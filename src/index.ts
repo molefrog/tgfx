@@ -528,7 +528,6 @@ async function allowCommand(tokens: string[]): Promise<void> {
   });
   const paths = projectPaths();
   const config = await requireConfig(paths);
-  if (!(flags.dm || flags.groups || flags.inherit)) assertAccessPolicyWritable();
   for (const name of ["reply", "dm", "groups"]) {
     if (flags[name] !== undefined && !REPLY_POLICIES.includes(flags[name] as ReplyPolicy)) {
       throw new CliError(`--${name} must be all or mention`);
@@ -550,6 +549,7 @@ async function allowCommand(tokens: string[]): Promise<void> {
     if (flags.dm) changes.dmReply = flags.dm as ReplyPolicy;
     if (flags.groups) changes.groupReply = flags.groups as ReplyPolicy;
   } else if (!principals.length) {
+    assertAccessPolicyWritable();
     if (!process.stdin.isTTY || !process.stderr.isTTY) {
       throw new CliError(
         "give at least one Telegram user or chat ID",
@@ -569,10 +569,13 @@ async function allowCommand(tokens: string[]): Promise<void> {
     }
   }
   for (const principal of principals) {
+    const ids = principal.kind === "user" ? config.access.userIds : config.access.chatIds;
     if (flags.inherit) {
-      const ids = principal.kind === "user" ? config.access.userIds : config.access.chatIds;
       if (!ids.includes(principal.id)) throw new CliError(`${principal.id} is not allowed; --inherit does not grant access`);
-    } else grant(config, principal);
+    } else if (!ids.includes(principal.id)) {
+      assertAccessPolicyWritable();
+      grant(config, principal);
+    }
     if (flags.reply || flags.inherit) {
       changes.chatReplies ??= { ...config.chatReplies };
       if (flags.inherit) delete changes.chatReplies[principal.id];
