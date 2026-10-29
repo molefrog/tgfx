@@ -63,40 +63,27 @@ is written into the project.
 
 ## Persistent memory
 
-Keep shared facts, decisions, and conventions in `MEMORY.md` in the directory
-where TGFX runs. No extra server or memory tools are required; the agent can
-maintain the file using its normal file tools.
+When `MEMORY.md` exists in the project directory, TGFX automatically loads it
+into the bot's context and checks for updates before each new turn. Edit it
+yourself or ask the bot to update it; other chats pick up changes on their next
+turn.
 
-TGFX checks it before each new turn, independently for every chat/topic and
-background session:
+This lets you build personal assistants with shared memory per project across
+DMs, groups, and background tasks. Preferences, decisions, and useful facts can
+carry between chats while conversations stay separate. Everything in the file
+is shared, so only add private conversation details when the person asks to
+share them.
 
-- First use sends the whole file in `<memory source="MEMORY.md">`.
-- New top-level sections send only those sections in a
-  `<memory-update action="append">` block.
-- Editing, removing, renaming, or reordering existing sections sends a
-  `<memory-update action="reread">` instruction to read the current file.
-- Emptying or deleting it sends `<memory-update action="clear">`.
-- Unchanged memory adds nothing. Steering an active turn does not refresh it.
-
-Sections are Markdown H1 headings (`# Heading` or Setext `===`). Text before
-the first heading is a section too. Code fences and quoted headings are not
-sections. Duplicate headings use the conservative reread path. Blank space at
-section boundaries does not turn an addition into an edit. `/compact` is sent
-unchanged, and the next ordinary turn receives a fresh memory snapshot.
-
-Memory is enabled by default, has no additional size limit, and does not create
-a file until you or the agent writes one. Missing memory is silent. The existing
-ACP transport limit still applies to the complete prompt. Optional project or
-global-default settings:
+Memory loading is on by default. To turn it off for a project, set this in its
+TGFX config under `~/.fx/telegram/projects/`:
 
 ```json
-{ "memory": { "enabled": true, "file": "MEMORY.md" } }
+{ "memory": { "enabled": false } }
 ```
 
-`file` is relative to the working directory and must remain inside it, including
-through symlinks. Set `enabled` to `false` to disable automatic loading. All
-content in this file is shared across conversations; private conversation
-details should not be copied into it unless the person asks to share them.
+Use `memory.file` to choose another filename in the project. You can also put
+these settings under `defaults` in `~/.fx/telegram/config.json` to apply them to
+all projects.
 
 ## External events
 
