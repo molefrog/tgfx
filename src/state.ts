@@ -38,9 +38,9 @@ export type ContextCapability = {
   route_key: string;
   chat_id: string;
   topic_id: string;
-  message_ref: string;
-  message_id: string;
-  sender_ref: string;
+  message_ref: string | null;
+  message_id: string | null;
+  sender_ref: string | null;
   attachments_json: string;
   expires_at: string;
 };
@@ -64,6 +64,25 @@ export type RecentMessage = {
   created_at: string;
   excerpt: string | null;
 };
+
+const CONTEXT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS context_capabilities (
+  context_ref TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  route_key TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  topic_id TEXT NOT NULL,
+  message_ref TEXT,
+  message_id TEXT,
+  sender_ref TEXT,
+  attachments_json TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS context_route_active
+  ON context_capabilities(route_key, active, created_at DESC);
+`;
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -189,23 +208,7 @@ CREATE TABLE IF NOT EXISTS effect_ledger (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS context_capabilities (
-  context_ref TEXT PRIMARY KEY,
-  bot_id TEXT NOT NULL,
-  route_key TEXT NOT NULL,
-  chat_id TEXT NOT NULL,
-  topic_id TEXT NOT NULL,
-  message_ref TEXT NOT NULL,
-  message_id TEXT NOT NULL,
-  sender_ref TEXT NOT NULL,
-  attachments_json TEXT NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1,
-  expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS context_route_active
-  ON context_capabilities(route_key, active, created_at DESC);
+${CONTEXT_SCHEMA}
 `;
 
 function now(): string { return new Date().toISOString(); }
@@ -231,6 +234,17 @@ export class StateStore {
     this.db = new Database(path, { create: true, strict: true });
     chmodSync(path, 0o600);
     this.db.exec(SCHEMA);
+    if (this.db.query<{ notnull: number }, []>(
+      "SELECT [notnull] FROM pragma_table_info('context_capabilities') WHERE name='message_ref'",
+    ).get()?.notnull) {
+      this.db.transaction(() => {
+        this.db.exec(`ALTER TABLE context_capabilities RENAME TO legacy_context_capabilities;
+          DROP INDEX context_route_active;`);
+        this.db.exec(CONTEXT_SCHEMA);
+        this.db.exec(`INSERT INTO context_capabilities SELECT * FROM legacy_context_capabilities;
+          DROP TABLE legacy_context_capabilities;`);
+      })();
+    }
     this.history = new ChatHistory(this.db, workspace);
     const messageColumns = this.db.query<{ name: string }, []>(
       "SELECT name FROM pragma_table_info('telegram_messages')",
@@ -602,6 +616,18 @@ export class StateStore {
         sender: message.sender.ref, attachments: JSON.stringify(message.attachments),
         expires, now: now(),
       });
+    })();
+  }
+
+  /** A local event can act in its destination without impersonating a Telegram sender. */
+  registerEventContext(route: Route, contextRef: string): void {
+    this.db.transaction(() => {
+      this.db.query("UPDATE context_capabilities SET active=0 WHERE route_key=?").run(route.key);
+      this.db.query(`INSERT INTO context_capabilities
+        (context_ref,bot_id,route_key,chat_id,topic_id,attachments_json,expires_at,created_at)
+        VALUES (?,?,?,?,?,'[]',?,?)`)
+        .run(contextRef, route.botId, route.key, route.chatId, route.topicId,
+          new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), now());
     })();
   }
 

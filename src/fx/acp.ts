@@ -37,6 +37,7 @@ export function sanitizeFxEnvironment(environment: NodeJS.ProcessEnv): NodeJS.Pr
   delete clean.TELEGRAM_BOT_TOKEN;
   delete clean.TGFX_POLICY_FILE;
   delete clean.TGFX_HOME;
+  delete clean.TGFX_EVENTS_SOCKET;
   for (const name of Object.keys(clean)) {
     if (name.startsWith("TGFX_MCP_") || name.startsWith("TGFX_INTERNAL_TELEGRAM_")) delete clean[name];
   }
@@ -120,6 +121,23 @@ export class FxRouteSession {
   private disposeTask?: Promise<void>;
   private connectionError?: unknown;
   private stderr = "";
+  private acceptingSteering = false;
+  private readonly steering = new Set<Promise<acp.PromptResponse>>();
+
+  get canSteer(): boolean { return this.acceptingSteering && this.usable; }
+
+  async steer(blocks: acp.ContentBlock[]): Promise<void> {
+    if (!this.canSteer || !this.context || !this.sessionId) throw new Error("No active turn to steer");
+    if (Buffer.byteLength(JSON.stringify(blocks)) > 60 * 1024) throw new Error("Steering input exceeds 60 KiB");
+    const task = this.context.request(acp.methods.agent.session.prompt, {
+      sessionId: this.sessionId, prompt: blocks, _meta: { fx: { steer: true } },
+    });
+    this.steering.add(task);
+    try {
+      const response = await task;
+      if (response.stopReason !== "end_turn") throw new Error(`Steering stopped: ${response.stopReason}`);
+    } finally { this.steering.delete(task); }
+  }
 
   constructor(private readonly options: {
     workspace: string;
@@ -341,10 +359,14 @@ export class FxRouteSession {
     };
     handlers.signal?.addEventListener("abort", abort, { once: true });
     try {
+      this.acceptingSteering = true;
       const response = await this.context.request(acp.methods.agent.session.prompt, {
         sessionId: this.sessionId,
         prompt: blocks,
       });
+      this.acceptingSteering = false;
+      // Keep listeners/permissions alive for a steer that FX turns into a late follow-up.
+      await Promise.allSettled([...this.steering]);
       // FX also uses older names for these ACP stop reasons. Neither spelling
       // means the task completed, even if it streamed a success-looking reply.
       const reason: string = response.stopReason;
@@ -360,6 +382,7 @@ export class FxRouteSession {
       }
       return response;
     } finally {
+      this.acceptingSteering = false;
       clearTimeout(cancelTimer);
       handlers.signal?.removeEventListener("abort", abort);
       this.currentPermission = undefined;

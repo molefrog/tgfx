@@ -120,6 +120,14 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
       finally { listeners.delete(listener); }
     },
     accepted(id: number) { return telegram.waitForRequest(r => r.method === "getUpdates" && r.payload.offset > id); },
+    async settled(updateId: number) {
+      const query = state.db.query<{ status: string }, [number]>("SELECT status FROM telegram_inbox WHERE update_id=?");
+      const deadline = Date.now() + 5000;
+      while (query.get(updateId)?.status !== "done") {
+        if (Date.now() >= deadline) throw new Error("Control did not settle");
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+    },
     async events(): Promise<Array<{ event: string; value: any }>> {
       const text = await readFile(log, "utf8").catch(error => { if (error.code === "ENOENT") return ""; throw error; });
       return text.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
@@ -146,7 +154,10 @@ test.each(["format", "cost", "model"])("/%s preserves the running task's context
   } finally { await h.close(); }
 });
 
-test.each([false, true])("queued requests get one notice and /stop bypasses the queue (group=%s)", async group => {
+test.each([
+  { group: false, command: "stop" }, { group: true, command: "stop" },
+  { group: false, command: "clear" }, { group: true, command: "clear" },
+])("queued requests get one notice and cancellation resets it (%j)", async ({ group, command }) => {
   const h = await harness({ output: "answer", group });
   const notices = () => h.telegram.calls("sendMessage").filter(r => String(r.payload.text).includes("queued"));
   try {
@@ -160,7 +171,12 @@ test.each([false, true])("queued requests get one notice and /stop bypasses the 
     expect(notice.payload.text).toContain(group ? "/stop@fake_bot" : "/stop");
     expect(h.state.activeContext(h.route.key)?.context_ref).toBe(context);
     expect((await h.events()).filter(e => e.event === "prompt")).toHaveLength(1);
-    h.send(group ? "/stop@fake_bot" : "/stop"); await h.status("finished");
+    let control = h.send(`/${command}`);
+    if (command === "clear") {
+      const card = await h.confirmation();
+      control = h.click(card.confirm, card);
+    }
+    await h.settled(control);
     h.send("WAIT"); await h.status("started", 2);
     h.send("another follow-up");
     await h.telegram.waitForRequest(r => r.method === "sendMessage" && notices().length >= 2);

@@ -117,6 +117,7 @@ export function helpText(): string {
     line("tgfx", "run fx in this folder (sets up on first run)"),
     line("tgfx --yolo", "run with FX permission checks disabled"),
     line("tgfx access", "who can talk to fx, who approves, saved sessions"),
+    line("tgfx emit <event>", "queue an external event; no --chat means background"),
     line("tgfx allow [id…]", "add users or chats; --reply all|mention sets replies"),
     line("tgfx allow --dm <policy>", "DM default; --groups sets the group default"),
     line("tgfx history", "inspect local history; clear --chat <id> removes it"),

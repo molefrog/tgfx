@@ -38,6 +38,27 @@ function inbound(): InboundMessage {
 }
 
 describe("SQLite operational journal", () => {
+  test("upgrades message-only contexts while preserving their existing capabilities", () => {
+    const state = store(), message = inbound();
+    state.registerInbound(message);
+    const before = state.activeContext(message.route.key);
+    const schema = state.db.query<{ sql: string }, []>(
+      "SELECT sql FROM sqlite_master WHERE name='context_capabilities'",
+    ).get()!.sql.replace(/(message_ref|message_id|sender_ref) TEXT/g, "$1 TEXT NOT NULL");
+    state.db.exec(`ALTER TABLE context_capabilities RENAME TO saved_context_capabilities;
+      DROP INDEX context_route_active;`);
+    state.db.exec(schema);
+    state.db.exec(`INSERT INTO context_capabilities SELECT * FROM saved_context_capabilities;
+      DROP TABLE saved_context_capabilities;`);
+    state.close();
+    const reopened = new StateStore(state.path);
+    try {
+      expect(reopened.activeContext(message.route.key)).toEqual(before);
+      reopened.registerEventContext(message.route, "ctx_event");
+      expect(reopened.activeContext(message.route.key)?.message_ref).toBeNull();
+    } finally { reopened.close(); }
+  });
+
   test("removes unused route caches from an older journal while preserving its work", () => {
     const state = store();
     const route = inbound().route;

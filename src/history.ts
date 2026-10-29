@@ -118,6 +118,12 @@ export class ChatHistory {
     })();
   }
 
+  /** External turns have a history boundary but no Telegram inbox row to complete. */
+  snapshot(route: string, context: string): void {
+    this.db.query("INSERT INTO history_turns VALUES (?,?,?,?,0)")
+      .run(this.workspace, route, context, this.latestSeq(route));
+  }
+
   boundary(route: string, context: string): number {
     return this.db.query<{ through_seq: number }, [string, string, string]>(`
       SELECT through_seq FROM history_turns WHERE workspace=? AND route=? AND context_ref=?

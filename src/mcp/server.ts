@@ -294,9 +294,10 @@ export async function runTelegramMcpServer(): Promise<void> {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   }, async (args) => result(await perform("telegram_set_reaction", args, async () => {
     const current = context();
+    if (!args.message_ref && !current.message_ref) throw new Error("This turn has no Telegram message; supply message_ref.");
     const target = args.message_ref
       ? state.messageReference(args.message_ref, env.routeKey)
-      : state.messageReference(current.message_ref, env.routeKey);
+      : state.messageReference(current.message_ref!, env.routeKey);
     if (!target) throw new Error("Unknown or expired message_ref for this route.");
     await telegram.api.setMessageReaction(target.chat_id, Number(target.message_id), [
       { type: "emoji", emoji: args.emoji as never },
