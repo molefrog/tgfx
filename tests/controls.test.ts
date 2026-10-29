@@ -12,6 +12,7 @@ import type { StatusEvent } from "../src/status";
 import type { OutputMode } from "../src/types";
 import { withTimeout } from "../src/timeout";
 import { normalizeMessageUpdate } from "../src/telegram/normalize";
+import { confirmationData } from "./fixtures/session-confirmation";
 
 async function harness(options: { failedLoad?: boolean; output?: OutputMode; group?: boolean; topicId?: number; recoveredClear?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "tgfx-controls-"));
@@ -46,11 +47,15 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
   const statuses: StatusEvent[] = [];
   const listeners = new Set<() => void>();
   const contexts: Array<string | undefined> = [];
+  let confirmations = 0;
   const createApp = () => new TgfxApp({
     paths, config: { version: 1, activeBotId: "100", access: { userIds: ["42"], chatIds: options.group ? [chat] : [] },
       approvals: { chatId: "42", topicId: "0" }, output: options.output ?? "live", customIcons: false },
     bot: { id: "100", username: "fake_bot", displayName: "Fake" }, token: "100:offline", fxBinary: binary, cancelGraceMs: 250,
-    telegram: new TelegramApi("100:offline", telegram.url), log: () => undefined,
+    telegram: new TelegramApi("100:offline", telegram.url), log: event => {
+      if (event.event === "session.confirmation") confirmations++;
+      for (const listener of listeners) listener();
+    },
     status: (event) => {
       statuses.push(event);
       if (event.type === "turn" && event.state === "started") contexts.push(state.activeContext(route.key)?.context_ref);
@@ -60,6 +65,7 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
   let app = createApp();
   let running = app.run();
   await telegram.waitForCalls("getUpdates");
+  let clicks = 0;
   return {
     get app() { return app; }, state, telegram, route, contexts, paths,
     async restart() {
@@ -71,7 +77,7 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
     },
     send(text: string, mention = true) {
       if (!options.group) return telegram.sendUserMessage({ userId: 42, text });
-      const body = text.startsWith("/") || !mention ? text : `@fake_bot ${text}`;
+      const body = /^\/\w+$/.test(text) ? `${text}@fake_bot` : text.startsWith("/") || !mention ? text : `@fake_bot ${text}`;
       return telegram.push({ message: {
         message_id: 100 + telegram.requests.length, date: Math.floor(Date.now() / 1000),
         chat: { id: Number(chat), type: "supergroup", title: "Test" },
@@ -80,11 +86,29 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
         entities: body.startsWith("@") ? [{ type: "mention", offset: 0, length: 9 }] : [],
       } } as Omit<Update, "update_id">);
     },
-    click(data: string) {
-      return telegram.push({ callback_query: { id: `click-${telegram.requests.length}`, chat_instance: "test",
-        from: { id: 42, is_bot: false, first_name: "User" }, data,
-        message: { message_id: 2000, date: 1, chat: { id: Number(chat), type: options.group ? "supergroup" : "private" } },
+    click(data: string, overrides: { userId?: number; messageId?: number; topicId?: number; chatId?: number } = {}) {
+      return telegram.push({ callback_query: { id: `click-${++clicks}`, chat_instance: "test",
+        from: { id: overrides.userId ?? 42, is_bot: false, first_name: "User" }, data,
+        message: { message_id: overrides.messageId ?? 2000, date: 1,
+          ...(overrides.topicId ? { message_thread_id: overrides.topicId } : {}),
+          chat: { id: overrides.chatId ?? Number(chat), type: options.group ? "supergroup" : "private" } },
       } } as Omit<Update, "update_id">);
+    },
+    async confirmation(count = 1) {
+      const cards = () => telegram.calls("sendRichMessage")
+        .filter(r => confirmationData(r.payload.rich_message));
+      if (confirmations < count) {
+        const ready = Promise.withResolvers<void>();
+        const listener = () => { if (confirmations >= count) ready.resolve(); };
+        listeners.add(listener);
+        try { await withTimeout(ready.promise, 5000, () => { throw new Error("Missing confirmation"); }); }
+        finally { listeners.delete(listener); }
+      }
+      const rich = cards()[count - 1]!.payload.rich_message;
+      const confirm = confirmationData(rich)!;
+      const id = confirm.split(":")[1]!;
+      const card = JSON.parse(state.interaction(id)!.payload_json).card;
+      return { id, confirm, cancel: confirmationData(rich, "cancel")!, messageId: card.messageId };
     },
     async status(stateName: "started" | "finished", count = 1) {
       const matches = () => statuses.filter(e => e.type === "turn" && e.state === stateName).length >= count;
@@ -97,7 +121,8 @@ async function harness(options: { failedLoad?: boolean; output?: OutputMode; gro
     },
     accepted(id: number) { return telegram.waitForRequest(r => r.method === "getUpdates" && r.payload.offset > id); },
     async events(): Promise<Array<{ event: string; value: any }>> {
-      return (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      const text = await readFile(log, "utf8").catch(error => { if (error.code === "ENOENT") return ""; throw error; });
+      return text.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
     },
     async close() {
       await app.stop(); await running; state.close(); await telegram.stop();
@@ -262,9 +287,11 @@ test("an unfinished FX response reports failure and the next request still works
 test("a recovered clear command does not wait on its own queue", async () => {
   const h = await harness({ recoveredClear: true });
   try {
+    const card = await h.confirmation();
+    h.click(card.confirm, card);
     await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
     h.send("hello"); await h.status("finished");
-    expect(h.telegram.calls("sendRichMessage")).toHaveLength(1);
+    expect(h.telegram.calls("sendRichMessage")).toHaveLength(2);
   } finally { await h.close(); }
 });
 
@@ -272,6 +299,8 @@ test("clear survives a restart before the next message without resuming an empty
   const h = await harness({ failedLoad: true });
   try {
     h.send("/clear");
+    const card = await h.confirmation();
+    h.click(card.confirm, card);
     await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
     await h.restart();
     expect(h.state.ensureRoute(h.route).session_id).toBeNull();
@@ -280,7 +309,7 @@ test("clear survives a restart before the next message without resuming an empty
     expect(events.filter(e => e.event === "new")).toHaveLength(1);
     expect(events.filter(e => e.event === "load")).toHaveLength(0);
     expect(h.telegram.calls("sendMessage").some(r => String(r.payload.text).includes("resumed"))).toBeFalse();
-    expect(h.telegram.calls("sendRichMessage")).toHaveLength(1);
+    expect(h.telegram.calls("sendRichMessage")).toHaveLength(2);
   } finally { await h.close(); }
 });
 
@@ -289,10 +318,165 @@ test("clear arriving in the same batch as a request leaves the route usable", as
   try {
     h.send("WAIT");
     h.send("/clear");
+    const card = await h.confirmation();
+    h.click(card.confirm, card);
     await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
     h.send("hello");
-    await h.telegram.waitForCalls("sendRichMessage");
-    expect(h.telegram.calls("sendRichMessage")).toHaveLength(1);
+    await h.telegram.waitForCalls("sendRichMessage", 2);
+    expect(h.telegram.calls("sendRichMessage")).toHaveLength(2);
+  } finally { await h.close(); }
+});
+
+test.each(["clear", "compact"])("/%s waits for confirmation and cancellation preserves the running task", async action => {
+  const h = await harness();
+  try {
+    h.send("WAIT"); await h.status("started");
+    const context = h.state.activeContext(h.route.key)!.context_ref;
+    h.send(`/${action}`);
+    const card = await h.confirmation();
+    expect(h.state.activeContext(h.route.key)?.context_ref).toBe(context);
+    expect((await h.events()).filter(e => e.event === "prompt")).toHaveLength(1);
+    expect((await h.events()).some(e => e.event === "cancel")).toBeFalse();
+    h.click(card.cancel, card);
+    await h.telegram.waitForRequest(r => r.method === "editMessageText" && JSON.stringify(r.payload).includes("Cancelled"));
+    expect(h.state.activeContext(h.route.key)?.context_ref).toBe(context);
+    h.send("/stop"); await h.status("finished");
+    expect((await h.events()).filter(e => e.event === "prompt")).toHaveLength(1);
+  } finally { await h.close(); }
+});
+
+test("only the requesting group member can confirm, and repeated clicks do not clear twice", async () => {
+  const h = await harness({ group: true });
+  try {
+    h.send("hello"); await h.status("finished");
+    const generation = h.state.ensureRoute(h.route).generation;
+    h.send("/clear");
+    const card = await h.confirmation();
+    h.click(card.confirm, { ...card, userId: 99 });
+    await h.telegram.waitForRequest(r => r.method === "answerCallbackQuery" && String(r.payload.text).includes("Only"));
+    expect(h.state.ensureRoute(h.route).generation).toBe(generation);
+    expect(h.state.interaction(card.id)?.state).toBe("pending");
+    h.click(card.confirm, card);
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
+    h.click(card.confirm, card);
+    await h.telegram.waitForRequest(r => r.method === "answerCallbackQuery" && String(r.payload.text).includes("expired"));
+    expect(h.state.ensureRoute(h.route).generation).toBe(generation + 1);
+  } finally { await h.close(); }
+});
+
+test.each(["expired", "wrong message", "wrong topic", "wrong chat", "superseded"])("rejects a %s confirmation", async reason => {
+  const h = await harness({ group: true });
+  try {
+    h.send("/clear");
+    const card = await h.confirmation();
+    const generation = h.state.ensureRoute(h.route).generation;
+    if (reason === "expired") h.state.db.query("UPDATE telegram_interactions SET expires_at=? WHERE interaction_id=?")
+      .run("2000-01-01T00:00:00.000Z", card.id);
+    if (reason === "superseded") { h.send("/compact"); await h.confirmation(2); }
+    h.click(card.confirm, { ...card,
+      ...(reason === "wrong message" ? { messageId: card.messageId + 1 } : {}),
+      ...(reason === "wrong topic" ? { topicId: 10 } : {}),
+      ...(reason === "wrong chat" ? { chatId: -43 } : {}),
+    });
+    await h.telegram.waitForRequest(r => r.method === "answerCallbackQuery" && String(r.payload.text).includes("expired"));
+    expect(h.state.ensureRoute(h.route).generation).toBe(generation);
+    expect(await h.events()).toHaveLength(0);
+  } finally { await h.close(); }
+});
+
+test("a pending confirmation survives restart and compacts only after its button is pressed", async () => {
+  const h = await harness({ output: "answer" });
+  try {
+    h.send("/compact");
+    const card = await h.confirmation();
+    await h.restart();
+    expect(await h.events()).toHaveLength(0);
+    h.click(card.confirm, card);
+    await h.telegram.waitForRequest(r => r.method === "editMessageText" && JSON.stringify(r.payload).includes("compacted"));
+    const prompts = (await h.events()).filter(e => e.event === "prompt");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]!.value.prompt).toEqual([{ type: "text", text: "/compact" }]);
+  } finally { await h.close(); }
+});
+
+test.each(["answerCallbackQuery", "editMessageText"])("confirmed clear preserves later requests while %s is delayed", async method => {
+  const h = await harness();
+  let release = () => {};
+  try {
+    h.send("WAIT"); await h.status("started");
+    h.send("/clear");
+    const card = await h.confirmation();
+    release = h.telegram.holdNextResponse(method);
+    h.click(card.confirm, card);
+    await h.telegram.waitForCalls(method);
+    const id = h.send("after clear");
+    await h.accepted(id);
+    release();
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("fresh conversation"));
+    expect(h.state.db.query("SELECT status FROM telegram_inbox WHERE update_id=?").get(id)).not.toEqual({ status: "discarded" });
+    await h.status("finished", 2);
+    const prompts = (await h.events()).filter(e => e.event === "prompt");
+    expect(prompts.at(-1)!.value.prompt.at(-1).text).toBe("after clear");
+  } finally { release(); await h.close(); }
+});
+
+test.each(["answerCallbackQuery", "editMessageText"])("confirmed compaction stays ahead of later requests while %s is delayed", async method => {
+  const h = await harness();
+  let release = () => {};
+  try {
+    h.send("PERMISSION");
+    const approval = await h.telegram.waitForRequest(r => r.method === "sendMessage" && r.payload.reply_markup);
+    h.send("/compact");
+    const card = await h.confirmation();
+    release = h.telegram.holdNextResponse(method);
+    h.click(card.confirm, card);
+    await h.telegram.waitForCalls(method);
+    const id = h.send("after compact");
+    await h.accepted(id);
+    h.click(approval.payload.reply_markup.inline_keyboard[0][0].callback_data);
+    await h.status("finished", 2);
+    const prompts = (await h.events()).filter(e => e.event === "prompt");
+    expect(prompts[1]!.value.prompt).toEqual([{ type: "text", text: "/compact" }]);
+    expect(prompts.at(-1)!.value.prompt.at(-1).text).toBe("after compact");
+  } finally { release(); await h.close(); }
+});
+
+test.each(["answerCallbackQuery", "editMessageText"])("stop discards confirmed compaction while %s is delayed", async method => {
+  const h = await harness();
+  let release = () => {};
+  try {
+    h.send("WAIT"); await h.status("started");
+    h.send("/compact");
+    const card = await h.confirmation();
+    release = h.telegram.holdNextResponse(method);
+    h.click(card.confirm, card);
+    await h.telegram.waitForCalls(method);
+    h.send("/stop"); await h.status("finished");
+    h.send("next"); await h.status("finished", 2);
+    const prompts = (await h.events()).filter(e => e.event === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(prompts.every(p => p.value.prompt[0]?.text !== "/compact")).toBeTrue();
+  } finally { release(); await h.close(); }
+});
+
+test("confirmed compaction waits for the current task to finish", async () => {
+  const h = await harness({ output: "answer" });
+  try {
+    h.send("PERMISSION");
+    const approval = await h.telegram.waitForRequest(r => r.method === "sendMessage" && r.payload.reply_markup);
+    const context = h.state.activeContext(h.route.key)!.context_ref;
+    h.send("/compact");
+    const card = await h.confirmation();
+    h.click(card.confirm, card);
+    await h.telegram.waitForRequest(r => r.method === "editMessageText" && JSON.stringify(r.payload).includes("queued"));
+    expect(h.state.activeContext(h.route.key)?.context_ref).toBe(context);
+    expect((await h.events()).filter(e => e.event === "prompt")).toHaveLength(1);
+    h.click(approval.payload.reply_markup.inline_keyboard[0][0].callback_data);
+    await h.status("finished");
+    await h.telegram.waitForRequest(r => r.method === "editMessageText" && JSON.stringify(r.payload).includes("compacted"));
+    const prompts = (await h.events()).filter(e => e.event === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]!.value.prompt).toEqual([{ type: "text", text: "/compact" }]);
   } finally { await h.close(); }
 });
 
@@ -312,6 +496,8 @@ test("/clear terminates an uncooperative task and runs later requests in a fresh
     h.send("WAIT IGNORE_CANCEL"); await h.status("started");
     h.send("discard this queued request");
     h.send("/clear");
+    const card = await h.confirmation();
+    h.click(card.confirm, card);
     await h.telegram.waitForRequest(r => r.method === "sendMessage" && String(r.payload.text).includes("Stopping"));
     h.send("after clear");
     await h.status("finished", 2);

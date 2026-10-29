@@ -33,6 +33,7 @@ import {
   TurnRenderer,
 } from "./telegram/renderer";
 import { REPLY_STYLE_CALLBACK, replyStylePicker } from "./telegram/reply-style";
+import { SESSION_ACTION_CALLBACK, sessionConfirmation, type SessionAction } from "./telegram/session-confirmation";
 import { replyPolicy } from "./telegram/reply-policy";
 import { redactSecrets } from "./secrets";
 import type { RouteLabel, Settings, StatusEvent, TraceGlyph } from "./status";
@@ -104,9 +105,17 @@ type PersistedPayload =
   | { kind: "message"; message: InboundMessage }
   | { kind: "forwarded"; messages: InboundMessage[] }
   | { kind: "callback"; update: Update; route: Route; historySeq?: number }
+  | { kind: "session_action"; action: SessionAction; message: InboundMessage; generation: number }
   | { kind: "poll_answer"; update: Update; route: Route; historySeq?: number }
   | { kind: "join_request"; update: Update; route: Route }
   | { kind: "migration"; update: Update; route: Route; oldChatId: string; newChatId: string };
+
+type SessionConfirmation = {
+  action: SessionAction;
+  message: InboundMessage;
+  generation: number;
+  card?: { chatId: string; messageId: number };
+};
 
 type PermissionWaiter = {
   options: acp.PermissionOption[];
@@ -678,8 +687,9 @@ export class TgfxApp {
   private schedule(inboxId: number, key: string, payload: PersistedPayload): void {
     const command = payload.kind === "message" ? commandFromText(payload.message.text, this.options.bot.username) : undefined;
     const callback = payload.kind === "callback" ? payload.update.callback_query?.data?.split(":")[0] : undefined;
-    const control = (command?.addressed && ["stop", "clear", "model", "cost", "format"].includes(command.name))
-      || (callback && ["fxp", "mcp", "model", "cost", REPLY_STYLE_CALLBACK].includes(callback));
+    const control = (command?.addressed && ["stop", "clear", "compact", "model", "cost", "format"].includes(command.name))
+      || (callback && ["fxp", "mcp", "model", "cost", REPLY_STYLE_CALLBACK, SESSION_ACTION_CALLBACK].includes(callback))
+      || (payload.kind === "session_action" && payload.action === "clear");
     if (!control) {
       this.enqueue(inboxId, key, payload.kind === "message" ? payload.message.route : undefined);
       return;
@@ -809,7 +819,18 @@ export class TgfxApp {
       const payload = JSON.parse(row.payload_json) as PersistedPayload;
       if (payload.kind === "message") await this.dispatchMessage(row, hydrateMessage(payload.message));
       else if (payload.kind === "forwarded") await this.dispatchForwarded(row, payload.messages.map(hydrateMessage));
-      else if (payload.kind === "callback") await this.dispatchCallback(row, payload.update, payload.route);
+      else if (payload.kind === "callback") {
+        if (await this.dispatchCallback(row, payload.update, payload.route) === "deferred") return;
+      }
+      else if (payload.kind === "session_action") {
+        const message = hydrateMessage(payload.message);
+        if (this.state.ensureRoute(message.route).generation !== payload.generation) {
+          this.state.markInbox(row.id, "discarded");
+          return;
+        }
+        if (payload.action === "clear") await this.stopRoute(row, message, true);
+        else await this.runCompact(row, message);
+      }
       else if (payload.kind === "poll_answer") await this.dispatchPollAnswer(row, payload.update, payload.route);
       else if (payload.kind === "join_request") await this.dispatchJoinRequest(payload.update, payload.route);
       else await this.dispatchMigration(payload.oldChatId, payload.newChatId);
@@ -876,31 +897,12 @@ export class TgfxApp {
         );
         return;
       }
-      if (command.name === "stop" || command.name === "clear") {
-        const previous = this.queueTails.get(message.route.key);
-        const done = Promise.withResolvers<void>();
-        const barrier = (previous ?? Promise.resolve()).catch(() => undefined).then(() => done.promise);
-        this.queueTails.set(message.route.key, barrier);
-        const active = this.activeTurns.get(message.route.key);
-        const discarded = this.state.discardQueued(message.route.key, row.id);
-        active?.abort(new Error("Stopped from Telegram command"));
-        try {
-          if (active || command.name === "stop") {
-            await this.options.telegram.sendText(
-              message.route.chatId,
-              active ? "Stopping the current task…" : discarded ? "Discarded queued requests." : "No task is running.",
-              message.route.topicId,
-            );
-          }
-          await previous?.catch(() => undefined);
-          if (command.name === "clear" && !this.stopping) await this.runClear(message.route, message.historySeq);
-        } finally {
-          done.resolve();
-          if (this.queueTails.get(message.route.key) === barrier) {
-            this.queueTails.delete(message.route.key);
-            this.queueNotified.delete(message.route.key);
-          }
-        }
+      if (command.name === "stop") {
+        await this.stopRoute(row, message);
+        return;
+      }
+      if (command.name === "clear" || command.name === "compact") {
+        await this.openSessionConfirmation(message, command.name);
         return;
       }
       if (command.name === "model") {
@@ -922,7 +924,6 @@ export class TgfxApp {
         this.registerBotMessage(message.route, String(sent.message_id));
         return;
       }
-      await this.runCompact(row, message);
       return;
     }
 
@@ -1209,10 +1210,54 @@ export class TgfxApp {
     });
   }
 
-  private async dispatchCallback(row: InboxRow, update: Update, route: Route): Promise<void> {
+  private async dispatchCallback(row: InboxRow, update: Update, route: Route): Promise<"deferred" | void> {
     const callback = update.callback_query;
     if (!callback?.data || !callback.message) return;
     const [kind, id, value] = callback.data.split(":", 3);
+    if (kind === SESSION_ACTION_CALLBACK && id) {
+      const interaction = this.state.interaction(id);
+      if (!interaction || interaction.kind !== "session_action" || interaction.route_key !== route.key
+        || interaction.state !== "pending" || interaction.expires_at <= new Date().toISOString()) {
+        await this.options.telegram.answerCallback(callback.id, "This confirmation expired");
+        return;
+      }
+      const data: SessionConfirmation = JSON.parse(interaction.payload_json);
+      if (data.generation !== this.state.ensureRoute(route).generation
+        || data.card?.chatId !== route.chatId || data.card.messageId !== callback.message.message_id) {
+        await this.options.telegram.answerCallback(callback.id, "This confirmation expired");
+        return;
+      }
+      if (data.message.sender.kind !== "user" || data.message.sender.id !== String(callback.from.id)) {
+        await this.options.telegram.answerCallback(callback.id, "Only the person who sent the command can confirm it");
+        return;
+      }
+      if (value !== "confirm" && value !== "cancel") {
+        await this.options.telegram.answerCallback(callback.id, "Unknown confirmation choice");
+        return;
+      }
+      if (!this.state.resolveInteraction(id, { choice: value })) {
+        await this.options.telegram.answerCallback(callback.id, "This confirmation expired");
+        return;
+      }
+      const payload: PersistedPayload | undefined = value === "confirm" ? {
+        kind: "session_action", action: data.action, generation: data.generation,
+        message: { ...data.message, historySeq: this.state.history.latestSeq(route.key) },
+      } : undefined;
+      // Reserve its place before Telegram's UI calls let newer requests arrive.
+      if (payload) {
+        this.state.requeueInbox(row.id, payload);
+        if (!this.stopping) this.schedule(row.id, route.key, payload);
+      }
+      await this.options.telegram.answerCallback(callback.id, value === "cancel" ? "Cancelled" : "Confirmed")
+        .catch(() => undefined);
+      await this.options.telegram.editRich(route.chatId, callback.message.message_id, {
+        blocks: [{ type: "paragraph", text: value === "cancel"
+          ? "Cancelled. The conversation is unchanged."
+          : data.action === "clear" ? "Clearing conversation…" : "Compaction queued…" }],
+      }).catch(error => this.log(`Could not update the confirmation card · ${redactSecrets(String(error))}`));
+      if (payload) return "deferred";
+      return;
+    }
     const inApprovalsRoute = route.chatId === this.config.approvals.chatId
       && route.topicId === this.config.approvals.topicId;
     if (kind === "cost" && id) {
@@ -1498,6 +1543,52 @@ export class TgfxApp {
       topicId: route.topicId,
       messageId,
     });
+  }
+
+  private async openSessionConfirmation(message: InboundMessage, action: SessionAction): Promise<void> {
+    if (message.sender.kind !== "user") {
+      await this.options.telegram.sendText(message.route.chatId,
+        "Send this command from your own account so you can confirm it.", message.route.topicId);
+      return;
+    }
+    const id = crypto.randomUUID().replaceAll("-", "");
+    this.state.expireInteractions(message.route.key, "session_action");
+    this.state.createInteraction({
+      id, botId: this.options.bot.id, routeKey: message.route.key, kind: "session_action",
+      payload: { action, message, generation: this.state.ensureRoute(message.route).generation } satisfies SessionConfirmation,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+    const card = await this.options.telegram.sendRich(message.route.chatId,
+      sessionConfirmation(action, id), message.route.topicId);
+    this.state.attachInteractionCard(id, { chatId: message.route.chatId, messageId: card.message_id });
+    this.registerBotMessage(message.route, String(card.message_id));
+    this.log({ event: "session.confirmation", message: `${message.route.chatId} · confirm ${action}`,
+      chat: message.route.chatId, topic: message.route.topicId });
+  }
+
+  private async stopRoute(row: InboxRow, message: InboundMessage, clear = false): Promise<void> {
+    const previous = this.queueTails.get(message.route.key);
+    const done = Promise.withResolvers<void>();
+    const barrier = (previous ?? Promise.resolve()).catch(() => undefined).then(() => done.promise);
+    this.queueTails.set(message.route.key, barrier);
+    const active = this.activeTurns.get(message.route.key);
+    const discarded = this.state.discardQueued(message.route.key, row.id);
+    active?.abort(new Error("Stopped from Telegram command"));
+    try {
+      if (active || !clear) {
+        await this.options.telegram.sendText(message.route.chatId,
+          active ? "Stopping the current task…" : discarded ? "Discarded queued requests." : "No task is running.",
+          message.route.topicId);
+      }
+      await previous?.catch(() => undefined);
+      if (clear && !this.stopping) await this.runClear(message.route, message.historySeq);
+    } finally {
+      done.resolve();
+      if (this.queueTails.get(message.route.key) === barrier) {
+        this.queueTails.delete(message.route.key);
+        this.queueNotified.delete(message.route.key);
+      }
+    }
   }
 
   private async runClear(route: Route, through?: number): Promise<void> {

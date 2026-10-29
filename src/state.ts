@@ -418,6 +418,15 @@ export class StateStore {
     return result.changes === 1;
   }
 
+  /** A confirmed control becomes queued work on the same durable inbox row. */
+  requeueInbox(id: number, payload: unknown): void {
+    const result = this.db.query(`
+      UPDATE telegram_inbox SET status='received',payload_json=$payload,updated_at=$now
+      WHERE id=$id AND status='dispatching'
+    `).run({ id, payload: JSON.stringify(payload), now: now() });
+    if (result.changes !== 1) throw new Error("Could not queue the confirmed action");
+  }
+
   markInbox(id: number, status: InboxStatus, error?: string): void {
     const removePayload = status === "done" || status === "discarded";
     this.db.query(`

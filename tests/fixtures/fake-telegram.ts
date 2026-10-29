@@ -12,6 +12,7 @@ export class FakeTelegram {
   private readonly queue: Update[] = [];
   private waiters: Array<() => void> = [];
   private readonly requestWaiters = new Set<(request: RecordedRequest) => void>();
+  private readonly responseGates = new Map<string, Promise<void>>();
   private nextUpdateId = 1;
   private nextMessageId = 1000;
   private readonly server: ReturnType<typeof Bun.serve>;
@@ -67,6 +68,12 @@ export class FakeTelegram {
     return this.requests.filter((request) => request.method === method);
   }
 
+  holdNextResponse(method: string): () => void {
+    const gate = Promise.withResolvers<void>();
+    this.responseGates.set(method, gate.promise);
+    return gate.resolve;
+  }
+
   async waitForCalls(method: string, count = 1, timeoutMs = 5_000): Promise<RecordedRequest[]> {
     await this.waitForRequest((request) => request.method === method && this.calls(method).length >= count, timeoutMs);
     return this.calls(method);
@@ -102,6 +109,11 @@ export class FakeTelegram {
     try { payload = await request.json() as Record<string, any>; } catch { /* empty body */ }
     this.requests.push({ method, payload });
     for (const receive of this.requestWaiters) receive({ method, payload });
+    const gate = this.responseGates.get(method);
+    if (gate) {
+      this.responseGates.delete(method);
+      await gate;
+    }
     const ok = (result: unknown) => Response.json({ ok: true, result });
     switch (method) {
       case "getMe":
