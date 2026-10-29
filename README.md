@@ -38,14 +38,6 @@ curl -fsSL https://raw.githubusercontent.com/molefrog/tgfx/main/scripts/install-
 cargo install --locked --git https://github.com/molefrog/tgfx.git
 ```
 
-**Build from source** (binary: `target/release/tgfx`):
-
-```sh
-git clone https://github.com/molefrog/tgfx.git
-cd tgfx
-cargo build --release --locked
-```
-
 ## Run
 
 Install [𝒇x](https://fx.sh) and create a bot with [@BotFather](https://t.me/BotFather), then:
