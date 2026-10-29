@@ -7,14 +7,14 @@ import { FakeTelegram } from "./fixtures/fake-telegram";
 const binary=process.env.TGFX_RUST_BINARY??resolve(process.env.CARGO_TARGET_DIR??"target","debug/tgfx");
 const cleanups:(()=>Promise<void>)[]=[];
 afterEach(async()=>{for(const f of cleanups.splice(0).reverse())await f();});
-async function setup(extra:Record<string,unknown>={}){
+async function setup(extra:Record<string,unknown>={}, fxEnv:Record<string,string>={}){
  const dir=await realpath(await mkdtemp(join("/tmp","tgfx-native-e2e-")));cleanups.push(()=>rm(dir,{recursive:true,force:true}));
  const telegram=new FakeTelegram();cleanups.push(()=>telegram.stop());
  const home=join(dir,"home");const hash=createHash("sha256").update(dir).digest("hex").slice(0,12);
  const configPath=join(home,"projects",`${dir.split('/').at(-1)}-${hash}.json`);
  await Bun.write(configPath,JSON.stringify({version:1,activeBotId:"100",access:{userIds:["42"],chatIds:[]},approvals:{chatId:"42",topicId:"0"},output:"live",customIcons:false,...extra}));
  const fx=join(dir,"fx");await writeFile(fx,`#!/bin/sh\nexec '${process.execPath.replaceAll("'","'\\''")}' '${resolve("tests/fixtures/fake-fx.ts").replaceAll("'","'\\''")}' "$@"\n`);await chmod(fx,0o700);
- const env:Record<string,string|undefined>={...process.env,TGFX_HOME:home,TGFX_API_ROOT:telegram.url,TELEGRAM_BOT_TOKEN:"100:native-fixture",FX_BINARY:fx,FAKE_FX_LOG:join(dir,"fx.jsonl")};delete env.TGFX_RUNTIME_DIR;
+ const env:Record<string,string|undefined>={...process.env,...fxEnv,TGFX_HOME:home,TGFX_API_ROOT:telegram.url,TELEGRAM_BOT_TOKEN:"100:native-fixture",FX_BINARY:fx,FAKE_FX_LOG:join(dir,"fx.jsonl")};delete env.TGFX_RUNTIME_DIR;
  let child:Bun.Subprocess<"ignore","pipe","pipe">;let stdout:Promise<string>,stderr:Promise<string>;
  const start=async()=>{child=Bun.spawn([binary,"--no-tui","--json"],{cwd:dir,env,stdin:"ignore",stdout:"pipe",stderr:"pipe"});stdout=new Response(child.stdout).text();stderr=new Response(child.stderr).text();await Promise.race([telegram.waitForCalls("getUpdates",telegram.calls("getUpdates").length+1,10_000),child.exited.then(async()=>{throw new Error(`Native TGFX exited: ${await stderr}`)})]);};
  const stop=async()=>{if(child&&child.exitCode===null){child.kill("SIGTERM");const timed=setTimeout(()=>child.kill("SIGKILL"),5000);await child.exited;clearTimeout(timed);}return{out:await stdout,err:await stderr};};cleanups.push(async()=>{await stop();});
@@ -82,3 +82,65 @@ test("external events use the destination chat style", async () => {
     expect(JSON.stringify(reply.payload.rich_message).includes('"type":"details"')).toBe(chat === "43");
   }
 }, 25_000);
+
+async function modelMenu(f: Awaited<ReturnType<typeof setup>>) {
+  f.telegram.sendUserMessage({ userId: 42, text: "/model" });
+  const menu = await f.telegram.waitForRequest(r => r.method === "sendMessage" && Boolean(findData(r.payload, "model:")));
+  return findData(menu.payload, "model:")!.split(":").slice(0, 2).join(":");
+}
+async function menuClick(f: Awaited<ReturnType<typeof setup>>, prefix: string, action: string) {
+  const before = f.telegram.calls("editMessageText").length;
+  callback(f.telegram, `${prefix}:${action}`);
+  try { return (await f.telegram.waitForCalls("editMessageText", before + 1)).at(-1)!.payload; }
+  catch (error) { throw new Error(`Menu action ${action}: ${JSON.stringify(f.telegram.calls("answerCallbackQuery").map(c => c.payload))}; ACP ${JSON.stringify((await f.fxLog()).filter(x => x.event === "set_config_option"))}`, { cause: error }); }
+}
+test("model settings apply through ACP and return to the same model page", async () => {
+  const f = await setup({}, { FAKE_FX_SETTINGS: "1" });
+  const prefix = await modelMenu(f);
+  await menuClick(f, prefix, "v.2.1");
+  await menuClick(f, prefix, "c.e");
+  const effort = await menuClick(f, prefix, "a.e.1");
+  expect(findData(effort, `${prefix}:v.2.0`)).toBeDefined();
+  expect(JSON.stringify(effort)).toContain("Effort · High");
+  for (const [index, label] of [[1, "Fast"], [2, "Ultrafast"], [0, "Regular"]] as const) {
+    const submenu = await menuClick(f, prefix, "c.f");
+    expect(submenu.reply_markup.inline_keyboard[0]).toHaveLength(3);
+    const view = await menuClick(f, prefix, `a.f.${index}`);
+    expect(JSON.stringify(view)).toContain(`Speed · ${label}`);
+    expect(findData(view, `${prefix}:v.2.0`)).toBeDefined();
+  }
+  const writes = (await f.fxLog()).filter(x => x.event === "set_config_option").map(x => [x.value.configId, x.value.value]);
+  expect(writes).toEqual([["effort", "high"], ["fast", true], ["ultrafast", true], ["fast", false], ["ultrafast", false]]);
+}, 25_000);
+
+test("selecting a model refreshes its supported controls without closing the menu", async () => {
+  const f = await setup({}, { FAKE_FX_SETTINGS: "1" });
+  const prefix = await modelMenu(f);
+  const view = await menuClick(f, prefix, "s.1");
+  expect(view.text).toContain("claude-opus");
+  expect(findData(view, `${prefix}:c.`)).toBeUndefined();
+  expect(findData(view, `${prefix}:x`)).toBeDefined();
+});
+
+test("rejected setting leaves the menu usable and does not show success", async () => {
+  const f = await setup({}, { FAKE_FX_SETTINGS: "1", FAKE_FX_REJECT_SETTINGS: "1" });
+  const prefix = await modelMenu(f);
+  await menuClick(f, prefix, "c.e");
+  const id = callback(f.telegram, `${prefix}:a.e.1`);
+  const answer = await f.telegram.waitForRequest(r => r.method === "answerCallbackQuery" && r.payload.callback_query_id === id);
+  expect(answer.payload.text).toContain("could not apply");
+  const back = await menuClick(f, prefix, "b");
+  expect(JSON.stringify(back)).toContain("Effort · Default");
+});
+
+test("effort stays unchanged while a turn is running", async () => {
+  const f = await setup({}, { FAKE_FX_SETTINGS: "1" });
+  const prefix = await modelMenu(f);
+  f.telegram.sendUserMessage({ userId: 42, text: "WAIT" });
+  await f.telegram.waitForCalls("sendRichMessageDraft");
+  const id = callback(f.telegram, `${prefix}:a.e.1`);
+  const answer = await f.telegram.waitForRequest(r => r.method === "answerCallbackQuery" && r.payload.callback_query_id === id);
+  expect(answer.payload.text).toContain("current turn");
+  expect((await f.fxLog()).filter(x => x.event === "set_config_option")).toHaveLength(0);
+  f.telegram.sendUserMessage({ userId: 42, text: "/stop" });
+}, 20_000);

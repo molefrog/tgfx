@@ -15,7 +15,7 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 - [x] Three reply styles (`/format`), from a quiet final answer to a live draft with tool activity
 - [x] Can work in DMs and groups
 - [x] Can send stickers and react to messages
-- [x] Interactive model picker (`/model`)
+- [x] Interactive model picker with reasoning effort and Regular / Fast / Ultrafast speed controls (`/model`, when supported by the model)
 - [x] Conversation compaction (`/compact`) and fresh starts (`/clear`), with inline confirmation buttons
 - [x] Cost reports (`/cost`)
 - [x] Approval cards for destructive actions

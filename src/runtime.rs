@@ -1893,18 +1893,11 @@ impl Inner {
             &self.options.bot.id,
             &route.key,
             "model_picker",
-            &json!({"options":options,"currentValue":model["currentValue"]}),
+            &json!({"options":options,"currentValue":model["currentValue"],"configOptions":config}),
             &interaction_expiry(10),
         )?;
-        let view = telegram::model_picker(
-            &options,
-            model["currentValue"].as_str().unwrap_or(""),
-            &id,
-            None,
-            0,
-            self.config().custom_icons,
-        )
-        .context("Empty model picker")?;
+        let view = telegram::model_menu(&config, &id, None, 0, None, self.config().custom_icons)
+            .context("Empty model picker")?;
         let mut params = telegram::route_params(route);
         merge(&mut params, &view);
         if let Err(error) = self.options.telegram.call("sendMessage", params).await {
@@ -1912,15 +1905,7 @@ impl Inner {
             let mut params = telegram::route_params(route);
             merge(
                 &mut params,
-                &telegram::model_picker(
-                    &options,
-                    model["currentValue"].as_str().unwrap_or(""),
-                    &id,
-                    None,
-                    0,
-                    false,
-                )
-                .unwrap(),
+                &telegram::model_menu(&config, &id, None, 0, None, false).unwrap(),
             );
             self.options.telegram.call("sendMessage", params).await?;
         }
@@ -2167,70 +2152,135 @@ impl Inner {
                         .await?;
                     return Ok(false);
                 };
-                let stored: Value = serde_json::from_str(i["payload_json"].as_str().unwrap())?;
-                let options = stored["options"].as_array().cloned().unwrap_or_default();
-                let current = stored["currentValue"].as_str().unwrap_or("");
+                let mut stored: Value = serde_json::from_str(i["payload_json"].as_str().unwrap())?;
+                let mut config = stored["configOptions"].as_array().cloned().unwrap_or_else(|| {
+                    vec![json!({"id":"model","type":"select","options":stored["options"],"currentValue":stored["currentValue"]})]
+                });
+                let mut provider = stored["provider"].as_u64().map(|n| n as usize);
+                let mut page = stored["page"].as_u64().unwrap_or(0) as usize;
                 let action = value.split('.').collect::<Vec<_>>();
+                let mut panel = None;
                 match action.first().copied() {
                     Some("x") => {
                         self.state.expire_interaction(id)?;
                         edit["text"] = json!("Model picker closed");
                         edit["reply_markup"] = json!({"inline_keyboard":[]});
                     }
-                    Some("s") => {
-                        let option = action
-                            .get(1)
+                    Some("s") | Some("a") => {
+                        let model_selection = action[0] == "s";
+                        if !model_selection && lock(&self.active).contains_key(&route.key) {
+                            self.answer_callback(
+                                callback_id,
+                                "Wait for the current turn to finish, or use /stop.",
+                            )
+                            .await?;
+                            return Ok(false);
+                        }
+                        let choices = if model_selection {
+                            stored["options"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|o| json!({"name":o["name"],"changes":[["model",o["value"]]]}))
+                                .collect::<Vec<_>>()
+                        } else {
+                            telegram::model_setting_choices(
+                                &config,
+                                action.get(1).copied().unwrap_or(""),
+                            )
+                        };
+                        let choice = action
+                            .get(if model_selection { 1 } else { 2 })
                             .and_then(|s| s.parse::<usize>().ok())
-                            .and_then(|n| options.get(n));
-                        if let Some(option) = option
-                            && self
-                                .state
-                                .resolve_interaction(id, &json!({"model":option["value"]}))?
-                        {
-                            let model = option["value"].as_str().context("Model value missing")?;
-                            let queued = lock(&self.active).contains_key(&route.key);
-                            if queued {
-                                lock(&self.pending_models).insert(route.key.clone(), model.into());
-                            } else {
-                                self.session(&route.key, Some(route))
-                                    .await?
-                                    .set_config_option("model", model)
-                                    .await?;
-                            }
+                            .and_then(|n| choices.get(n));
+                        let Some(choice) = choice else {
+                            self.answer_callback(
+                                callback_id,
+                                "This choice is no longer available. Reopen /model.",
+                            )
+                            .await?;
+                            return Ok(false);
+                        };
+                        let changes = choice["changes"]
+                            .as_array()
+                            .context("Missing configuration changes")?;
+                        if model_selection && lock(&self.active).contains_key(&route.key) {
+                            let model = changes[0][1].as_str().context("Model value missing")?;
+                            lock(&self.pending_models).insert(route.key.clone(), model.into());
+                            self.state
+                                .resolve_interaction(id, &json!({"model":model}))?;
                             edit["text"] = json!(format!(
-                                "{} {}",
-                                if queued {
-                                    "Model will change for the next turn:"
-                                } else {
-                                    "Model changed:"
-                                },
-                                option["name"].as_str().unwrap_or(model)
+                                "Model will change for the next turn: {}",
+                                choice["name"].as_str().unwrap_or(model)
                             ));
                             edit["reply_markup"] = json!({"inline_keyboard":[]});
+                        } else {
+                            let session = self.session(&route.key, Some(route)).await?;
+                            for change in changes {
+                                let result = session
+                                    .set_config_option(
+                                        change[0].as_str().context("Configuration ID missing")?,
+                                        change[1]
+                                            .as_str()
+                                            .context("Configuration value missing")?,
+                                    )
+                                    .await;
+                                if let Err(error) = result {
+                                    self.log(
+                                        "model.setting_failed",
+                                        json!({"error":error.to_string()}),
+                                    );
+                                    self.answer_callback(
+                                        callback_id,
+                                        "FX could not apply this choice. Reopen /model to refresh.",
+                                    )
+                                    .await?;
+                                    return Ok(false);
+                                }
+                            }
+                            config = session.config_options();
                         }
                     }
                     Some("p") | Some("v") => {
-                        let provider = if action[0] == "v" {
+                        provider = if action[0] == "v" {
                             action.get(1).and_then(|s| s.parse().ok())
                         } else {
                             None
                         };
-                        let page = action
+                        page = action
                             .get(if provider.is_some() { 2 } else { 1 })
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0);
-                        if let Some(view) = telegram::model_picker(
-                            &options,
-                            current,
-                            id,
-                            provider,
-                            page,
-                            self.config().custom_icons,
-                        ) {
-                            merge(&mut edit, &view);
-                        }
                     }
-                    _ => {}
+                    Some("c") => {
+                        panel = action.get(1).copied();
+                    }
+                    Some("b") => {}
+                    _ => {
+                        self.answer_callback(callback_id, "").await?;
+                        return Ok(false);
+                    }
+                }
+                if edit.get("text").is_none() {
+                    if let Some(view) = telegram::model_menu(
+                        &config,
+                        id,
+                        provider,
+                        page,
+                        panel,
+                        self.config().custom_icons,
+                    ) {
+                        merge(&mut edit, &view);
+                    }
+                    stored["configOptions"] = json!(config);
+                    if let Some(model) = config.iter().find(|o| o["id"] == "model") {
+                        stored["options"] = json!(flatten_options(&model["options"]));
+                        stored["currentValue"] = model["currentValue"].clone();
+                    }
+                    stored["provider"] = json!(provider);
+                    stored["page"] = json!(page);
+                    self.state.update_interaction_payload(id, &stored)?;
                 }
                 self.answer_callback(callback_id, "").await?;
                 if edit.get("text").is_some() {

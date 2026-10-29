@@ -500,11 +500,13 @@ impl FxSession {
         } else {
             json!(value)
         };
+        let mut request = json!({"sessionId":self.session_id(),"configId":id,"value":value});
+        if option["type"] == "boolean" {
+            request["type"] = json!("boolean");
+        }
         let response = self
             .cx()?
-            .send_request(decode::<SetSessionConfigOptionRequest>(
-                json!({"sessionId":self.session_id(),"configId":id,"value":value}),
-            )?)
+            .send_request(decode::<SetSessionConfigOptionRequest>(request)?)
             .block_task()
             .await?;
         let options = wire(&response)["configOptions"]

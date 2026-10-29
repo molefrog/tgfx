@@ -191,6 +191,158 @@ pub fn model_picker(
         },
     )
 }
+
+fn config_value(option: &Value) -> String {
+    option["currentValue"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| option["currentValue"].to_string())
+}
+
+fn select_options(option: &Value) -> Vec<Value> {
+    fn flatten(options: &Value, out: &mut Vec<Value>) {
+        for option in options.as_array().into_iter().flatten() {
+            if option["value"].is_string() {
+                out.push(option.clone());
+            } else {
+                flatten(&option["options"], out);
+            }
+        }
+    }
+    let mut out = vec![];
+    flatten(&option["options"], &mut out);
+    out
+}
+
+fn supports_toggle(option: &Value) -> bool {
+    option["type"] == "boolean"
+        || ["false", "true"]
+            .iter()
+            .all(|value| select_options(option).iter().any(|o| o["value"] == *value))
+}
+
+/// Each choice carries the exact ACP writes, including disabling both speed lanes.
+pub fn model_setting_choices(config: &[Value], panel: &str) -> Vec<Value> {
+    if panel == "e" {
+        return config
+            .iter()
+            .find(|o| o["id"] == "effort")
+            .map(select_options)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|o| {
+                let value = o["value"].as_str().unwrap_or_default();
+                let name = match value {
+                    "auto" => "Default",
+                    "xhigh" => "Extra high",
+                    "high" => "High",
+                    "medium" => "Medium",
+                    "low" => "Low",
+                    _ => o["name"].as_str().unwrap_or(value),
+                };
+                json!({"name":name,"value":value,"changes":[["effort",value]]})
+            })
+            .collect();
+    }
+    if panel != "f" {
+        return vec![];
+    }
+    let toggles = config
+        .iter()
+        .filter(|o| (o["id"] == "fast" || o["id"] == "ultrafast") && supports_toggle(o))
+        .collect::<Vec<_>>();
+    if toggles.is_empty() {
+        return vec![];
+    }
+    let mut choices = vec![
+        json!({"name":"Regular","value":"regular","changes":toggles.iter().map(|o|json!([o["id"],"false"])).collect::<Vec<_>>()}),
+    ];
+    for (id, name) in [("fast", "Fast"), ("ultrafast", "Ultrafast")] {
+        if toggles.iter().any(|o| o["id"] == id) {
+            choices.push(json!({"name":name,"value":id,"changes":[[id,"true"]]}));
+        }
+    }
+    choices
+}
+
+fn current_setting(config: &[Value], panel: &str) -> String {
+    if panel == "e" {
+        return config
+            .iter()
+            .find(|o| o["id"] == "effort")
+            .map(config_value)
+            .unwrap_or_default();
+    }
+    for id in ["ultrafast", "fast"] {
+        if config
+            .iter()
+            .any(|o| o["id"] == id && config_value(o) == "true")
+        {
+            return id.into();
+        }
+    }
+    "regular".into()
+}
+
+/// Keep the model list and its settings in one card, with small focused submenus.
+pub fn model_menu(
+    config: &[Value],
+    id: &str,
+    provider: Option<usize>,
+    page: usize,
+    panel: Option<&str>,
+    icons: bool,
+) -> Option<Value> {
+    let model = config.iter().find(|o| o["id"] == "model")?;
+    let options = select_options(model);
+    let mut view = model_picker(&options, &config_value(model), id, provider, page, icons)?;
+    let mut settings = vec![];
+    for (key, title) in [("e", "Effort"), ("f", "Speed")] {
+        let choices = model_setting_choices(config, key);
+        if choices.is_empty() {
+            continue;
+        }
+        let current = current_setting(config, key);
+        let label = choices
+            .iter()
+            .find(|o| o["value"] == current)
+            .and_then(|o| o["name"].as_str())
+            .unwrap_or(&current);
+        settings.push(json!({"text":format!("{title} · {label} ›"),"callback_data":format!("model:{id}:c.{key}")}));
+    }
+    if let Some(panel) = panel {
+        let choices = model_setting_choices(config, panel);
+        if choices.is_empty() {
+            return Some(view);
+        }
+        let current = current_setting(config, panel);
+        let buttons = choices.iter().enumerate().map(|(index, o)| {
+            json!({"text":format!("{}{}",if o["value"]==current{"✓ "}else{""},o["name"].as_str().unwrap_or_default()),"callback_data":format!("model:{id}:a.{panel}.{index}")})
+        }).collect::<Vec<_>>();
+        let mut rows = buttons
+            .chunks(if panel == "f" { 3 } else { 2 })
+            .map(|row| json!(row))
+            .collect::<Vec<_>>();
+        rows.push(json!([{"text":"‹ Models","callback_data":format!("model:{id}:b")},{"text":"Close","callback_data":format!("model:{id}:x")}]));
+        let (title, hint) = if panel == "e" {
+            (
+                "Reasoning effort",
+                "How much the model thinks before answering. Default lets FX choose.",
+            )
+        } else {
+            (
+                "Response speed",
+                "Choose a speed lane for this model. Faster lanes may cost more.",
+            )
+        };
+        view["text"] = json!(format!("<b>{title}</b>\n\n{hint}"));
+        view["reply_markup"]["inline_keyboard"] = json!(rows);
+    } else if !settings.is_empty() {
+        let rows = view["reply_markup"]["inline_keyboard"].as_array_mut()?;
+        rows.insert(rows.len().saturating_sub(1), json!(settings));
+    }
+    Some(view)
+}
 pub fn icon_set() -> Value {
     json!({"name":"ai_provider_labs_by_fxharness_bot","title":"tgfx icons","url":"https://t.me/addemoji/ai_provider_labs_by_fxharness_bot","ownerBot":"fxharness_bot"})
 }

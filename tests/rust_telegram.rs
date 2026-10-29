@@ -315,3 +315,35 @@ async fn continuous_stream_updates_do_not_postpone_commits() {
     Arc::try_unwrap(stream).ok().unwrap().stop().await;
     server.abort();
 }
+
+#[test]
+fn model_menu_only_offers_supported_settings_and_marks_the_active_choice() {
+    let mut config = vec![
+        json!({"id":"model","currentValue":"grok-4.7","options":[{"value":"grok-4.7","name":"Grok"}]}),
+        json!({"id":"effort","currentValue":"auto","options":[{"group":"Thinking","options":[{"value":"auto","name":"default"},{"value":"high","name":"high"}]}]}),
+        json!({"id":"fast","type":"select","currentValue":"true","options":[{"value":"false","name":"off"},{"value":"true","name":"on"}]}),
+    ];
+    let view = model_menu(&config, "id", Some(0), 0, None, false).unwrap();
+    let rows = view["reply_markup"]["inline_keyboard"].as_array().unwrap();
+    assert_eq!(rows[rows.len() - 2][0]["text"], "Effort · Default ›");
+    assert_eq!(rows[rows.len() - 2][1]["text"], "Speed · Fast ›");
+    let speed = model_menu(&config, "id", Some(0), 0, Some("f"), false).unwrap();
+    assert_eq!(
+        speed["reply_markup"]["inline_keyboard"][0]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        speed["reply_markup"]["inline_keyboard"][0][1]["text"],
+        "✓ Fast"
+    );
+    assert_eq!(
+        model_setting_choices(&config, "f")[0]["changes"],
+        json!([["fast", "false"]])
+    );
+    config.truncate(1);
+    assert!(model_setting_choices(&config, "f").is_empty());
+    assert!(model_setting_choices(&config, "e").is_empty());
+}

@@ -681,6 +681,10 @@ impl State {
         self.connection()?.execute("UPDATE telegram_interactions SET payload_json=json_set(payload_json,'$.card',json(?)),updated_at=? WHERE interaction_id=?",params![card.to_string(),now(),id])?;
         Ok(())
     }
+    pub fn update_interaction_payload(&self, id: &str, payload: &Value) -> Result<()> {
+        self.connection()?.execute("UPDATE telegram_interactions SET payload_json=?,updated_at=? WHERE interaction_id=? AND state='pending'",params![payload.to_string(),now(),id])?;
+        Ok(())
+    }
     pub fn pending_approvals(&self, bot: &str) -> Result<Vec<Value>> {
         self.query("SELECT * FROM telegram_interactions WHERE bot_id=? AND state='pending' AND (kind='fx_permission' OR kind LIKE 'telegram_admin:%') ORDER BY updated_at",[bot])
     }

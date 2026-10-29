@@ -72,6 +72,9 @@ const availableModels = [...new Set([
 ])];
 let cancelled: (() => void) | undefined;
 let ignoreCancel = false;
+let effort = "auto";
+let fast = false;
+let ultrafast = false;
 
 const sessionState = () => ({
   modes: {
@@ -87,7 +90,12 @@ const sessionState = () => ({
     name: "Model",
     currentValue: model,
     options: availableModels.map((value) => ({ value, name: value })),
-  }],
+  }, ...(process.env.FAKE_FX_SETTINGS === "1" && !model.startsWith("anthropic/") ? [
+    { type: "select" as const, id: "effort", name: "Reasoning effort", currentValue: effort,
+      options: ["auto", "high", "low"].map(value => ({ value, name: value })) },
+    { type: "boolean" as const, id: "fast", name: "Fast", currentValue: fast },
+    { type: "boolean" as const, id: "ultrafast", name: "Ultrafast", currentValue: ultrafast },
+  ] : [])],
 });
 
 const app = agent({ name: "fake-fx" })
@@ -126,6 +134,14 @@ const app = agent({ name: "fake-fx" })
   })
   .onRequest(methods.agent.session.setConfigOption, ({ params }) => {
     record("set_config_option", params);
+    if (process.env.FAKE_FX_SETTINGS === "1" && params.configId !== "model") {
+      if (process.env.FAKE_FX_REJECT_SETTINGS === "1") throw new Error("setting rejected");
+      if (params.configId === "effort" && ["auto", "high", "low"].includes(String(params.value))) effort = String(params.value);
+      else if (params.configId === "fast" && typeof params.value === "boolean") { fast = params.value; if (fast) ultrafast = false; }
+      else if (params.configId === "ultrafast" && typeof params.value === "boolean") { ultrafast = params.value; if (ultrafast) fast = false; }
+      else throw new Error("unsupported setting");
+      return { configOptions: sessionState().configOptions };
+    }
     if (params.configId !== "model" || typeof params.value !== "string" || !availableModels.includes(params.value)) {
       throw new Error("unsupported fake config option");
     }
