@@ -241,6 +241,7 @@ export class TgfxApp {
   private readonly stickerTemporaryDirectories = new Set<string>();
   private readonly routeLabels = new Map<string, RouteLabel>();
   private readonly queueWaiting = new Map<string, number>();
+  private readonly queueNotified = new Set<string>();
   private resumePolling?: () => void;
   private readonly pollAbort = new AbortController();
   private readonly config: TgfxConfig;
@@ -711,25 +712,48 @@ export class TgfxApp {
       || (callback && ["fxp", "mcp", "model", "cost", REPLY_STYLE_CALLBACK, SESSION_ACTION_CALLBACK].includes(callback))
       || (payload.kind === "session_action" && payload.action === "clear");
     if (!control) {
-      this.enqueue(inboxId, key);
+      this.enqueue(inboxId, key, payload.kind === "message" ? payload.message.route : undefined);
       return;
     }
     const task = this.dispatch(inboxId).finally(() => this.controls.delete(task));
     this.controls.add(task);
   }
 
-  private enqueue(inboxId: number, routeKeyValue: string): void {
+  private enqueue(inboxId: number, routeKeyValue: string, messageRoute?: Route): void {
     const previous = this.queueTails.get(routeKeyValue) ?? Promise.resolve();
     // Waiting counts everything behind the item the route is busy with.
     const busy = this.queueTails.has(routeKeyValue);
     if (busy) this.setWaiting(routeKeyValue, (this.queueWaiting.get(routeKeyValue) ?? 0) + 1);
+    if (busy && messageRoute && !this.queueNotified.has(routeKeyValue)) {
+      this.queueNotified.add(routeKeyValue);
+      const stop = messageRoute.chatKind !== "private" && this.options.bot.username
+        ? `/stop@${this.options.bot.username}` : "/stop";
+      const notice = this.options.telegram.sendText(
+        messageRoute.chatId,
+        `Your message is queued. I'm still working on the previous request. Send ${stop} to cancel it and discard queued requests.`,
+        messageRoute.topicId,
+        {},
+        this.pollAbort.signal,
+      ).then(() => undefined).catch(error => {
+        if (!this.stopping) this.log({
+          event: "queue.notice_failed",
+          message: `Could not acknowledge queued message · ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+          chat: messageRoute.chatId,
+          topic: messageRoute.topicId,
+        });
+      }).finally(() => this.controls.delete(notice));
+      this.controls.add(notice);
+    }
     const next = previous.catch(() => undefined).then(() => {
       if (busy) this.setWaiting(routeKeyValue, (this.queueWaiting.get(routeKeyValue) ?? 1) - 1);
       return this.dispatch(inboxId);
     });
     let tail!: Promise<void>;
     tail = next.finally(() => {
-      if (this.queueTails.get(routeKeyValue) === tail) this.queueTails.delete(routeKeyValue);
+      if (this.queueTails.get(routeKeyValue) === tail) {
+        this.queueTails.delete(routeKeyValue);
+        this.queueNotified.delete(routeKeyValue);
+      }
     });
     this.queueTails.set(routeKeyValue, tail);
   }
@@ -768,7 +792,10 @@ export class TgfxApp {
       if (!this.stopping && this.events.get(event.id)?.status === "queued") await this.runExternal(event);
     });
     const tail = next.finally(() => {
-      if (this.queueTails.get(key) === tail) this.queueTails.delete(key);
+      if (this.queueTails.get(key) === tail) {
+        this.queueTails.delete(key);
+        this.queueNotified.delete(key);
+      }
     });
     this.queueTails.set(key, tail);
   }
@@ -880,7 +907,8 @@ export class TgfxApp {
       this.state.coalesceInbox(primary.row.id, {
         kind: "forwarded", messages: messages.map(({ payload }) => payload.message),
       } satisfies PersistedPayload, messages.slice(1).map(({ row }) => row.id));
-      this.enqueue(primary.row.id, key);
+      this.enqueue(primary.row.id, key, messages.some(({ payload }) => this.invokesAgent(payload.message))
+        ? primary.payload.message.route : undefined);
       return;
     }
     const combined = {
@@ -907,7 +935,7 @@ export class TgfxApp {
       { kind: "message", message: combined } satisfies PersistedPayload,
       messages.slice(1).map(({ row }) => row.id),
     );
-    this.enqueue(primary.row.id, key);
+    this.enqueue(primary.row.id, key, this.invokesAgent(combined) ? combined.route : undefined);
   }
 
   private async dispatch(inboxId: number): Promise<void> {
@@ -1683,7 +1711,10 @@ export class TgfxApp {
       if (clear && !this.stopping) await this.runClear(message.route, message.historySeq);
     } finally {
       done.resolve();
-      if (this.queueTails.get(message.route.key) === barrier) this.queueTails.delete(message.route.key);
+      if (this.queueTails.get(message.route.key) === barrier) {
+        this.queueTails.delete(message.route.key);
+        this.queueNotified.delete(message.route.key);
+      }
     }
   }
 

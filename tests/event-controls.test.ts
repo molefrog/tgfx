@@ -56,6 +56,14 @@ async function harness(options: { group?: boolean } = {}) {
       const ready = Promise.withResolvers<void>(); waiters.set(id, ready.resolve);
       await withTimeout(ready.promise, 5000, () => { throw new Error(`Event ${id} timed out`); });
     },
+    async inactive() {
+      const deadline = Date.now() + 5000;
+      // Let the completed turn's promise callbacks release its queue tail.
+      do {
+        if (Date.now() >= deadline) throw new Error("Event context stayed active");
+        await new Promise<void>(resolve => setImmediate(resolve));
+      } while (state.activeContext(`100:${options.group ? "-42" : "42"}:0`));
+    },
     async restart() {
       await app.stop(); await running;
       const polls = telegram.calls("getUpdates").length;
@@ -112,6 +120,32 @@ test.each(["stop", "clear"] as const)("/%s cancels queued external work and pres
     await h.restart();
     expect(h.app.eventJob("queued")?.status).toBe("cancelled");
     expect((await h.records()).filter(x => x.event === "prompt")).toHaveLength(2);
+  } finally { await h.close(); }
+});
+
+test("an external queue tail resets Telegram notices for the next busy period", async () => {
+  const h = await harness();
+  const notices = () => h.telegram.calls("sendMessage").filter(r => String(r.payload.text).includes("Your message is queued"));
+  try {
+    h.app.emitExternal({ id: "first", name: "PERMISSION", chatId: "42" });
+    const approval = await h.telegram.waitForRequest(r => r.method === "sendMessage" && r.payload.reply_markup);
+    h.telegram.sendUserMessage({ userId: 42, text: "first follow-up" });
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && notices().length === 1);
+    h.app.emitExternal({ id: "tail", name: "finish the queue", chatId: "42" });
+    h.telegram.push({ callback_query: { id: "allow-first", chat_instance: "test",
+      data: approval.payload.reply_markup.inline_keyboard[0][0].callback_data,
+      from: { id: 42, is_bot: false, first_name: "Owner" },
+      message: { message_id: 2000, date: 1, chat: { id: 42, type: "private" } },
+    } } as Omit<Update, "update_id">);
+    await h.done("tail");
+    await h.inactive();
+    h.app.emitExternal({ id: "next", name: "WAIT", chatId: "42" });
+    await h.prompted(4);
+    h.telegram.sendUserMessage({ userId: 42, text: "second follow-up" });
+    await h.telegram.waitForRequest(r => r.method === "sendMessage" && notices().length === 2);
+    expect(notices()).toHaveLength(2);
+    h.telegram.sendUserMessage({ userId: 42, text: "/stop" });
+    await h.done("next");
   } finally { await h.close(); }
 });
 
