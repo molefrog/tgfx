@@ -120,19 +120,6 @@ users. The socket is then mode 0660. Do not share that directory or group with
 the agent/tool user. FX's environment strips this variable; filesystem
 permissions enforce the boundary even if the agent learns the socket path.
 
-## Session controls
-
-`/clear` and `/compact` first show a confirmation with buttons inside the message
-text, using Telegram Bot API 10.3's `RichTextButton`. Nothing changes until the
-person who sent the command presses the confirmation button. Cancel keeps the
-conversation and running task unchanged. Confirmations expire after five
-minutes; sending another session command replaces the pending confirmation.
-
-Confirming `/clear` stops the current task, discards queued requests, and starts
-a fresh conversation on the next message. It does not delete files or Telegram
-messages. Confirming `/compact` queues compaction after existing work. `/stop`
-still acts immediately and also discards queued compaction.
-
 ## Groups and reply settings
 
 By default, bots only respond in groups when mentioned or replied to.
