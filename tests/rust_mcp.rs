@@ -554,7 +554,6 @@ async fn shared_download_permissions_survive_restrictive_umask() {
                 "--nocapture",
             ])
             .env("TGFX_TEST_SHARED_FIXTURE", "1")
-            .env("TGFX_SHARED_FILES", "1")
             .status()
             .unwrap();
         assert!(status.success());
@@ -564,7 +563,10 @@ async fn shared_download_permissions_survive_restrictive_umask() {
         libc::umask(0o077);
     }
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("downloads");
+    let shared_root = temp.path().join("downloads");
+    std::fs::create_dir(&shared_root).unwrap();
+    std::fs::set_permissions(&shared_root, std::fs::Permissions::from_mode(0o2750)).unwrap();
+    let root = shared_root.join("100");
     let path = safe_download_path(&root, "ctx_shared", "file").unwrap();
     let parent = path.parent().unwrap();
     assert_eq!(
@@ -574,6 +576,26 @@ async fn shared_download_permissions_survive_restrictive_umask() {
     assert_eq!(
         std::fs::metadata(parent).unwrap().permissions().mode() & 0o7777,
         0o2750
+    );
+    let preview = temporary_download_directory(&root, "preview-").unwrap();
+    assert!(preview.path().starts_with(root.canonicalize().unwrap()));
+    assert_eq!(
+        std::fs::metadata(preview.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o2750
+    );
+    let private_root = temp.path().join("private");
+    let private_file = safe_download_path(&private_root, "ctx_private", "file").unwrap();
+    assert_eq!(
+        std::fs::metadata(private_file.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o700
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/file", listener.local_addr().unwrap());
@@ -585,12 +607,23 @@ async fn shared_download_permissions_survive_restrictive_umask() {
         .await
         .unwrap()
     });
-    write_response_limited(reqwest::get(url).await.unwrap(), &path, 100)
+    write_response_limited(reqwest::get(&url).await.unwrap(), &path, 100)
         .await
         .unwrap();
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o640
+    );
+    write_response_limited(reqwest::get(url).await.unwrap(), &private_file, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&private_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
     );
     server.abort();
 }

@@ -109,7 +109,9 @@ impl Running {
             )
             .with_state(mock.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let policy = root.path().join("policy.json");
+        let runtime = root.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let policy = runtime.join("policy.json");
         std::fs::write(&policy,json!({"version":1,"activeBotId":"100","access":{"userIds":["42","43"],"chatIds":["-9"]},"approvals":{"chatId":"42","topicId":"0"}}).to_string()).unwrap();
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -158,7 +160,7 @@ impl Running {
             ])
             .arg(&workspace)
             .env("TELEGRAM_BOT_TOKEN", "100:fake")
-            .env("TGFX_POLICY_FILE", &policy)
+            .env("TGFX_RUNTIME_DIR", &runtime)
             .env("TGFX_HOME", root.path().join("home"))
             .env("TGFX_API_ROOT", format!("http://{addr}"))
             .env("FX_BINARY", &wrapper)
@@ -297,7 +299,7 @@ fn text(value: &Value) -> String {
 async fn shared_memory_tracks_chat_topics_and_background_sessions_independently() {
     let r = Running::start_with_defaults("final", &[], json!({"memory":{"file":"notes.md"}})).await;
     let path = r.root.path().join("workspace/notes.md");
-    let socket = r.root.path().join("home/state/100.events.sock");
+    let socket = r.root.path().join("runtime/events.sock");
     for (step, contents, expected) in [
         (0, Some("# Facts\nShared fact.\n"), "<memory "),
         (
@@ -452,13 +454,50 @@ async fn native_stop_matches_active_draft_without_discarding_queued_work() {
 #[tokio::test]
 async fn background_events_are_durable_and_do_not_receive_telegram_capabilities() {
     let r = Running::start("final").await;
-    let socket = r.root.path().join("home/state/100.events.sock");
-    let job=tgfx::event_socket::event_request(&socket,&json!({"op":"emit","event":{"id":"event-one","name":"email.received","payload":{"message_id":"separate-fetch"}}})).await.unwrap();
+    let socket = r.root.path().join("runtime/events.sock");
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_tgfx"))
+        .args([
+            "emit",
+            "email.received",
+            "--id",
+            "event-one",
+            "--payload",
+            r#"{"message_id":"separate-fetch"}"#,
+        ])
+        .current_dir(r.root.path())
+        .env("TGFX_RUNTIME_DIR", r.root.path().join("runtime"))
+        .env("TGFX_HOME", r.root.path().join("unrelated-home"))
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let job: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(job["destination"], "100:background");
     r.event(|v| v["event"] == "external.done" && v["id"] == "event-one")
         .await;
     let duplicate=tgfx::event_socket::event_request(&socket,&json!({"op":"emit","event":{"id":"event-one","name":"email.received","payload":{"message_id":"separate-fetch"}}})).await.unwrap();
     assert_eq!(duplicate["status"], "done");
+    let discovered = tokio::process::Command::new(env!("CARGO_BIN_EXE_tgfx"))
+        .args(["emit", "--status", "event-one"])
+        .current_dir(r.root.path().join("workspace"))
+        .env("TGFX_HOME", r.root.path().join("home"))
+        .env_remove("TGFX_RUNTIME_DIR")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        discovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&discovered.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&discovered.stdout).unwrap()["status"],
+        "done"
+    );
     assert!(
         !r.mock
             .calls
@@ -698,7 +737,7 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
 #[tokio::test]
 async fn cancelling_an_external_event_during_acp_startup_frees_the_route() {
     let r = Running::start_with_env("final", &[("RUNTIME_HANG_INITIALIZE_ONCE", "1")]).await;
-    let socket = r.root.path().join("home/state/100.events.sock");
+    let socket = r.root.path().join("runtime/events.sock");
     tgfx::event_socket::event_request(
         &socket,
         &json!({"op":"emit","event":{"id":"startup","name":"test","chatId":"42"}}),
@@ -724,7 +763,7 @@ async fn cancelling_an_external_event_during_delivery_preserves_an_uncertain_out
     r.mock
         .hang_sends
         .store(true, std::sync::atomic::Ordering::Release);
-    let socket = r.root.path().join("home/state/100.events.sock");
+    let socket = r.root.path().join("runtime/events.sock");
     tgfx::event_socket::event_request(
         &socket,
         &json!({"op":"emit","event":{"id":"delivery","name":"test","chatId":"42"}}),

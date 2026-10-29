@@ -14,8 +14,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 pub const MAX_EVENT_REQUEST: usize = 300 * 1024;
 pub fn events_socket_path(database: &Path) -> PathBuf {
-    if let Some(p) = std::env::var_os("TGFX_EVENTS_SOCKET") {
-        return PathBuf::from(p);
+    if let Some(dir) = crate::config::runtime_dir() {
+        return dir.join("events.sock");
     }
     database.with_extension("events.sock")
 }
@@ -57,7 +57,7 @@ where
     let listener = UnixListener::bind(path)?;
     private_mode(
         path,
-        if std::env::var_os("TGFX_EVENTS_SOCKET").is_some() {
+        if crate::config::runtime_dir().is_some() {
             0o660
         } else {
             0o600
@@ -114,16 +114,45 @@ pub async fn event_request(path: &Path, request: &Value) -> Result<Value> {
     .context("TGFX event request timed out")?
 }
 pub fn discover_events_socket(workspace: &Path) -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("TGFX_EVENTS_SOCKET") {
-        return Ok(p.into());
+    if let Some(dir) = crate::config::runtime_dir() {
+        return Ok(dir.join("events.sock"));
     }
-    let config =
-        crate::config::load(workspace)?.context("No TGFX configuration for this folder")?;
-    let paths = crate::config::workspace_paths(&config.active_bot_id, workspace)?;
-    let info: Value = serde_json::from_slice(&std::fs::read(&paths.lock_info)?)?;
-    ensure!(
-        info["workspace"].as_str() == Some(paths.workspace.to_string_lossy().as_ref()),
-        "TGFX is running in a different workspace"
-    );
-    Ok(events_socket_path(&paths.database))
+    let workspace = workspace.canonicalize()?;
+    let state = crate::config::tgfx_home().join("state");
+    let active = crate::config::load(&workspace)?.map(|config| config.active_bot_id);
+    let mut socket = None;
+    for entry in std::fs::read_dir(state).context("TGFX is not running")? {
+        let path = entry?.path();
+        if !path.to_string_lossy().ends_with(".info.json") {
+            continue;
+        }
+        let info: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let saved_workspace = info["workspace"]
+            .as_str()
+            .and_then(|path| Path::new(path).canonicalize().ok());
+        if saved_workspace.as_deref() != Some(workspace.as_path())
+            || active
+                .as_deref()
+                .is_some_and(|bot| info["botId"].as_str() != Some(bot))
+        {
+            continue;
+        }
+        ensure!(
+            socket.is_none(),
+            "Multiple TGFX bots are running in this folder; set TGFX_RUNTIME_DIR"
+        );
+        let legacy = path.with_file_name(format!(
+            "{}.events.sock",
+            info["botId"]
+                .as_str()
+                .context("Invalid TGFX runtime info")?
+        ));
+        socket = Some(
+            info["eventsSocket"]
+                .as_str()
+                .map(PathBuf::from)
+                .unwrap_or(legacy),
+        );
+    }
+    socket.context("TGFX is not running in this folder")
 }

@@ -131,7 +131,7 @@ async fn main() {
 fn need_terminal() -> Result<()> {
     if !io::stdin().is_terminal() {
         bail!(
-            "Setup requires an interactive terminal. Initialize this folder first or supply TELEGRAM_BOT_TOKEN and TGFX_POLICY_FILE."
+            "Setup requires an interactive terminal. Initialize this folder first or supply TELEGRAM_BOT_TOKEN and policy.json in TGFX_RUNTIME_DIR."
         )
     };
     Ok(())
@@ -764,17 +764,7 @@ async fn doctor(w: &Path, structured: bool) -> Result<()> {
 async fn emit(a: Emit, w: &Path) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     let w = config::absolute(w)?;
-    let path = if let Some(p) = std::env::var_os("TGFX_EVENTS_SOCKET") {
-        PathBuf::from(p)
-    } else {
-        let c = required(&w)?;
-        let p = config::workspace_paths(&c.active_bot_id, &w)?;
-        let info = config::read_json(&p.lock_info)?.context("TGFX is not running")?;
-        if info["workspace"].as_str() != Some(w.to_string_lossy().as_ref()) {
-            bail!("TGFX is running in another workspace")
-        };
-        p.database.with_extension("events.sock")
-    };
+    let path = tgfx::event_socket::discover_events_socket(&w)?;
     async fn request(path: &Path, p: &Value) -> Result<Value> {
         let socket = tokio::net::UnixStream::connect(path)
             .await

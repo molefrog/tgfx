@@ -26,6 +26,15 @@ pub fn tgfx_home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".fx/telegram"))
 }
+pub fn runtime_dir() -> Option<PathBuf> {
+    std::env::var_os("TGFX_RUNTIME_DIR").map(PathBuf::from)
+}
+fn read_policy() -> Result<Option<Value>> {
+    match runtime_dir() {
+        Some(dir) => read_json(&dir.join("policy.json")),
+        None => Ok(None),
+    }
+}
 pub fn absolute(path: &Path) -> Result<PathBuf> {
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -128,11 +137,7 @@ pub fn read_json(path: &Path) -> Result<Option<Value>> {
 }
 pub fn load(workspace: &Path) -> Result<Option<Config>> {
     let stored = read_json(&project_path(workspace)?)?;
-    let policy = if let Some(path) = std::env::var_os("TGFX_POLICY_FILE") {
-        Some(read_json(Path::new(&path))?.context("Required TGFX policy file is missing")?)
-    } else {
-        None
-    };
+    let policy = read_policy()?;
     if stored.is_none() && policy.is_none() {
         return Ok(None);
     }
@@ -199,15 +204,13 @@ pub fn save_settings(workspace: &Path, config: &Config, changed: &[&str]) -> Res
     let effective = serde_json::to_value(config)?;
     let current = read_json(&project_path(workspace)?)?.unwrap_or(json!({}));
     let mut value = json!({"workspace":absolute(workspace)?});
-    if let Some(path) = std::env::var_os("TGFX_POLICY_FILE") {
-        let policy =
-            read_json(Path::new(&path))?.context("Required TGFX policy file is missing")?;
+    if let Some(policy) = read_policy()? {
         let p: Config = serde_json::from_value(policy)?;
         validate(&p)?;
         let p = serde_json::to_value(p)?;
         for key in ["version", "activeBotId", "access", "approvals"] {
             if effective[key] != p[key] {
-                bail!("Access is managed by TGFX_POLICY_FILE; edit that policy as its owner")
+                bail!("Access is managed by policy.json; edit that file as its owner")
             }
         }
     }
@@ -232,8 +235,8 @@ pub fn save_settings(workspace: &Path, config: &Config, changed: &[&str]) -> Res
     write_private_json(&project_path(workspace)?, &value)
 }
 pub fn assert_policy_writable() -> Result<()> {
-    if std::env::var_os("TGFX_POLICY_FILE").is_some() {
-        bail!("Access is managed by TGFX_POLICY_FILE; edit that policy as its owner")
+    if read_policy()?.is_some() {
+        bail!("Access is managed by policy.json; edit that file as its owner")
     };
     Ok(())
 }

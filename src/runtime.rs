@@ -184,7 +184,8 @@ impl Runtime {
                 .state
                 .adopt_workspace(&inner.options.workspace.to_string_lossy())?;
             inner.state.revoke_active_contexts(&inner.options.bot.id)?;
-            let broker_dir = if std::env::var_os("TGFX_MCP_SOCKET_DIR").is_none() {
+            let runtime_dir = config::runtime_dir();
+            let broker_dir = if runtime_dir.is_none() {
                 Some(
                     tempfile::Builder::new()
                         .prefix("tgfx-mcp-")
@@ -193,8 +194,8 @@ impl Runtime {
             } else {
                 None
             };
-            let broker_path = std::env::var_os("TGFX_MCP_SOCKET_DIR")
-                .map(PathBuf::from)
+            let broker_path = runtime_dir
+                .map(|dir| dir.join("mcp"))
                 .or_else(|| broker_dir.as_ref().map(|d| d.path().to_owned()))
                 .context("MCP socket directory missing")?;
             let exe = std::env::current_exe()?.to_string_lossy().into_owned();
@@ -1336,7 +1337,6 @@ impl Inner {
                 "TGFX_API_ROOT",
                 "TGFX_INTERNAL_TELEGRAM_API_ROOT",
                 "TGFX_INTERNAL_TELEGRAM_FILE_ROOT",
-                "TGFX_SHARED_FILES",
             ] {
                 if let Ok(value) = std::env::var(key) {
                     env.insert(key.into(), value);

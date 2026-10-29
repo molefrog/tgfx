@@ -14,7 +14,7 @@ async function setup(extra:Record<string,unknown>={}){
  const configPath=join(home,"projects",`${dir.split('/').at(-1)}-${hash}.json`);
  await Bun.write(configPath,JSON.stringify({version:1,activeBotId:"100",access:{userIds:["42"],chatIds:[]},approvals:{chatId:"42",topicId:"0"},output:"live",customIcons:false,...extra}));
  const fx=join(dir,"fx");await writeFile(fx,`#!/bin/sh\nexec '${process.execPath.replaceAll("'","'\\''")}' '${resolve("tests/fixtures/fake-fx.ts").replaceAll("'","'\\''")}' "$@"\n`);await chmod(fx,0o700);
- const env:Record<string,string|undefined>={...process.env,TGFX_HOME:home,TGFX_API_ROOT:telegram.url,TELEGRAM_BOT_TOKEN:"100:native-fixture",FX_BINARY:fx,FAKE_FX_LOG:join(dir,"fx.jsonl")};delete env.TGFX_POLICY_FILE;delete env.TGFX_EVENTS_SOCKET;
+ const env:Record<string,string|undefined>={...process.env,TGFX_HOME:home,TGFX_API_ROOT:telegram.url,TELEGRAM_BOT_TOKEN:"100:native-fixture",FX_BINARY:fx,FAKE_FX_LOG:join(dir,"fx.jsonl")};delete env.TGFX_RUNTIME_DIR;
  let child:Bun.Subprocess<"ignore","pipe","pipe">;let stdout:Promise<string>,stderr:Promise<string>;
  const start=async()=>{child=Bun.spawn([binary,"--no-tui","--json"],{cwd:dir,env,stdin:"ignore",stdout:"pipe",stderr:"pipe"});stdout=new Response(child.stdout).text();stderr=new Response(child.stderr).text();await Promise.race([telegram.waitForCalls("getUpdates",telegram.calls("getUpdates").length+1,10_000),child.exited.then(async()=>{throw new Error(`Native TGFX exited: ${await stderr}`)})]);};
  const stop=async()=>{if(child&&child.exitCode===null){child.kill("SIGTERM");const timed=setTimeout(()=>child.kill("SIGKILL"),5000);await child.exited;clearTimeout(timed);}return{out:await stdout,err:await stderr};};cleanups.push(async()=>{await stop();});
