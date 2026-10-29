@@ -32,6 +32,32 @@ async function events(path: string): Promise<Array<{ event: string; value: any }
 }
 
 describe("FX ACP transport", () => {
+  test("synchronizes memory into prompts and reloads it after compaction", async () => {
+    const fake = await fakeBinary();
+    const memory = join(fake.directory, "MEMORY.md");
+    await writeFile(memory, "# Invoices\nInclude currency.\n");
+    const session = new FxRouteSession({ workspace: fake.directory, binary: fake.binary });
+    const prompt = (text: string) => session.prompt([{ type: "text", text }]);
+    try {
+      await prompt("First request");
+      await writeFile(memory, "# Invoices\nInclude currency.\n\n# Vendors\nUse legal names.\n");
+      await prompt("Second request");
+      await writeFile(memory, "# Invoices\nInclude currency and deadline.\n");
+      await prompt("Third request");
+      await prompt("Fourth request");
+      await prompt("/compact");
+      await prompt("Fifth request");
+      const prompts = (await events(fake.log)).filter(e => e.event === "prompt").map(e => e.value.prompt);
+      expect(prompts[0][0].text).toContain('<memory source="MEMORY.md">');
+      expect(prompts[1][0].text).toContain('action="append"');
+      expect(prompts[1][0].text).not.toContain("Include currency");
+      expect(prompts[2][0].text).toContain('action="reread"');
+      expect(prompts[3]).toEqual([{ type: "text", text: "Fourth request" }]);
+      expect(prompts[4]).toEqual([{ type: "text", text: "/compact" }]);
+      expect(prompts[5][0].text).toContain("Include currency and deadline");
+    } finally { await session.dispose(); }
+  });
+
   test.each(["max_tokens", "max_output_tokens", "max_turn_requests", "max_model_turns", "refusal", "refused", "cancelled"])(
     "rejects an unfinished prompt with stop reason %s",
     async (reason) => {

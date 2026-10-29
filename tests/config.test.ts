@@ -48,6 +48,15 @@ function bare(): Omit<TgfxConfig, "output" | "customIcons"> {
 }
 
 describe("workspace config", () => {
+  test("persists memory settings and inherits them from global defaults", async () => {
+    const root = isolate("tgfx-memory-config-");
+    const paths = projectPaths(root);
+    await saveGlobalConfig({ version: 1, defaults: { memory: { enabled: true, file: "notes.md" } } });
+    await saveConfig(paths, config());
+    expect((await loadConfig(paths))?.memory).toEqual({ enabled: true, file: "notes.md" });
+    await saveConfig(paths, (await loadConfig(paths))!, { memory: { enabled: false } });
+    expect((await loadConfig(paths))?.memory).toEqual({ enabled: false, file: "MEMORY.md" });
+  });
   test("operator policy overrides stored access while keeping preferences writable", async () => {
     const root = isolate("tgfx-policy-");
     const paths = projectPaths(root);

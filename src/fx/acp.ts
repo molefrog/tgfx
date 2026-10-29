@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { withTimeout } from "../timeout";
 import { VERSION } from "../version";
+import { SessionMemory, type MemoryOptions } from "../memory";
 
 export type FxSessionInfo = {
   sessionId: string;
@@ -123,6 +124,7 @@ export class FxRouteSession {
   private stderr = "";
   private acceptingSteering = false;
   private readonly steering = new Set<Promise<acp.PromptResponse>>();
+  private readonly memory: SessionMemory;
 
   get canSteer(): boolean { return this.acceptingSteering && this.usable; }
 
@@ -149,7 +151,8 @@ export class FxRouteSession {
     previousSessionId?: string;
     onDispose?: () => void;
     mcp?: McpOptions;
-  }) {}
+    memory?: MemoryOptions;
+  }) { this.memory = new SessionMemory(options.workspace, options.memory); }
 
   async start(): Promise<FxSessionInfo> {
     if (!this.usable) throw this.connectionError ?? new Error("fx ACP session is closed");
@@ -343,13 +346,17 @@ export class FxRouteSession {
     blocks: acp.ContentBlock[],
     handlers: { permission?: FxPermissionHandler; signal?: AbortSignal } = {},
   ): Promise<acp.PromptResponse> {
-    const bytes = Buffer.byteLength(JSON.stringify(blocks));
-    if (bytes > MAX_PROMPT_BYTES) {
-      throw new Error(`Telegram prompt is too large for ACP (${bytes} bytes; limit ${MAX_PROMPT_BYTES})`);
-    }
     await this.start();
     if (this.connectionError) throw this.connectionError;
     if (!this.context || !this.sessionId) throw new Error("fx ACP session is not ready");
+    if (handlers.signal?.aborted) throw handlers.signal.reason;
+    const compact = blocks.length === 1 && blocks[0]?.type === "text" && blocks[0].text.trim() === "/compact";
+    const memory = compact ? undefined : await this.memory.prepare();
+    const prompt = memory?.block ? [memory.block, ...blocks] : blocks;
+    const bytes = Buffer.byteLength(JSON.stringify(prompt));
+    if (bytes > MAX_PROMPT_BYTES) {
+      throw new Error(`Telegram prompt is too large for ACP (${bytes} bytes; limit ${MAX_PROMPT_BYTES})`);
+    }
     if (handlers.signal?.aborted) throw handlers.signal.reason;
     this.currentPermission = handlers.permission;
     let cancelTimer: ReturnType<typeof setTimeout> | undefined;
@@ -362,7 +369,7 @@ export class FxRouteSession {
       this.acceptingSteering = true;
       const response = await this.context.request(acp.methods.agent.session.prompt, {
         sessionId: this.sessionId,
-        prompt: blocks,
+        prompt,
       });
       this.acceptingSteering = false;
       // Keep listeners/permissions alive for a steer that FX turns into a late follow-up.
@@ -380,6 +387,8 @@ export class FxRouteSession {
               : reason === "cancelled" ? "was cancelled" : `stopped (${reason})`;
         throw new Error(`FX ${detail}. The request may be unfinished.`);
       }
+      if (compact) this.memory.reset();
+      else memory?.commit();
       return response;
     } finally {
       this.acceptingSteering = false;
