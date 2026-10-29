@@ -78,6 +78,13 @@ impl Running {
         Self::start_with_env(output, &[]).await
     }
     async fn start_with_env(output: &str, extra_env: &[(&str, &str)]) -> Self {
+        Self::start_with_defaults(output, extra_env, json!({})).await
+    }
+    async fn start_with_defaults(
+        output: &str,
+        extra_env: &[(&str, &str)],
+        defaults: Value,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("tgfx-runtime-")
             .tempdir_in("/tmp")
@@ -106,6 +113,12 @@ impl Running {
         std::fs::write(&policy,json!({"version":1,"activeBotId":"100","access":{"userIds":["42","43"],"chatIds":["-9"]},"approvals":{"chatId":"42","topicId":"0"}}).to_string()).unwrap();
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(root.path().join("home")).unwrap();
+        std::fs::write(
+            root.path().join("home/config.json"),
+            json!({"version":1,"defaults":defaults}).to_string(),
+        )
+        .unwrap();
         let wrapper = root.path().join("fx-fixture");
         std::fs::write(
             &wrapper,
@@ -279,6 +292,73 @@ impl Running {
 }
 fn text(value: &Value) -> String {
     value.to_string()
+}
+#[tokio::test]
+async fn shared_memory_tracks_chat_topics_and_background_sessions_independently() {
+    let r =
+        Running::start_with_defaults("answer", &[], json!({"memory":{"file":"notes.md"}})).await;
+    let path = r.root.path().join("workspace/notes.md");
+    let socket = r.root.path().join("home/state/100.events.sock");
+    for (step, contents, expected) in [
+        (0, Some("# Facts\nShared fact.\n"), "<memory "),
+        (
+            1,
+            Some("# Facts\nShared fact.\n\n# Added\nNew fact.\n"),
+            "action=\"append\"",
+        ),
+        (2, Some("# Facts\nChanged fact.\n"), "action=\"reread\""),
+        (3, Some("# Facts\nChanged fact.\n"), ""),
+        (4, None, "action=\"clear\""),
+    ] {
+        if let Some(contents) = contents {
+            std::fs::write(&path, contents).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+        for (name, destination) in [
+            ("dm", json!({"chatId":"42"})),
+            ("topic", json!({"chatId":"-9","topicId":"17"})),
+            ("background", json!({})),
+        ] {
+            let id = format!("memory-{step}-{name}");
+            let mut event = destination;
+            event["id"] = json!(id);
+            event["name"] = json!("memory.test");
+            tgfx::event_socket::event_request(&socket, &json!({"op":"emit","event":event}))
+                .await
+                .unwrap();
+            r.event(|v| v["event"] == "external.done" && v["id"] == id)
+                .await;
+            let requests = r.fx();
+            let prompt = &requests
+                .iter()
+                .rev()
+                .find(|v| v["method"] == "session/prompt")
+                .unwrap()["params"]["prompt"];
+            let first = prompt[0]["text"].as_str().unwrap();
+            if expected.is_empty() {
+                assert!(!first.starts_with("<memory"));
+            } else {
+                assert!(first.contains(expected), "{id}: {first}");
+                assert!(first.contains("source=\"notes.md\""));
+            }
+            if step == 1 {
+                assert!(first.contains("New fact."));
+                assert!(!first.contains("Shared fact."));
+            }
+            if step == 2 {
+                assert!(!first.contains("Changed fact."));
+            }
+        }
+    }
+    assert_eq!(
+        r.fx()
+            .iter()
+            .filter(|v| v["method"] == "session/new")
+            .count(),
+        3
+    );
+    r.stop().await;
 }
 #[tokio::test]
 async fn route_queues_controls_stop_and_format_remain_independent() {

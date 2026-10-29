@@ -161,12 +161,11 @@ pub fn sections(source: &str) -> Vec<Section> {
             let at = lines[n.data().sourcepos.start.line - 1];
             let name = n
                 .descendants()
-                .filter_map(|c| {
-                    if let NodeValue::Text(t) = &c.data().value {
-                        Some(t.to_string())
-                    } else {
-                        None
-                    }
+                .filter_map(|c| match &c.data().value {
+                    NodeValue::Text(t) => Some(t.to_string()),
+                    NodeValue::Code(c) => Some(c.literal.to_string()),
+                    NodeValue::SoftBreak | NodeValue::LineBreak => Some("\n".into()),
+                    _ => None,
                 })
                 .collect::<String>();
             if at == 0 {
