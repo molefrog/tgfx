@@ -12,7 +12,7 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 
 - [x] Rich replies: markdown, tables, code blocks, spoilers, TeX math
 - [x] Live streaming while the agent works, renders tool calls nicely
-- [x] Three reply styles saved per DM (`/format`): Final, Live, and Detailed
+- [x] Three reply styles (`/format`), from a quiet final answer to a live draft with tool activity
 - [x] Can work in DMs and groups
 - [x] Can send stickers and react to messages
 - [x] Interactive model picker (`/model`)
@@ -26,32 +26,30 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 
 ## Install
 
-You need [𝒇x 0.0.15+](https://fx.sh) with a provider set up, and a bot token
-from [@BotFather](https://t.me/BotFather).
+You need an authenticated `fx 0.0.15+` and a bot
+token from [@BotFather](https://t.me/BotFather).
 
-**Recommended** (macOS and Linux):
+Install [𝒇x](https://fx.sh) and sign in with `fx login` (Vercel),
+`fx login codex` (ChatGPT), or `fx login grok` (Grok):
 
-```sh
+```bash
+# 0. Ensure fx is installed and authenticated
+curl -fsSL https://fx.sh/setup.sh | bash
+fx login
+
+# 1. Install the package (recommended, macOS and Linux)
 curl -fsSL https://raw.githubusercontent.com/molefrog/tgfx/main/scripts/install-release.sh | sh
-```
 
-**Cargo** (requires Rust and a C compiler):
-
-```sh
-cargo install --locked --git https://github.com/molefrog/tgfx.git
-```
-
-## Run
-
-Sign in with `fx login` (Vercel), `fx login codex` (ChatGPT), or
-`fx login grok` (Grok), then run 𝒕𝒈(𝒇x) in your project:
-
-```sh
-cd /path/to/project
+# 2. Grab a bot token from @BotFather, then run tgfx in your project folder.
+#    It walks you through authorization on the first run.
 tgfx
 ```
 
-The first run asks for your bot token and pairs your Telegram account.
+Or install with **Cargo** (requires Rust and a C compiler):
+
+```bash
+cargo install --locked --git https://github.com/molefrog/tgfx.git
+```
 
 Set `TELEGRAM_BOT_TOKEN` to override the saved token.
 
@@ -162,26 +160,28 @@ they happen.
 <table>
   <tr>
     <th align="center">Detailed</th>
-    <th align="center">Live (default)</th>
+    <th align="center">Live</th>
     <th align="center">Final</th>
   </tr>
   <tr>
-    <td width="240" align="center"><img src="assets/reply-live.webp" alt="Detailed: stream prose and tool calls as they happen" width="240" height="300"></td>
-    <td width="240" align="center"><img src="assets/reply-progress.webp" alt="Live: show status, then stream the answer" width="240" height="300"></td>
-    <td width="240" align="center"><img src="assets/reply-answer.webp" alt="Final: send the answer when the turn finishes" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-live.webp" alt="Detailed: the draft grows with prose and tool calls as they happen" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-progress.webp" alt="Live: a status line while fx works, then the answer streams in" width="240" height="300"></td>
+    <td width="240" align="center"><img src="assets/reply-answer.webp" alt="Final: one message with the answer once the turn finishes" width="240" height="300"></td>
   </tr>
   <tr>
-    <td align="center">Stream the answer and tool calls</td>
-    <td align="center">Show status, then stream the answer</td>
-    <td align="center">Send the answer when the turn finishes</td>
+    <td align="center"><code>detailed</code><br>Stream the answer and tool activity as they happen</td>
+    <td align="center"><code>live</code> (default)<br>Show live status drafts, then stream the final answer</td>
+    <td align="center"><code>final</code><br>Send the answer only when the full turn finishes</td>
   </tr>
 </table>
 
-Send `/format` in a DM to choose a reply style for that chat. Changes apply to
-new turns. Groups always use **Final**.
+Groups always get one message in **Final**. Changing a chat's style affects new turns.
 
-To override the default for DMs without a saved choice, use
-`--output final|live|detailed`, or set `~/.fx/telegram/config.json`:
+How to pick a reply style:
+
+- Start 𝒕𝒈(𝒇x) with `--output <mode>` to set the default for one run
+- Send `/format` to the bot in a DM and tap a button to save a choice for that chat
+- Set a machine-wide default in `~/.fx/telegram/config.json`:
 
 ```json
 { "defaults": { "output": "live" } }
@@ -245,21 +245,3 @@ service-owned setgid download root, and keep its parent protected from agent
 writes. The agent can copy downloads into its writable workspace to edit them.
 These options provide hooks for an OS boundary; they do not create a sandbox
 or isolate agents that still run as the same user.
-
-## Development
-
-```sh
-cargo build --locked
-cargo test --locked --all-targets
-```
-
-For the full verification suite, install Bun 1.4+ for the retained TypeScript
-behavior tests, then run:
-
-```sh
-bun install --frozen-lockfile
-./scripts/check-rust.sh
-```
-
-The TypeScript sources remain a compatibility reference. The primary executable
-is `src/main.rs`; `bin/tgfx` runs a locally built native binary.
