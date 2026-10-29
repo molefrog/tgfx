@@ -9,7 +9,7 @@ const record = (event: string, value: unknown = {}) => {
 };
 if (process.argv[2] === "--version") {
   record("version");
-  console.log(process.env.FAKE_FX_VERSION ?? "0.0.8");
+  console.log(process.env.FAKE_FX_VERSION ?? "0.0.15");
   process.exit(0);
 }
 if (process.argv[2] === "doctor") {

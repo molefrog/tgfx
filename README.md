@@ -26,6 +26,9 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 
 ## Install
 
+You need [𝒇x 0.0.15+](https://fx.sh) with a provider set up, and a bot token
+from [@BotFather](https://t.me/BotFather).
+
 **Recommended** (macOS and Linux):
 
 ```sh
@@ -40,15 +43,17 @@ cargo install --locked --git https://github.com/molefrog/tgfx.git
 
 ## Run
 
-Install [𝒇x](https://fx.sh) and create a bot with [@BotFather](https://t.me/BotFather), then:
+Sign in with `fx login` (Vercel), `fx login codex` (ChatGPT), or
+`fx login grok` (Grok), then run 𝒕𝒈(𝒇x) in your project:
 
 ```sh
-fx login
 cd /path/to/project
 tgfx
 ```
 
 The first run asks for your bot token and pairs your Telegram account.
+
+Set `TELEGRAM_BOT_TOKEN` to override the saved token.
 
 ## How it works
 
@@ -146,10 +151,13 @@ as context for later requests; it cannot fetch messages from before it joined.
 
 ## Reply style
 
-Send `/format` in a DM to choose a reply style for that chat. **Live** is the
-default, using Telegram's
+𝒕𝒈(𝒇x) has three reply styles, depending on whether you want the answer
+streamed and whether you want to see the full history of tool calls.
+
+By default, it streams the text using Telegram's new
 [live message drafts](https://telegram.org/blog/ai-bot-revolution-11-new-features#streaming-text-for-bots).
-Changes apply to new turns. Groups always use **Final**.
+In **Detailed**, tool calls are rendered as collapsible groups, in the order
+they happen.
 
 <table>
   <tr>
@@ -168,6 +176,9 @@ Changes apply to new turns. Groups always use **Final**.
     <td align="center">Send the answer when the turn finishes</td>
   </tr>
 </table>
+
+Send `/format` in a DM to choose a reply style for that chat. Changes apply to
+new turns. Groups always use **Final**.
 
 To override the default for DMs without a saved choice, use
 `--output final|live|detailed`, or set `~/.fx/telegram/config.json`:
@@ -190,10 +201,8 @@ To turn it off, start with `tgfx --no-icons`.
 
 ## MCP
 
-Each conversation receives TGFX's Telegram MCP server through a scoped Unix
-broker. It supplies Telegram files, reactions, stickers, choices, polls, history,
-and available group administration tools. Other MCP servers in your FX config
-are not inherited automatically in ACP mode.
+The agent uses Telegram actions, such as reactions and sending stickers,
+through the Telegram MCP that 𝒕𝒈(𝒇x) injects.
 
 ## Commands
 

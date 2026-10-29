@@ -275,8 +275,18 @@ async fn cli_preflight_and_usage_use_real_subprocess() {
         .await
         .unwrap();
     assert_eq!(usage["kind"], "usage");
-    assert!(tgfx::fx::preflight::assert_supported_version("0.0.7").is_err());
     assert!(tgfx::fx::usage::parse_usage("{}").is_err());
+}
+#[test]
+fn preflight_requires_fx_0_0_15_or_newer() {
+    use tgfx::fx::preflight::assert_supported_version;
+    for version in ["0.0.8", "0.0.14"] {
+        let error = assert_supported_version(version).unwrap_err();
+        assert!(error.to_string().contains("0.0.15"));
+    }
+    for version in ["0.0.15", "v0.0.15-dev", "0.1.0"] {
+        assert_supported_version(version).unwrap();
+    }
 }
 #[test]
 fn memory_is_transactional_and_handles_additions_edits_and_compaction() {
