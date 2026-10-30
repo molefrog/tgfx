@@ -37,8 +37,16 @@ pub fn provider_icons(stickers: Option<&[Value]>) -> HashMap<String, String> {
 }
 pub fn session_confirmation(action: &str, id: &str) -> Value {
     let clear = action == "clear";
+    let text = if clear {
+        json!(
+            "Clear this conversation? This stops the current task and discards queued requests. Files are kept."
+        )
+    } else {
+        json!([{"type":"bold","text":"Compact this conversation?"},
+            " Reduce context usage by turning earlier messages into a shorter summary."])
+    };
     json!({"blocks":[
-        {"type":"paragraph","text":if clear{"Clear this conversation? This stops the current task and discards queued requests. Files are kept."}else{"Compact this conversation? This summarizes the context after queued tasks finish."}},
+        {"type":"paragraph","text":text},
         {"type":"buttons","buttons":[{"text":if clear{"Clear conversation"}else{"Compact conversation"},"style":if clear{"danger"}else{"primary"},"callback_data":format!("session:{id}:confirm")}]},
         {"type":"buttons","buttons":[{"text":"Cancel","callback_data":format!("session:{id}:cancel")}]}
     ]})
