@@ -376,7 +376,7 @@ async fn broker_requires_capability_and_revocation_disconnects_child() {
     assert!(!broker.path.exists());
 }
 #[tokio::test]
-async fn official_mcp_transport_lists_tools_calls_and_reads_resources() {
+async fn official_mcp_transport_lists_tools_and_reads_recent_messages() {
     use rmcp::ServiceExt;
     let f = Fixture::new(false).await;
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
@@ -428,20 +428,66 @@ async fn official_mcp_transport_lists_tools_calls_and_reads_resources() {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
     )
     .await;
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 13);
     let result=exchange(&mut read,&mut write,json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_reaction","arguments":{"emoji":"🦀"}}})).await;
     assert_eq!(result["result"]["structuredContent"]["reacted"], true);
-    let resources=exchange(&mut read,&mut write,json!({"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"telegram://guidelines"}})).await;
     assert!(
-        resources["result"]["contents"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Replies are delivered automatically")
+        initialized["result"]["capabilities"]
+            .get("resources")
+            .is_none()
+    );
+    let recent=exchange(&mut read,&mut write,json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_recent_messages","arguments":{}}})).await;
+    assert_eq!(
+        recent["result"]["structuredContent"]["chat_recent"]["messages"][0]["ref"],
+        "msg_test"
     );
     drop(write);
     drop(read);
     task.abort();
 }
+#[tokio::test]
+async fn recent_messages_are_live_scoped_and_require_an_active_context() {
+    let f = Fixture::new(false).await;
+    {
+        let db = f.state.db.lock().unwrap();
+        for (reference, route, chat, expiry) in [
+            ("wrong-route", "123:-100:0", "-100", "2099-01-01T00:00:00Z"),
+            ("expired", "123:42:0", "42", "2000-01-01T00:00:00Z"),
+        ] {
+            db.execute("INSERT INTO telegram_messages(ref,bot_id,route_key,chat_id,topic_id,message_id,owned_by_bot,created_at,expires_at) VALUES(?,'123',?,?,'0','2',0,?,?)",params![reference,route,chat,now(),expiry]).unwrap();
+        }
+    }
+    let recent = f
+        .server
+        .execute("get_recent_messages", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        recent["chat_recent"]["messages"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(recent["chat_recent"]["messages"][0]["ref"], "msg_test");
+    assert!(
+        f.server
+            .execute("get_recent_messages", json!({"chat_id":"-100"}))
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .execute("UPDATE context_capabilities SET active=0", [])
+        .unwrap();
+    assert!(
+        f.server
+            .execute("get_recent_messages", json!({}))
+            .await
+            .is_err()
+    );
+    assert!(f.mock.calls.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn malformed_arguments_are_rejected_before_action_ledger() {
     let f = Fixture::new(false).await;
@@ -797,7 +843,7 @@ async fn check_native_proxy(modern: bool) {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":parameters}),
     )
     .await;
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 13);
     assert!(child.try_wait().unwrap().is_none());
     let mut call = json!({"name":"set_reaction","arguments":{"emoji":"🦀"}});
     if modern {

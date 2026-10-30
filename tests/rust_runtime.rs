@@ -914,6 +914,7 @@ async fn background_events_are_durable_and_do_not_receive_telegram_capabilities(
     let fx = r.fx();
     let new = fx.iter().find(|v| v["method"] == "session/new").unwrap();
     assert_eq!(new["params"]["mcpServers"], json!([]));
+    assert!(new["params"].get("_meta").is_none());
     let prompt = fx.iter().find(|v| v["method"] == "session/prompt").unwrap();
     assert!(text(prompt).contains("external_event"));
     assert!(!text(prompt).contains("telegram_message"));
@@ -1526,6 +1527,52 @@ async fn compaction_failure_replaces_the_same_card_privately() {
             .count(),
         1
     );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn telegram_guidance_is_a_new_session_system_prompt_without_a_resume_fallback() {
+    let mut r = Running::start("final").await;
+    r.message(1, 42, "FIRST_GUIDANCE_TURN");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("FIRST_GUIDANCE_TURN"))
+        .await;
+    let requests = r.fx();
+    let initialize = requests
+        .iter()
+        .find(|v| v["method"] == "initialize")
+        .unwrap();
+    assert_eq!(initialize["params"]["_meta"]["fx"]["terminal"], false);
+    let new = requests
+        .iter()
+        .find(|v| v["method"] == "session/new")
+        .unwrap();
+    assert_eq!(
+        new["params"]["_meta"]["fx"]["systemPrompt"],
+        json!([{"type":"text","text":tgfx::mcp::TELEGRAM_GUIDELINES}])
+    );
+    r.restart().await;
+    r.message(2, 42, "RESUMED_GUIDANCE_TURN");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("RESUMED_GUIDANCE_TURN"))
+        .await;
+    let requests = r.fx();
+    let load = requests
+        .iter()
+        .find(|v| v["method"] == "session/load")
+        .unwrap();
+    assert!(load["params"].get("_meta").is_none());
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|v| v["method"] == "session/new")
+            .count(),
+        1
+    );
+    for p in requests.iter().filter(|v| v["method"] == "session/prompt") {
+        let wire = p.to_string();
+        assert!(!wire.contains("session_bootstrap"));
+        assert!(!wire.contains("resource_read"));
+        assert!(!wire.contains("# Telegram guidelines"));
+    }
     r.stop().await;
 }
 

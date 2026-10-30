@@ -26,6 +26,7 @@ fn options(root: &std::path::Path) -> FxOptions {
         model: None,
         permission_mode: "auto".into(),
         mcp_servers: vec![],
+        system_prompt: None,
         memory: MemoryOptions::default(),
     }
 }

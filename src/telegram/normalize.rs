@@ -308,8 +308,7 @@ pub fn should_invoke_agent(m: &InboundMessage, bot: &BotIdentity, policy: &str) 
                         .is_some_and(|s| s.eq_ignore_ascii_case(u))
                 })))
 }
-pub const SESSION_BOOTSTRAP_INSTRUCTIONS: &str = "New session: first call the built-in mcp_features tool with {\"action\": \"resource_read\", \"server\": \"telegram\", \"uri\": \"telegram://guidelines\"} (no capability_search or mcp_search_tools needed). Output no text before this call and never mention the guidelines - silently apply them from now on.";
-pub fn to_envelope(m: &InboundMessage, bootstrap: bool) -> Value {
+pub fn to_envelope(m: &InboundMessage) -> Value {
     let mut sender = json!({"kind":m.sender.kind,"ref":m.sender.reference});
     if m.sender.kind == "user" {
         sender["user_id"] = json!(m.sender.id);
@@ -361,9 +360,6 @@ pub fn to_envelope(m: &InboundMessage, bootstrap: bool) -> Value {
                 .map(str::to_owned)
                 .unwrap_or_else(|| group.to_string())
         );
-    }
-    if bootstrap {
-        value["session_bootstrap"] = json!(SESSION_BOOTSTRAP_INSTRUCTIONS)
     }
     for (k, v) in [
         ("text_kind", json!(m.text_kind)),

@@ -33,6 +33,7 @@ pub struct FxOptions {
     pub model: Option<String>,
     pub permission_mode: String,
     pub mcp_servers: Vec<Value>,
+    pub system_prompt: Option<String>,
     pub memory: MemoryOptions,
 }
 #[derive(Debug)]
@@ -304,10 +305,19 @@ impl FxSession {
     }else{rejected};responder.respond(decode::<RequestPermissionResponse>(answer)?)})?;Ok(())
    },acp::on_receive_request!())
    .connect_with(acp::Lines::new(Box::pin(outgoing),Box::pin(incoming)),move|cx:ConnectionTo<Agent>|async move{
-    let init=cx.send_request(decode::<InitializeRequest>(json!({"protocolVersion":ProtocolVersion::V1,"clientCapabilities":{"session":{"configOptions":{"boolean":{}}}},"clientInfo":{"name":"tgfx","title":"𝒕𝒈(𝒇x)","version":env!("CARGO_PKG_VERSION")}}))?).block_task().await?;
+    let init=cx.send_request(decode::<InitializeRequest>(json!({"protocolVersion":ProtocolVersion::V1,"clientCapabilities":{"session":{"configOptions":{"boolean":{}}}},"clientInfo":{"name":"tgfx","title":"𝒕𝒈(𝒇x)","version":env!("CARGO_PKG_VERSION")},"_meta":{"fx":{"terminal":false}}}))?).block_task().await?;
     let initialized=wire(&init);let mut replaced=options.saved_session.is_some();
     let loaded=if initialized["agentCapabilities"]["loadSession"]==true{if let Some(saved)=&options.saved_session{cx.send_request(decode::<LoadSessionRequest>(json!({"sessionId":saved,"cwd":options.cwd,"mcpServers":options.mcp_servers}))?).block_task().await.ok().map(|r|(saved.clone(),wire(&r)))}else{None}}else{None};
-    let (sid,response)=if let Some(loaded)=loaded{replaced=false;loaded}else{let created=cx.send_request(decode::<NewSessionRequest>(json!({"cwd":options.cwd,"mcpServers":options.mcp_servers}))?).block_task().await?;(created.session_id.to_string(),wire(&created))};
+    let (sid,response)=if let Some(loaded)=loaded{replaced=false;loaded}else{
+     let mut params=json!({"cwd":options.cwd,"mcpServers":options.mcp_servers});
+     if let Some(prompt)=&options.system_prompt {
+      if !initialized["agentCapabilities"]["sessionCapabilities"]["systemPrompt"].is_object() {
+       return Err(acp::Error::internal_error().data("FX does not support the Telegram system prompt; update FX"));
+      }
+      // FX accepts this text-block extension independently of the evolving RFD wire shape.
+      params["_meta"]=json!({"fx":{"systemPrompt":[{"type":"text","text":prompt}]}});
+     }
+     let created=cx.send_request(decode::<NewSessionRequest>(params)?).block_task().await?;(created.session_id.to_string(),wire(&created))};
     let mut config=response["configOptions"].as_array().cloned().unwrap_or_default();
     if options.permission_mode=="auto"{
      let modes=response["modes"]["availableModes"].as_array();

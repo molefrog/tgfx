@@ -97,10 +97,14 @@ fn normalization_retains_media_location_reply_forward_and_anonymous_identity() {
         normalized.reply.as_ref().unwrap()["message_ref"],
         "known-11"
     );
-    let envelope = to_envelope(&normalized, true);
+    let envelope = to_envelope(&normalized);
     assert_eq!(envelope["telegram_message"]["forwarded"], true);
     assert_eq!(envelope["telegram_message"]["location"]["latitude"], 1);
-    assert!(envelope["telegram_message"]["session_bootstrap"].is_string());
+    assert!(
+        envelope["telegram_message"]
+            .get("session_bootstrap")
+            .is_none()
+    );
 }
 #[test]
 fn mentions_use_utf16_offsets_and_commands_ignore_other_bots() {

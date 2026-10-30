@@ -52,11 +52,7 @@ pub fn render(a: &Value) -> Result<Value> {
                 },
             ))?
         }
-        "envelope" => tgfx::telegram::to_envelope(
-            &serde_json::from_value(a["message"].clone())?,
-            a["bootstrap"].as_bool().unwrap_or(false),
-        ),
-        "bootstrap" => json!(tgfx::telegram::SESSION_BOOTSTRAP_INSTRUCTIONS),
+        "envelope" => tgfx::telegram::to_envelope(&serde_json::from_value(a["message"].clone())?),
         "authorized" => json!(tgfx::telegram::is_authorized(
             &serde_json::from_value(a["config"].clone())?,
             &serde_json::from_value(a["message"].clone())?

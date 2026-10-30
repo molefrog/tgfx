@@ -9,7 +9,7 @@ default-run = "tgfx"
 
 [dependencies]
 anyhow = "1"
-agent-client-protocol = { version = "=3.6.0", features = ["process", "stdio"] }
+agent-client-protocol = { version = "=3.6.0", features = ["process", "stdio", "unstable_session_system_prompt"] }
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }

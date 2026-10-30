@@ -73,7 +73,7 @@ for line in sys.stdin:
   if r.get("id") in permissions:permissions[r["id"]][1]=r.get("result");permissions[r["id"]][0].set()
   continue
  i=r.get("id");p=r.get("params",{});m=r["method"]
- if m=="initialize":result(i,{"protocolVersion":1,"agentCapabilities":{"loadSession":True},"agentInfo":{"name":"fx-fixture","version":"0.0.15"},"authMethods":[]})
+ if m=="initialize":result(i,{"protocolVersion":1,"agentCapabilities":{"loadSession":True,"sessionCapabilities":{"systemPrompt":{}}},"agentInfo":{"name":"fx-fixture","version":"0.0.15"},"authMethods":[]})
  elif m=="session/new":result(i,{"sessionId":"fixture","configOptions":visible_config()})
  elif m=="session/load":
   if p["sessionId"]=="missing":send({"jsonrpc":"2.0","id":i,"error":{"code":-32602,"message":"missing session"}})
