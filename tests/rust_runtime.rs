@@ -67,7 +67,7 @@ async fn api(
         "getStickerSet" => json!({"stickers":[]}),
         "getFile" => json!({"file_path":"stickers/fixture.webp"}),
         "getChatMember" => json!({"status":"member"}),
-        "sendMessage" if body.get("ephemeral_message_parameters").is_some() => {
+        "sendMessage" | "sendRichMessage" if body.get("ephemeral_message_parameters").is_some() => {
             json!({"ephemeral_message_id":mock.next.fetch_add(1,std::sync::atomic::Ordering::AcqRel),
                 "receiver_user":{"id":body["ephemeral_message_parameters"]["receiver_user_id"]}})
         }
@@ -1299,42 +1299,195 @@ async fn session_controls_reserve_order_before_delayed_telegram_ui_calls() {
     }
 }
 #[tokio::test]
-async fn nonstreaming_compaction_edits_its_visible_progress_message() {
-    let r = Running::start("final").await;
-    r.message(1, 42, "/compact");
-    let confirmation = r
-        .event(|event| event["event"] == "session.confirmation" && event["action"] == "compact")
-        .await;
-    r.callback(
-        2,
-        &format!("session:{}:confirm", confirmation["id"].as_str().unwrap()),
-        confirmation["message_id"].as_i64().unwrap(),
-    );
-    r.call(|method, params| {
-        method == "sendRichMessage" && text(params).contains("Compacting conversation")
-    })
-    .await;
-    let (_, completed) = r
-        .call(|method, params| {
-            method == "editMessageText" && text(params).contains("Conversation compacted")
-        })
-        .await;
-    r.event(|event| event["event"] == "turn.delivered").await;
-    let outbox = r
+async fn session_actions_replace_one_confirmation_in_every_output_mode() {
+    for mode in ["live", "final"] {
+        for (action, completed) in [("compact", "compacted"), ("clear", "cleared")] {
+            let r = Running::start(mode).await;
+            r.message(1, 42, &format!("/{action}"));
+            let confirmation = r.event(|e| e["event"] == "session.confirmation").await;
+            let card = confirmation["message_id"].as_i64().unwrap();
+            r.callback(
+                2,
+                &format!("session:{}:confirm", confirmation["id"].as_str().unwrap()),
+                card,
+            );
+            let (_, result) = r
+                .call(|m, p| m == "editMessageText" && text(p).contains(completed))
+                .await;
+            assert_eq!(result["message_id"], card);
+            let calls = r.mock.calls.lock().unwrap().clone();
+            let sends: Vec<_> = calls
+                .iter()
+                .filter(|(m, _)| {
+                    ["sendMessage", "sendRichMessage", "sendRichMessageDraft"].contains(&m.as_str())
+                })
+                .collect();
+            assert_eq!(sends.len(), 1, "one card for {action} in {mode}: {sends:?}");
+            let blocks = sends[0].1["rich_message"]["blocks"].as_array().unwrap();
+            assert_eq!(blocks.iter().filter(|b| b["type"] == "buttons").count(), 2);
+            assert!(
+                blocks
+                    .iter()
+                    .filter(|b| b["type"] == "buttons")
+                    .all(|b| b["buttons"].as_array().unwrap().len() == 1)
+            );
+            assert!(calls.iter().any(|(m, p)| m == "editMessageText"
+                && p["message_id"] == card
+                && text(p).contains(tgfx::fx::projector::LIVE_STATUS_EMOJI_ID)));
+            if action == "compact" {
+                assert_eq!(
+                    r.fx()
+                        .iter()
+                        .filter(|v| v["method"] == "session/prompt")
+                        .count(),
+                    1
+                );
+            }
+            r.stop().await;
+        }
+    }
+}
+
+fn private_session_callback(
+    r: &Running,
+    id: i64,
+    interaction: &str,
+    choice: &str,
+    card: i64,
+    user: i64,
+) {
+    r.updates.send(json!({"update_id":id,"callback_query":{
+        "id":format!("cb{id}"), "from":{"id":user,"is_bot":false},
+        "data":format!("session:{interaction}:{choice}"),
+        "message":{"ephemeral_message_id":card,"receiver_user":{"id":42},"chat":{"id":-9,"type":"supergroup"},"message_thread_id":7}
+    }})).unwrap();
+}
+
+#[tokio::test]
+async fn group_session_actions_stay_private_and_out_of_shared_history() {
+    for (action, completed) in [("clear", "cleared"), ("compact", "compacted")] {
+        let r = Running::start("live").await;
+        r.updates.send(json!({"update_id":1,"message":{
+            "ephemeral_message_id":91,"date":1,"chat":{"id":-9,"type":"supergroup"},"message_thread_id":7,
+            "from":{"id":42,"is_bot":false},"text":format!("/{action}@fixture_bot")
+        }})).unwrap();
+        let c = r.event(|e| e["event"] == "session.confirmation").await;
+        let card = c["message_id"].as_i64().unwrap();
+        private_session_callback(&r, 2, c["id"].as_str().unwrap(), "confirm", card, 42);
+        let (_, result) = r
+            .call(|m, p| m == "editEphemeralMessageText" && text(p).contains(completed))
+            .await;
+        assert_eq!(result["ephemeral_message_id"], card);
+        assert_eq!(result["receiver_user_id"], 42);
+        let calls = r.mock.calls.lock().unwrap().clone();
+        let sends: Vec<_> = calls
+            .iter()
+            .filter(|(m, p)| m.starts_with("send") && p["chat_id"] == "-9")
+            .collect();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(
+            sends[0].1["ephemeral_message_parameters"]["receiver_user_id"],
+            42
+        );
+        assert_eq!(sends[0].1["reply_parameters"]["ephemeral_message_id"], 91);
+        assert!(
+            !calls
+                .iter()
+                .any(|(m, p)| m == "editMessageText" && p["chat_id"] == "-9")
+        );
+        assert_eq!(
+            r.db()
+                .query_row("SELECT count(*) FROM chat_history", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        r.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn only_the_requester_can_confirm_and_cancel_never_runs_an_action() {
+    let r = Running::start("live").await;
+    // A public command from an older client still gets a private response.
+    r.message(1, -9, "/clear@fixture_bot");
+    let c = r.event(|e| e["event"] == "session.confirmation").await;
+    let card = c["message_id"].as_i64().unwrap();
+    let generation: i64 = r
         .db()
         .query_row(
-            "SELECT status,telegram_message_id FROM telegram_outbox",
+            "SELECT generation FROM routes WHERE route_key='100:-9:0'",
             [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(outbox.0, "sent");
-    assert_eq!(outbox.1, completed["message_id"].as_str().unwrap());
+    // Public command has no topic in this case.
+    for (id, user, choice) in [(2, 43, "confirm"), (3, 42, "cancel"), (4, 42, "confirm")] {
+        r.updates.send(json!({"update_id":id,"callback_query":{
+            "id":format!("cb{id}"),"from":{"id":user,"is_bot":false},"data":format!("session:{}:{choice}", c["id"].as_str().unwrap()),
+            "message":{"ephemeral_message_id":card,"chat":{"id":-9,"type":"supergroup"}}
+        }})).unwrap();
+        r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == format!("cb{id}"))
+            .await;
+    }
+    r.call(|m, p| m == "editEphemeralMessageText" && text(p).contains("Cancelled"))
+        .await;
+    assert!(r.fx().is_empty());
+    assert_eq!(
+        r.db()
+            .query_row(
+                "SELECT generation FROM routes WHERE route_key='100:-9:0'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        generation
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn rejected_private_confirmations_never_fall_back_to_public_messages() {
+    let r = Running::start("live").await;
+    r.mock
+        .reject_ephemeral
+        .store(true, std::sync::atomic::Ordering::Release);
+    r.message(1, -9, "/clear@fixture_bot");
+    r.event(|e| e["event"] == "update.failed").await;
+    let calls = r.mock.calls.lock().unwrap().clone();
     assert!(
-        r.fx()
+        calls
             .iter()
-            .filter(|v| v["method"] == "session/prompt")
-            .all(|v| v["params"]["prompt"] == json!([{"type":"text","text":"/compact"}]))
+            .filter(|(m, _)| ["sendMessage", "sendRichMessage"].contains(&m.as_str()))
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
+    assert!(r.fx().is_empty());
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn compaction_failure_replaces_the_same_card_privately() {
+    let r = Running::start_with_env("live", &[("RUNTIME_COMPACT_FAIL", "1")]).await;
+    r.message(1, -9, "/compact@fixture_bot");
+    let c = r.event(|e| e["event"] == "session.confirmation").await;
+    r.updates.send(json!({"update_id":2,"callback_query":{
+        "id":"cb2","from":{"id":42,"is_bot":false},"data":format!("session:{}:confirm", c["id"].as_str().unwrap()),
+        "message":{"ephemeral_message_id":c["message_id"],"chat":{"id":-9,"type":"supergroup"}}
+    }})).unwrap();
+    let (_, failure) = r
+        .call(|m, p| m == "editEphemeralMessageText" && text(p).contains("Could not compact"))
+        .await;
+    assert_eq!(failure["ephemeral_message_id"], c["message_id"]);
+    r.event(|e| e["event"] == "update.failed").await;
+    assert_eq!(
+        r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| ["sendMessage", "sendRichMessage"].contains(&m.as_str()))
+            .count(),
+        1
     );
     r.stop().await;
 }

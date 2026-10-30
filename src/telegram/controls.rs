@@ -37,7 +37,11 @@ pub fn provider_icons(stickers: Option<&[Value]>) -> HashMap<String, String> {
 }
 pub fn session_confirmation(action: &str, id: &str) -> Value {
     let clear = action == "clear";
-    json!({"blocks":[{"type":"paragraph","text":[if clear{"Start a fresh conversation? This stops the current task and discards queued requests. Files are kept. "}else{"Compact this conversation? FX summarizes context after queued tasks finish. "},{"type":"button","button":{"text":if clear{"Clear conversation"}else{"Compact conversation"},"style":if clear{"danger"}else{"primary"},"callback_data":format!("session:{id}:confirm")}}," ",{"type":"button","button":{"text":"Cancel","style":"link","callback_data":format!("session:{id}:cancel")}}]}]})
+    json!({"blocks":[
+        {"type":"paragraph","text":if clear{"Clear this conversation? This stops the current task and discards queued requests. Files are kept."}else{"Compact this conversation? This summarizes the context after queued tasks finish."}},
+        {"type":"buttons","buttons":[{"text":if clear{"Clear conversation"}else{"Compact conversation"},"style":if clear{"danger"}else{"primary"},"callback_data":format!("session:{id}:confirm")}]},
+        {"type":"buttons","buttons":[{"text":"Cancel","callback_data":format!("session:{id}:cancel")}]}
+    ]})
 }
 fn provider(value: &str) -> String {
     if let Some((p, _)) = value.split_once('/') {

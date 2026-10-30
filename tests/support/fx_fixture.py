@@ -31,6 +31,8 @@ def answer(i,p):
  if p.get("_meta",{}).get("fx",{}).get("steer"):
   if text=="BLOCKS":update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":json.dumps(blocks)}})
   cancelled=False;wait.set();result(i,{"stopReason":"end_turn"});return
+ if text=="/compact" and os.environ.get("RUNTIME_COMPACT_FAIL")=="1":
+  send({"jsonrpc":"2.0","id":i,"error":{"code":-32603,"message":"Compaction failed"}});return
  if text=="WAIT" or text=="IGNORE_CANCEL":
   wait.clear();cancelled=False;ignore_cancel=text=="IGNORE_CANCEL";update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"WAIT_READY"}})
   wait.wait(20 if text=="IGNORE_CANCEL" else 5)
