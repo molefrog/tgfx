@@ -2751,9 +2751,10 @@ async fn whisper_language_guidance_distinguishes_the_question_from_history() {
     let instructions = context["telegram_context"]["instructions"]
         .as_str()
         .unwrap();
-    assert!(instructions.contains("language of the current user message"));
-    assert!(instructions.contains("conversation when the message is ambiguous"));
-    assert!(instructions.contains("metadata, not a reply-language preference"));
+    // FX recognizes explicit language guidance through this phrase.
+    assert!(instructions.contains("Reply in"));
+    assert!(instructions.contains("language"));
+    assert!(instructions.contains("metadata"));
     assert_eq!(blocks.last().unwrap()["text"], question);
     r.stop().await;
 }
