@@ -256,7 +256,36 @@ impl State {
             if let Some(m) = value
                 .get("message")
                 .filter(|m| m["event"] == "message.edited")
+                .cloned()
             {
+                // A merged album is still one queued request. Keep its members
+                // so an edit can replace one photo without dropping the rest.
+                if let Some(album) = one(
+                    &tx,
+                    "SELECT id,payload_json FROM telegram_inbox WHERE bot_id=? AND route_key=? AND id<>? AND status='received' AND EXISTS(SELECT 1 FROM json_each(payload_json,'$.albumMessages') AS member WHERE json_extract(member.value,'$.messageId')=?) ORDER BY id DESC LIMIT 1",
+                    params![bot, route, id, m["messageId"].as_str()],
+                )? {
+                    let payload: Value = serde_json::from_str(
+                        album["payload_json"]
+                            .as_str()
+                            .context("Missing album payload")?,
+                    )?;
+                    let mut members: Vec<InboundMessage> =
+                        serde_json::from_value(payload["albumMessages"].clone())?;
+                    let edited: InboundMessage = serde_json::from_value(m.clone())?;
+                    if let Some(member) = members
+                        .iter_mut()
+                        .find(|member| member.message_id == edited.message_id)
+                    {
+                        *member = edited;
+                    }
+                    value = json!({"kind":"message","message":InboundMessage::album(&members),"albumMessages":members});
+                    tx.execute(
+                        "UPDATE telegram_inbox SET payload_json=? WHERE id=?",
+                        params![value.to_string(), id],
+                    )?;
+                    tx.execute("UPDATE telegram_inbox SET status='discarded',payload_json=NULL,updated_at=? WHERE id=?", params![now(),album["id"].as_i64()])?;
+                }
                 tx.execute("UPDATE telegram_inbox SET status='discarded',payload_json=NULL,updated_at=? WHERE bot_id=? AND id<>? AND status='received' AND json_extract(payload_json,'$.kind')='message' AND json_extract(payload_json,'$.message.route.chatId')=? AND json_extract(payload_json,'$.message.messageId')=?",params![now(),bot,id,m["route"]["chatId"].as_str(),m["messageId"].as_str()])?;
             }
         }

@@ -22,6 +22,8 @@ struct Mock {
     next: Arc<std::sync::atomic::AtomicI64>,
     hang_sends: Arc<std::sync::atomic::AtomicBool>,
     hold_callbacks: Arc<std::sync::atomic::AtomicBool>,
+    hold_model_response: Arc<std::sync::atomic::AtomicBool>,
+    release_model_response: Arc<Notify>,
     reject_ephemeral: Arc<std::sync::atomic::AtomicBool>,
     release_callbacks: Arc<Notify>,
 }
@@ -44,6 +46,14 @@ async fn api(
             .load(std::sync::atomic::Ordering::Acquire)
     {
         mock.release_callbacks.notified().await;
+    }
+    if method == "sendMessage"
+        && callback_data(&body, "model:").is_some()
+        && mock
+            .hold_model_response
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        mock.release_model_response.notified().await;
     }
     if body.get("ephemeral_message_parameters").is_some()
         && mock
@@ -119,6 +129,8 @@ impl Running {
             next: Arc::new(std::sync::atomic::AtomicI64::new(1000)),
             hang_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             hold_callbacks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hold_model_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            release_model_response: Arc::new(Notify::new()),
             reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             release_callbacks: Arc::new(Notify::new()),
         };
@@ -1043,6 +1055,8 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
         next: Arc::new(std::sync::atomic::AtomicI64::new(1)),
         hang_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         hold_callbacks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        hold_model_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        release_model_response: Arc::new(Notify::new()),
         reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release_callbacks: Arc::new(Notify::new()),
     };
@@ -1387,6 +1401,109 @@ fn private_session_callback(
         "data":format!("session:{interaction}:{choice}"),
         "message":{"ephemeral_message_id":card,"receiver_user":{"id":42},"chat":{"id":-9,"type":"supergroup"},"message_thread_id":7}
     }})).unwrap();
+}
+
+#[tokio::test]
+async fn rejected_private_model_picker_never_falls_back_to_public_message() {
+    let r = Running::start("live").await;
+    r.mock
+        .reject_ephemeral
+        .store(true, std::sync::atomic::Ordering::Release);
+    r.updates
+        .send(json!({"update_id":1,"message":{
+            "message_id":91,"date":1,"chat":{"id":-9,"type":"supergroup"},
+            "from":{"id":42,"is_bot":false},"text":"/model@fixture_bot"
+        }}))
+        .unwrap();
+    r.event(|e| e["event"] == "update.failed").await;
+    assert!(
+        r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p)| m.starts_with("send") && p["chat_id"] == "-9")
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn group_model_picker_keeps_navigation_results_and_close_private() {
+    for (action, expected_method) in [
+        ("a.e.1", "editEphemeralMessageText"),
+        ("x", "deleteEphemeralMessage"),
+        ("s.0", "deleteEphemeralMessage"),
+    ] {
+        let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
+        let (_, commands) = r
+            .call(|m, p| m == "setMyCommands" && p["scope"]["chat_id"] == "-9")
+            .await;
+        assert_eq!(
+            commands["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["command"] == "model")
+                .unwrap()["is_ephemeral"],
+            true
+        );
+        r.updates.send(json!({"update_id":1,"message":{
+            "ephemeral_message_id":91,"date":1,"chat":{"id":-9,"type":"supergroup"},"message_thread_id":7,
+            "from":{"id":42,"is_bot":false},"text":"/model@fixture_bot"
+        }})).unwrap();
+        let (_, menu) = r
+            .call(|m, p| m == "sendMessage" && callback_data(p, "model:").is_some())
+            .await;
+        assert_eq!(menu["ephemeral_message_parameters"]["receiver_user_id"], 42);
+        assert_eq!(menu["reply_parameters"]["ephemeral_message_id"], 91);
+        let prefix = callback_data(&menu, "model:")
+            .unwrap()
+            .split(':')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(":");
+        let click = |id, user, choice: &str| {
+            r.updates.send(json!({"update_id":id,"callback_query":{
+            "id":format!("cb{id}"),"from":{"id":user,"is_bot":false},"data":format!("{prefix}:{choice}"),
+            "message":{"ephemeral_message_id":1000,"chat":{"id":-9,"type":"supergroup"},"message_thread_id":7}
+        }})).unwrap()
+        };
+        click(2, 43, "c.settings");
+        let (_, rejected) = r
+            .call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb2")
+            .await;
+        assert!(text(&rejected).contains("another request"));
+        click(3, 42, "c.settings");
+        let (_, navigation) = r.call(|m, _| m == "editEphemeralMessageText").await;
+        assert_eq!(navigation["ephemeral_message_id"], 1000);
+        assert_eq!(navigation["receiver_user_id"], 42);
+        let before = r.mock.calls.lock().unwrap().len();
+        click(4, 42, action);
+        let (_, result) = r.call_after(before, |m, _| m == expected_method).await;
+        assert_eq!(result["ephemeral_message_id"], 1000);
+        assert_eq!(result["receiver_user_id"], 42);
+        assert!(
+            !r.mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(m, p)| p["chat_id"] == "-9"
+                    && (m == "editMessageText"
+                        || m == "deleteMessage"
+                        || (m == "sendMessage"
+                            && p.get("ephemeral_message_parameters").is_none())))
+        );
+        assert_eq!(
+            r.db()
+                .query_row("SELECT count(*) FROM chat_history", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        r.stop().await;
+    }
 }
 
 #[tokio::test]
@@ -2006,5 +2123,195 @@ async fn agents_without_image_support_receive_attachment_refs_without_downloads(
             .iter()
             .any(|(m, _)| m == "getFile")
     );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn clear_during_model_loading_does_not_restore_the_old_session() {
+    let r = Running::start_with_env("final", &[("RUNTIME_HOLD_LOAD", "1")]).await;
+    r.db().execute("INSERT INTO routes(route_key,bot_id,chat_id,topic_id,chat_kind,session_id,generation,updated_at) VALUES('100:42:0','100','42','0','private','pre-clear-session',1,'2026-01-01')", []).unwrap();
+    r.message(1, 42, "/model");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !r.root.path().join("fx.jsonl.loading").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    r.message(2, 42, "/clear");
+    let confirmation = r.event(|e| e["event"] == "session.confirmation").await;
+    let choice = format!("session:{}:confirm", confirmation["id"].as_str().unwrap());
+    r.callback(3, &choice, confirmation["message_id"].as_i64().unwrap());
+    r.call(|m, p| m == "editMessageText" && p.to_string().contains("Conversation cleared"))
+        .await;
+    let cleared: Option<String> = r
+        .db()
+        .query_row(
+            "SELECT session_id FROM routes WHERE route_key='100:42:0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(cleared.is_none());
+    std::fs::write(r.root.path().join("fx.jsonl.resume"), "").unwrap();
+    r.event(|e| e["event"] == "update.failed" || (e["type"] == "session" && e["state"] == "ready"))
+        .await;
+    let after: Option<String> = r
+        .db()
+        .query_row(
+            "SELECT session_id FROM routes WHERE route_key='100:42:0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        after.is_none(),
+        "Session was resurrected after clear: {after:?}"
+    );
+    r.message(4, 42, "AFTER_CLEAR");
+    r.call(|method, params| method == "sendRichMessage" && text(params).contains("AFTER_CLEAR"))
+        .await;
+    assert!(
+        r.fx()
+            .iter()
+            .any(|request| request["method"] == "session/new")
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn editing_a_queued_album_keeps_other_photos() {
+    check_queued_album_edit(2).await;
+}
+
+#[tokio::test]
+async fn editing_a_secondary_album_photo_does_not_repeat_the_request() {
+    check_queued_album_edit(3).await;
+}
+
+async fn check_queued_album_edit(edited_id: i64) {
+    let r = Running::start("live").await;
+    r.message(1, 42, "WAIT");
+    r.call(|m, p| m == "sendRichMessageDraft" && p.to_string().contains("WAIT_READY"))
+        .await;
+    for id in [2, 3] {
+        let mut photo = image_message(id, true, "photo");
+        if id != edited_id {
+            photo["message"].as_object_mut().unwrap().remove("caption");
+        }
+        r.updates.send(photo).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let count: i64 = r
+                .db()
+                .query_row(
+                    "SELECT count(*) FROM telegram_inbox WHERE update_id=3 AND status='done'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if count == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut edit = image_message(edited_id, true, "photo");
+    edit["update_id"] = json!(4);
+    let mut message = edit["message"].take();
+    message["caption"] = json!("REVISED_CAPTION");
+    message["edit_date"] = json!(4);
+    edit.as_object_mut().unwrap().remove("message");
+    edit["edited_message"] = message;
+    r.updates.send(edit).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let finished = r
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e["type"] == "turn" && e["state"] == "finished")
+                .count();
+            if finished >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let prompts: Vec<_> = r
+        .fx()
+        .into_iter()
+        .filter(|v| v["method"] == "session/prompt")
+        .collect();
+    let photo_counts: Vec<_> = prompts
+        .iter()
+        .filter_map(|request| {
+            request["params"]["prompt"]
+                .as_array()?
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+                .find(|v| {
+                    v["telegram_message"]["attachments"]
+                        .as_array()
+                        .is_some_and(|a| !a.is_empty())
+                })
+                .map(|v| {
+                    v["telegram_message"]["attachments"]
+                        .as_array()
+                        .unwrap()
+                        .len()
+                })
+        })
+        .collect();
+    r.stop().await;
+    assert_eq!(
+        photo_counts,
+        vec![2],
+        "Editing a queued caption dropped album attachments"
+    );
+    assert!(prompts.iter().any(|request| {
+        request["params"]["prompt"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["text"] == "REVISED_CAPTION")
+    }));
+}
+
+#[tokio::test]
+async fn model_callbacks_wait_until_the_sent_card_is_recorded() {
+    let r = Running::start("live").await;
+    r.mock
+        .hold_model_response
+        .store(true, std::sync::atomic::Ordering::Release);
+    let prefix = model_menu(&r).await;
+    r.callback(2, &format!("{prefix}:x"), 1000);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let dispatched: i64 = r
+                .db()
+                .query_row(
+                    "SELECT count(*) FROM telegram_inbox WHERE update_id=2 AND status<>'received'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if dispatched == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    r.mock.release_model_response.notify_one();
+    r.call(|method, _| method == "deleteMessage").await;
     r.stop().await;
 }

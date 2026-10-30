@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
@@ -248,6 +248,28 @@ pub struct InboundMessage {
     #[serde(default)]
     pub provenance: Option<Value>,
     pub raw: Value,
+}
+impl InboundMessage {
+    pub(crate) fn album(messages: &[Self]) -> Option<Self> {
+        let mut combined = messages.first()?.clone();
+        combined.attachments = messages
+            .iter()
+            .flat_map(|m| m.attachments.clone())
+            .collect();
+        combined.history_seq = messages.iter().filter_map(|m| m.history_seq).max();
+        combined.history_message_ids =
+            Some(messages.iter().map(|m| m.message_id.clone()).collect());
+        combined.invokes_agent = Some(messages.iter().any(|m| m.invokes_agent.unwrap_or(false)));
+        if let Some(message) = messages.iter().find(|m| m.text.is_some()) {
+            combined.text = message.text.clone();
+            combined.text_kind = message.text_kind.clone();
+        }
+        let provenance = combined.provenance.get_or_insert(json!({}));
+        provenance["album"] = json!(messages.iter().enumerate().map(|(position, m)| {
+            json!({"position":position,"message_ref":m.message_ref,"attachment_refs":m.attachments.iter().map(|a|&a.reference).collect::<Vec<_>>()})
+        }).collect::<Vec<_>>());
+        Some(combined)
+    }
 }
 pub fn new_ref(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4())

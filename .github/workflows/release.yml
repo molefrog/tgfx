@@ -1,5 +1,6 @@
 name: Native release
 on:
+  pull_request:
   push:
     tags: ['v*']
 permissions:
@@ -28,11 +29,13 @@ jobs:
           toolchain: 1.99.1
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Verify tag and build
+      - name: Verify version and build
         shell: bash
         run: |
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
-          test "$GITHUB_REF_NAME" = "v$version"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
           cargo test --locked --all-targets
           cargo build --locked --release --target '${{ matrix.target }}' --bin tgfx
           'target/${{ matrix.target }}/release/tgfx' --version
@@ -57,6 +60,7 @@ jobs:
             release/*.tar.gz
             release/*.sha256
   publish:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-22.04
     permissions:
