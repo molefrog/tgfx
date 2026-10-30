@@ -1728,7 +1728,7 @@ async fn usage_reports_current_context_and_survives_runtime_restart() {
     r.message(1, 42, "/usage");
     let (_, empty) = r
         .call(|m, p| {
-            m == "sendMessage"
+            matches!(m, "sendMessage" | "editMessageText")
                 && p["text"]
                     .as_str()
                     .is_some_and(|s| s.contains("not available yet"))
@@ -1742,14 +1742,19 @@ async fn usage_reports_current_context_and_survives_runtime_restart() {
     r.message(3, 42, "/usage");
     let (_, view) = r
         .call_after(before, |m, p| {
-            m == "sendMessage" && p["text"].as_str().is_some_and(|s| s.contains("2.5%"))
+            matches!(m, "sendMessage" | "editMessageText")
+                && p["text"].as_str().is_some_and(|s| s.contains("2.5%"))
         })
         .await;
     assert!(view["text"].as_str().unwrap().contains("6.4K / 256K"));
     r.restart().await;
+    let after_restart = r.mock.calls.lock().unwrap().len();
     r.message(4, 42, "/usage");
-    r.call(|m, p| m == "sendMessage" && p["text"].as_str().is_some_and(|s| s.contains("2.5%")))
-        .await;
+    r.call_after(after_restart, |m, p| {
+        matches!(m, "sendMessage" | "editMessageText")
+            && p["text"].as_str().is_some_and(|s| s.contains("2.5%"))
+    })
+    .await;
     r.stop().await;
 }
 
@@ -1768,7 +1773,8 @@ async fn usage_works_during_a_turn_even_without_billing_data() {
         r.message(2, 42, "/usage");
         let (_, view) = r
             .call_after(before, |m, p| {
-                m == "sendMessage" && p["text"].as_str().is_some_and(|s| s.contains("2.5%"))
+                matches!(m, "sendMessage" | "editMessageText")
+                    && p["text"].as_str().is_some_and(|s| s.contains("2.5%"))
             })
             .await;
         assert!(!view["text"].as_str().unwrap().contains("Gateway"));
@@ -2313,5 +2319,308 @@ async fn model_callbacks_wait_until_the_sent_card_is_recorded() {
     .unwrap();
     r.mock.release_model_response.notify_one();
     r.call(|method, _| method == "deleteMessage").await;
+    r.stop().await;
+}
+
+fn whisper(r: &Running, id: i64, user: i64, topic: i64, question: &str) {
+    r.updates
+        .send(json!({"update_id":id,"message":{
+            "ephemeral_message_id":id,"date":1,"chat":{"id":-9,"type":"supergroup"},
+            "message_thread_id":topic,"from":{"id":user,"is_bot":false,"first_name":"Ada"},
+            "text":format!("/whisper@fixture_bot {question}")
+        }}))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn whisper_is_only_advertised_in_groups() {
+    let r = Running::start("live").await;
+    for (chat, expected) in [("-9", true), ("42", false)] {
+        let (_, menu) = r
+            .call(|m, p| m == "setMyCommands" && p["scope"]["chat_id"] == chat)
+            .await;
+        let command = menu["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["command"] == "whisper");
+        assert_eq!(command.is_some(), expected);
+        if let Some(command) = command {
+            assert_eq!(command["is_ephemeral"], true);
+        }
+    }
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_keeps_user_topic_and_group_sessions_separate() {
+    let r = Running::start("live").await;
+    std::fs::write(
+        r.root.path().join("workspace/MEMORY.md"),
+        "SHARED_MEMORY_CANARY",
+    )
+    .unwrap();
+    for (id, user, topic, question) in [
+        (1, 42, 7, "PRIVATE_ONE"),
+        (2, 43, 7, "PRIVATE_TWO"),
+        (3, 42, 8, "PRIVATE_TOPIC"),
+        (4, 42, 7, "PRIVATE_FOLLOWUP"),
+    ] {
+        whisper(&r, id, user, topic, question);
+        let (_, reply) = r
+            .call(|m, p| m == "sendRichMessage" && text(p).contains(question))
+            .await;
+        assert_eq!(
+            reply["ephemeral_message_parameters"]["receiver_user_id"],
+            user
+        );
+        assert_eq!(reply["reply_parameters"]["ephemeral_message_id"], id);
+        assert_eq!(reply["message_thread_id"], topic);
+    }
+    r.updates.send(json!({"update_id":5,"message":{"message_id":5,"date":1,
+        "chat":{"id":-9,"type":"supergroup"},"from":{"id":42,"is_bot":false},
+        "text":"@fixture_bot PUBLIC_REQUEST","entities":[{"type":"mention","offset":0,"length":12}]}})).unwrap();
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("PUBLIC_REQUEST"))
+        .await;
+    let requests = r.fx();
+    let sessions: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "session/new")
+        .collect();
+    assert_eq!(
+        sessions.len(),
+        4,
+        "One per user/topic plus the public group session"
+    );
+    for session in &sessions[..3] {
+        assert_eq!(session["params"]["mcpServers"], json!([]));
+        assert!(
+            session["params"]["_meta"]["fx"]["systemPrompt"]
+                .to_string()
+                .contains("private /whisper")
+        );
+    }
+    for prompt in requests.iter().filter(|r| r["method"] == "session/prompt") {
+        if prompt["params"]["prompt"].to_string().contains("PRIVATE_") {
+            assert_eq!(prompt["params"]["prompt"].as_array().unwrap().len(), 1);
+            assert!(!prompt.to_string().contains("SHARED_MEMORY_CANARY"));
+        }
+    }
+    assert_eq!(
+        r.db()
+            .query_row(
+                "SELECT count(*) FROM routes WHERE chat_kind='whisper'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        r.db()
+            .query_row(
+                "SELECT count(*) FROM chat_history WHERE data LIKE '%PRIVATE_%'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert!(
+        !r.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.to_string().contains("PRIVATE_"))
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_empty_prompt_and_ephemeral_reply_stay_private() {
+    let r = Running::start("live").await;
+    whisper(&r, 1, 42, 7, "");
+    r.call(|m, p| m == "sendMessage" && text(p).contains("privately"))
+        .await;
+    assert!(r.fx().is_empty());
+    r.updates
+        .send(json!({"update_id":2,"message":{
+            "ephemeral_message_id":2,"date":1,"chat":{"id":-9,"type":"supergroup"},
+            "message_thread_id":7,"from":{"id":42,"is_bot":false},"text":"FOLLOWUP_SECRET"
+        }}))
+        .unwrap();
+    let (_, reply) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("FOLLOWUP_SECRET"))
+        .await;
+    assert_eq!(
+        reply["ephemeral_message_parameters"]["receiver_user_id"],
+        42
+    );
+    assert_eq!(
+        r.db()
+            .query_row("SELECT count(*) FROM chat_history", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_resumes_its_own_session_after_restart() {
+    let mut r = Running::start("final").await;
+    whisper(&r, 1, 42, 7, "BEFORE_RESTART");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("BEFORE_RESTART"))
+        .await;
+    r.restart().await;
+    whisper(&r, 2, 42, 7, "AFTER_RESTART");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("AFTER_RESTART"))
+        .await;
+    assert_eq!(
+        r.fx()
+            .iter()
+            .filter(|p| p["method"] == "session/new")
+            .count(),
+        1
+    );
+    assert_eq!(
+        r.fx()
+            .iter()
+            .filter(|p| p["method"] == "session/load")
+            .count(),
+        1
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_failure_never_falls_back_to_public_delivery() {
+    let r = Running::start("live").await;
+    r.mock
+        .reject_ephemeral
+        .store(true, std::sync::atomic::Ordering::Release);
+    whisper(&r, 1, 42, 7, "PRIVATE_DELIVERY_SECRET");
+    r.event(|e| e["event"] == "update.failed").await;
+    let sends: Vec<_> = r
+        .mock
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m.starts_with("send"))
+        .cloned()
+        .collect();
+    assert!(!sends.is_empty());
+    assert!(
+        sends
+            .iter()
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
+    assert!(
+        !r.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.to_string().contains("PRIVATE_DELIVERY_SECRET"))
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_permissions_are_private_and_bound_to_the_requester_and_card() {
+    let r = Running::start("live").await;
+    whisper(&r, 1, 42, 7, "PERMISSION");
+    let (_, card) = r
+        .call(|m, p| m == "sendMessage" && text(p).contains("Permission needed"))
+        .await;
+    assert_eq!(card["ephemeral_message_parameters"]["receiver_user_id"], 42);
+    let callback = card["reply_markup"]["inline_keyboard"][1][0]["callback_data"]
+        .as_str()
+        .unwrap();
+    for (id, user, card_id) in [(2, 43, 1000), (3, 42, 999), (4, 42, 1000)] {
+        r.updates.send(json!({"update_id":id,"callback_query":{
+            "id":format!("cb{id}"),"from":{"id":user,"is_bot":false},"data":callback,
+            "message":{"ephemeral_message_id":card_id,"chat":{"id":-9,"type":"supergroup"},"message_thread_id":7}
+        }})).unwrap();
+        r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == format!("cb{id}"))
+            .await;
+        if id < 4 {
+            assert!(
+                !r.fx()
+                    .iter()
+                    .any(|p| p["id"] == "p1" && p.get("result").is_some())
+            );
+        }
+    }
+    let (_, reply) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("selected"))
+        .await;
+    assert_eq!(
+        reply["ephemeral_message_parameters"]["receiver_user_id"],
+        42
+    );
+    assert!(
+        r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m.starts_with("send"))
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_agent_failure_reports_only_to_its_requester() {
+    let r = Running::start("live").await;
+    whisper(&r, 1, 43, 7, "CRASH");
+    let (_, reply) = r
+        .call(|m, p| m == "sendMessage" && text(p).contains("couldn’t finish"))
+        .await;
+    assert_eq!(
+        reply["ephemeral_message_parameters"]["receiver_user_id"],
+        43
+    );
+    assert!(
+        r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m.starts_with("send"))
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 43)
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_does_not_grant_new_approval_rights_to_group_members() {
+    let r = Running::start("live").await;
+    whisper(&r, 1, 43, 7, "PERMISSION");
+    let (_, reply) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("cancelled"))
+        .await;
+    assert_eq!(
+        reply["ephemeral_message_parameters"]["receiver_user_id"],
+        43
+    );
+    assert!(
+        r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m.starts_with("send"))
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 43)
+    );
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, p)| callback_data(p, "fxp:").is_some())
+    );
     r.stop().await;
 }

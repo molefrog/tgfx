@@ -123,7 +123,13 @@ struct SessionCard {
     recipient: Option<PrivateRecipient>,
 }
 fn command_list(group: bool) -> Value {
-    json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation","is_ephemeral":group},{"command":"compact","description":"Compact the fx conversation","is_ephemeral":group},{"command":"model","description":"Choose the fx model","is_ephemeral":group},{"command":"format","description":"Choose how fx replies"},{"command":"usage","description":"Show context usage and available spend","is_ephemeral":group}])
+    let mut commands = json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation","is_ephemeral":group},{"command":"compact","description":"Compact the fx conversation","is_ephemeral":group},{"command":"model","description":"Choose the fx model","is_ephemeral":group},{"command":"format","description":"Choose how fx replies"},{"command":"usage","description":"Show context usage and available spend","is_ephemeral":group}]);
+    if group {
+        commands.as_array_mut().unwrap().push(json!({
+            "command":"whisper", "description":"Ask the bot privately", "is_ephemeral":true
+        }));
+    }
+    commands
 }
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value
@@ -700,9 +706,16 @@ impl Inner {
             && update.get("message").is_some()
             && raw.get("forward_origin").is_none()
             && command.as_ref().is_some_and(|c| {
-                ["usage", "clear", "compact", "model"].contains(&c.name.as_str()) && c.addressed
+                ["usage", "clear", "compact", "model", "whisper"].contains(&c.name.as_str())
+                    && c.addressed
             });
-        if !is_control {
+        let followup = ephemeral.is_some()
+            && command.is_none()
+            && raw["text"].as_str().is_some_and(|s| !s.trim().is_empty())
+            && update.get("message").is_some()
+            && raw.get("forward_origin").is_none()
+            && matches!(raw["chat"]["type"].as_str(), Some("group" | "supergroup"));
+        if !is_control && !followup {
             if ephemeral.is_some() {
                 // Other private messages must never enter the group's shared transcript.
                 self.state.advance_cursor(&self.options.bot.id, id + 1)?;
@@ -726,6 +739,32 @@ impl Inner {
                 .allows(user.map(|id| id.to_string()).as_deref(), &route.chat_id);
         if !allowed {
             self.state.advance_cursor(&self.options.bot.id, id + 1)?;
+            return Ok(true);
+        }
+        let whisper = followup || command.as_ref().is_some_and(|c| c.name == "whisper");
+        if whisper {
+            let route = route.whisper(user.unwrap());
+            if followup && self.state.route(&route.key)?.is_none() {
+                self.state.advance_cursor(&self.options.bot.id, id + 1)?;
+                return Ok(true);
+            }
+            self.state.ensure_route(&route)?;
+            let text = command
+                .as_ref()
+                .map(|c| c.args.as_str())
+                .unwrap_or_else(|| raw["text"].as_str().unwrap_or(""));
+            let payload = json!({"kind":"whisper", "route":route, "text":text,
+                "recipient":PrivateRecipient { user_id:user.unwrap(), reply_to:ephemeral }});
+            if let Some(inbox) = self.state.ingest_update(
+                &self.options.bot.id,
+                id,
+                Some(&route.key),
+                Some(&payload),
+                None,
+                true,
+            )? {
+                self.enqueue(&route.key, Work::Inbox(inbox));
+            }
             return Ok(true);
         }
         self.state.ensure_route(&route)?;
@@ -1037,6 +1076,7 @@ impl Inner {
             )?;
             let mut deferred = false;
             match p["kind"].as_str() {
+                Some("whisper") => self.run_whisper(&row, &p).await?,
                 Some("session_request") => {
                     let route: Route = serde_json::from_value(p["route"].clone())?;
                     let recipient: PrivateRecipient =
@@ -1216,7 +1256,30 @@ impl Inner {
         .await;
         self.signal_control_ready(id);
         if let Err(error) = result {
-            let reason = crate::secrets::redact(&error.to_string());
+            let payload = self
+                .state
+                .inbox(id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.payload_json)
+                .and_then(|p| serde_json::from_str::<Value>(&p).ok());
+            let whisper = payload.as_ref().is_some_and(|p| p["kind"] == "whisper");
+            let reason = if whisper {
+                "Private request failed".into()
+            } else {
+                crate::secrets::redact(&error.to_string())
+            };
+            if whisper
+                && !self.stopping.is_cancelled()
+                && let Some(p) = &payload
+                && let (Ok(route), Ok(recipient)) = (
+                    serde_json::from_value::<Route>(p["route"].clone()),
+                    serde_json::from_value::<PrivateRecipient>(p["recipient"].clone()),
+                )
+            {
+                let _ = self.send_control_view(&route, Some(&recipient), None,
+                    &json!({"text":"I couldn’t finish this private request. Please try again."})).await;
+            }
             let _ = self.state.mark_inbox(
                 id,
                 if self.stopping.is_cancelled() {
@@ -1237,6 +1300,7 @@ impl Inner {
                 .is_some_and(|p| {
                     [
                         "session_request",
+                        "whisper",
                         "session_action",
                         "usage",
                         "model_request",
@@ -1417,8 +1481,12 @@ impl Inner {
         } else {
             (self.events.session()?, None)
         };
-        let c = self.config();
-        let lease = if let Some(route) = route {
+        let mut c = self.config();
+        let whisper = route.is_some_and(|r| r.whisper_user().is_some());
+        if whisper {
+            c.memory.enabled = false;
+        }
+        let lease = if let Some(route) = route.filter(|_| !whisper) {
             let mut env = HashMap::from([
                 ("TGFX_MCP_TOKEN".into(), self.options.token.clone()),
                 ("TGFX_MCP_BOT_ID".into(), self.options.bot.id.clone()),
@@ -1479,7 +1547,7 @@ impl Inner {
             .as_ref()
             .map(|l| vec![l.descriptor()])
             .unwrap_or_default();
-        if let Some(route) = route {
+        if let Some(route) = route.filter(|_| !whisper) {
             self.emit(json!({"type":"session","route":self.label(route),"state":"starting"}));
         }
         let started = FxSession::start(FxOptions {
@@ -1489,7 +1557,9 @@ impl Inner {
             model: self.options.model.clone(),
             permission_mode: if self.options.yolo { "yolo" } else { "auto" }.into(),
             mcp_servers,
-            system_prompt: route.map(|_| crate::mcp::TELEGRAM_GUIDELINES.to_owned()),
+            system_prompt: route.map(|_| if whisper {
+                "You are answering a private /whisper request in a Telegram group. Your final answer is visible only to the requesting user. This conversation is separate from the group and other users. Do not publish its contents, send them to other chats or external services, or save them in shared files or memory. Telegram tools and group history are intentionally unavailable. The workspace and its other tools are shared; do not treat this as an isolated sandbox.".to_owned()
+            } else { crate::mcp::TELEGRAM_GUIDELINES.to_owned() }),
             memory: c.memory,
         })
         .await;
@@ -1528,7 +1598,7 @@ impl Inner {
                 },
             );
         }
-        if let Some(route) = route {
+        if let Some(route) = route.filter(|_| !whisper) {
             if replaced {
                 let _=self.options.telegram.send_text(route,"The previous fx session could not be resumed, so this route started a fresh session.").await;
             }
@@ -1573,6 +1643,43 @@ impl Inner {
             sticker.local_path = Some(path.to_string_lossy().into_owned());
         }
         Ok(())
+    }
+    async fn run_whisper(self: &Arc<Self>, row: &InboxRow, payload: &Value) -> Result<()> {
+        let route: Route = serde_json::from_value(payload["route"].clone())?;
+        let recipient: PrivateRecipient = serde_json::from_value(payload["recipient"].clone())?;
+        ensure!(
+            route.whisper_user() == Some(recipient.user_id),
+            "Invalid whisper recipient"
+        );
+        let text = payload["text"]
+            .as_str()
+            .context("Missing private question")?;
+        if text.trim().is_empty() {
+            self.send_control_view(&route, Some(&recipient), None,
+                &json!({"text":"What would you like to ask privately?", "reply_markup":{"force_reply":true,"input_field_placeholder":"Ask privately…"}})).await?;
+            return Ok(());
+        }
+        let active = Active {
+            cancel: CancellationToken::new(),
+            draft_id: new_draft_id(),
+            silent_cancel: Arc::default(),
+        };
+        lock(&self.active).insert(route.key.clone(), active.clone());
+        let result = async {
+            let session = self.session(&route.key, Some(&route)).await?;
+            let projector = self.drive_prompt(&route.key, Some(&route), &session,
+                vec![json!({"type":"text", "text":text})], &active, OutputMode::Final).await?;
+            ensure!(!self.stopping.is_cancelled(), "TGFX stopped");
+            let outbox_id = self.state.create_outbox(&format!("whisper:{}", row.id), &route,
+                Some(row.id), "whisper_final", &json!({"route":route, "recipient":recipient,
+                    "rich":projector.rich(OutputMode::Final, true), "plain":projector.plain_final(OutputMode::Final)}))?;
+            let outbox = self.state.recoverable_outbox()?.into_iter()
+                .find(|r| r.id == outbox_id).context("Private reply missing")?;
+            self.deliver_outbox(&outbox).await
+        }.await;
+        lock(&self.active).remove(&route.key);
+        self.close_permissions(&route.key, "Cancelled").await;
+        result
     }
     async fn run_turn(
         self: &Arc<Self>,
@@ -1774,7 +1881,7 @@ impl Inner {
                         Some(FxEvent::Update(update)) => {
                             lock(&projector).apply(&update);
                             offer_draft();
-                            if let Some(route) = route {
+                            if let Some(route) = route.filter(|r| r.whisper_user().is_none()) {
                                 let inner = update.get("update").unwrap_or(&update);
                                 let glyph = match inner["sessionUpdate"].as_str() {
                                     Some("agent_thought_chunk") => "⋯", Some("agent_message_chunk") => "·",
@@ -1789,7 +1896,7 @@ impl Inner {
                                 offer_draft();
                                 let inner = self.clone(); let route = route.clone(); let cancel = active.cancel.clone();
                                 lock(&self.tasks).push(tokio::spawn(async move {
-                                    if let Err(e) = inner.permission(&route, request, respond, cancel).await { inner.log("permission.failed", json!({"error":e.to_string()})); }
+                                    if let Err(e) = inner.permission(&route, request, respond, cancel).await { inner.log("permission.failed", json!({"error":if route.whisper_user().is_some() { "Private permission failed".into() } else { e.to_string() }})); }
                                 }));
                             } else { let _ = respond.send(json!({"outcome":{"outcome":"cancelled"}})); }
                         }
@@ -1813,7 +1920,7 @@ impl Inner {
                         Ok(())
                     });
                 }
-                _ = typing.tick(), if route.is_some() => {
+                _ = typing.tick(), if route.is_some_and(|r| r.whisper_user().is_none()) => {
                     let mut params = telegram::route_params(route.unwrap()); params["action"] = json!("typing");
                     let api = self.options.telegram.clone();
                     lock(&self.tasks).push(tokio::spawn(async move { let _ = api.call("sendChatAction", params).await; }));
@@ -1916,6 +2023,49 @@ impl Inner {
             "Stored Telegram reply has no content"
         );
         self.state.mark_outbox(row.id, "sending", None, None)?;
+        if row.kind == "whisper_final" {
+            let recipient: PrivateRecipient = serde_json::from_value(payload["recipient"].clone())?;
+            ensure!(
+                route.whisper_user() == Some(recipient.user_id),
+                "Invalid whisper recipient"
+            );
+            let mut result = self
+                .send_control_view(
+                    &route,
+                    Some(&recipient),
+                    None,
+                    &json!({"rich_message":rich}),
+                )
+                .await;
+            if result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<telegram::TelegramError>())
+                .is_some_and(|e| e.code == Some(400))
+            {
+                for part in telegram::split_text(text, 4000) {
+                    result = self
+                        .send_control_view(&route, Some(&recipient), None, &json!({"text":part}))
+                        .await;
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+            self.state.mark_outbox(
+                row.id,
+                if result.is_ok() { "sent" } else { "failed" },
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|id| id.as_ref())
+                    .and_then(Value::as_i64)
+                    .map(|id| id.to_string())
+                    .as_deref(),
+                result.as_ref().err().map(|_| "Private delivery failed"),
+            )?;
+            return result.map(|_| ());
+        }
         if row.kind == "session_status" {
             let card: SessionCard = serde_json::from_value(payload["card"].clone())?;
             let result = self.edit_session_card(&route, &card, text, false).await;
@@ -2496,7 +2646,19 @@ impl Inner {
                 self.options.telegram.call(method, params).await?;
             }
             "fxp" => {
-                if !in_approvals {
+                let private_card = lock(&self.permissions)
+                    .get(id)
+                    .and_then(|p| p.card.clone())
+                    .filter(|c| c["receiverUserId"].is_i64());
+                let authorized = if let Some(card) = &private_card {
+                    card["receiverUserId"] == cb["from"]["id"]
+                        && card["chatId"] == route.chat_id
+                        && card["topicId"] == route.topic_id
+                        && card["messageId"] == cb["message"]["ephemeral_message_id"]
+                } else {
+                    in_approvals && cb["message"].get("ephemeral_message_id").is_none()
+                };
+                if !authorized {
                     self.answer_callback(
                         callback_id,
                         "This permission belongs to the approvals chat",
@@ -2994,6 +3156,19 @@ impl Inner {
         respond: oneshot::Sender<Value>,
         cancel: CancellationToken,
     ) -> Result<()> {
+        let recipient = route.whisper_user().map(|user_id| PrivateRecipient {
+            user_id,
+            reply_to: None,
+        });
+        // A private conversation must not broaden the configured approval authority.
+        if let Some(recipient) = &recipient
+            && self.approvals_route().chat_id != recipient.user_id.to_string()
+        {
+            let _ = respond.send(json!({"outcome":{"outcome":"cancelled"}}));
+            self.send_control_view(route, Some(recipient), None,
+                &json!({"text":"This action requires the bot owner's approval, so it cannot run in this private conversation."})).await?;
+            return Ok(());
+        }
         let options = request["options"].as_array().cloned().unwrap_or_default();
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut rows:Vec<Value>=options.iter().enumerate().map(|(n,o)|json!([{"text":format!("{}{}",o["name"].as_str().unwrap_or("Option"),if o["kind"].as_str().is_some_and(|s|s.ends_with("_always")){" · session"}else{""}),"callback_data":format!("fxp:{id}:{n}")}])).collect();
@@ -3020,36 +3195,35 @@ impl Inner {
                 card: None,
             },
         );
-        let card_result = self
-            .send_card(
-                &self.approvals_route(),
-                &format!(
-                    "fx permission · {}\n{}",
-                    route.chat_id,
-                    request["toolCall"]["title"]
-                        .as_str()
-                        .unwrap_or("Agent requests permission")
-                ),
-                json!({"inline_keyboard":rows}),
-            )
-            .await;
+        let title = request["toolCall"]["title"]
+            .as_str()
+            .unwrap_or("Agent requests permission");
+        let card_result = if let Some(recipient) = &recipient {
+            self.send_control_view(route, Some(recipient), None,
+                &json!({"text":format!("Permission needed\n{title}"), "reply_markup":{"inline_keyboard":rows}}))
+                .await.map(|id| json!({"chatId":route.chat_id,"topicId":route.topic_id,
+                    "receiverUserId":recipient.user_id,"messageId":id}))
+        } else {
+            self.send_card(&self.approvals_route(),
+                &format!("fx permission · {}\n{title}", route.chat_id),
+                json!({"inline_keyboard":rows})).await
+                .map(|card| json!({"chatId":self.approvals_route().chat_id,"messageId":card["message_id"]}))
+        };
         let card = match card_result {
             Ok(card) => card,
             Err(e) => {
                 self.state.expire_interaction(&id)?;
-                let waiter = lock(&self.permissions).remove(&id);
-                if let Some(p) = waiter {
+                if let Some(p) = lock(&self.permissions).remove(&id) {
                     let _ = p.respond.send(json!({"outcome":{"outcome":"cancelled"}}));
                 }
                 return Err(e);
             }
         };
-        let card = json!({"chatId":self.approvals_route().chat_id,"messageId":card["message_id"]});
         self.state.attach_interaction_card(&id, &card)?;
         if let Some(p) = lock(&self.permissions).get_mut(&id) {
             p.card = Some(card.clone());
         }
-        if route.key != self.approvals_route().key {
+        if recipient.is_none() && route.key != self.approvals_route().key {
             let _ = self
                 .options
                 .telegram
@@ -3084,10 +3258,18 @@ impl Inner {
     }
     async fn relabel_card(&self, card: Option<&Value>, label: &str) {
         if let Some(card) = card {
-            let params = json!({"chat_id":card["chatId"],"message_id":card["messageId"],"reply_markup":{"inline_keyboard":[[{"text":label,"callback_data":"resolved"}]]}});
+            let mut params = json!({"chat_id":card["chatId"],"reply_markup":{"inline_keyboard":[[{"text":label,"callback_data":"resolved"}]]}});
+            let method = if card["receiverUserId"].is_i64() {
+                params["receiver_user_id"] = card["receiverUserId"].clone();
+                params["ephemeral_message_id"] = card["messageId"].clone();
+                "editEphemeralMessageReplyMarkup"
+            } else {
+                params["message_id"] = card["messageId"].clone();
+                "editMessageReplyMarkup"
+            };
             let _ = tokio::time::timeout(
                 Duration::from_secs(2),
-                self.options.telegram.call("editMessageReplyMarkup", params),
+                self.options.telegram.call(method, params),
             )
             .await;
         }

@@ -162,6 +162,19 @@ impl Route {
             chat_kind: kind.into(),
         }
     }
+    /// A separate FX conversation for one user in a group/topic.
+    pub fn whisper(&self, user_id: i64) -> Self {
+        let mut route = self.clone();
+        route.key = format!("{}:whisper:{user_id}", self.key);
+        route.chat_kind = "whisper".into();
+        route
+    }
+    pub fn whisper_user(&self) -> Option<i64> {
+        (self.chat_kind == "whisper")
+            .then(|| self.key.rsplit(':').next()?.parse().ok())
+            .flatten()
+            .filter(|id| *id > 0)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

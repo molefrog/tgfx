@@ -734,11 +734,18 @@ impl State {
         let tx = db.transaction()?;
         let mut migrated = vec![];
         for r in routes {
-            let key = format!("{bot}:{new}:{}", r.topic_id);
+            let route = r.as_route();
+            let key = if let Some(user) = route.whisper_user() {
+                Route::new(bot, new, &r.topic_id, "supergroup")
+                    .whisper(user)
+                    .key
+            } else {
+                format!("{bot}:{new}:{}", r.topic_id)
+            };
             if one(&tx, "SELECT 1 FROM routes WHERE route_key=?", [&key])?.is_some() {
                 bail!("Cannot migrate Telegram route: {key} already exists");
             }
-            tx.execute("UPDATE routes SET route_key=?,chat_id=?,chat_kind='supergroup',updated_at=? WHERE route_key=?",params![key,new,now(),r.route_key])?;
+            tx.execute("UPDATE routes SET route_key=?,chat_id=?,chat_kind=?,updated_at=? WHERE route_key=?",params![key,new,if route.whisper_user().is_some() { "whisper" } else { "supergroup" },now(),r.route_key])?;
             for table in [
                 "telegram_principals",
                 "telegram_inbox",

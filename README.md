@@ -104,6 +104,9 @@ Privacy in [@BotFather](https://t.me/BotFather) (`/setprivacy` → **Disable**),
 then remove and re-add it to the group. Keep tgfx running to collect messages
 as context for later requests; it cannot fetch messages from before it joined.
 
+Choose `/whisper` from the group's command menu to ask privately. The question
+and reply are visible only to you and the bot, with a separate conversation.
+
 ## Reply style
 
 𝒕𝒈(𝒇x) has three reply styles, depending on whether you want the answer
