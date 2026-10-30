@@ -9,6 +9,7 @@ use crate::{
     types::{BotIdentity, Config, InboundMessage, OutputMode, Route, decimal, new_ref, now},
 };
 use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -109,8 +110,13 @@ struct Permission {
     respond: oneshot::Sender<Value>,
     card: Option<Value>,
 }
-fn command_list() -> Value {
-    json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation"},{"command":"compact","description":"Compact the fx conversation"},{"command":"model","description":"Choose the fx model"},{"command":"format","description":"Choose how fx replies"},{"command":"usage","description":"Show context usage and available spend"}])
+#[derive(Debug, Serialize, Deserialize)]
+struct UsageRecipient {
+    user_id: i64,
+    reply_to: Option<i64>,
+}
+fn command_list(group: bool) -> Value {
+    json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation"},{"command":"compact","description":"Compact the fx conversation"},{"command":"model","description":"Choose the fx model"},{"command":"format","description":"Choose how fx replies"},{"command":"usage","description":"Show context usage and available spend","is_ephemeral":group}])
 }
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value
@@ -410,7 +416,7 @@ impl Inner {
     async fn menu(&self, chat: &str, install: bool) {
         let mut params = json!({"scope":{"type":"chat","chat_id":chat}});
         if install {
-            params["commands"] = command_list();
+            params["commands"] = command_list(chat.starts_with('-'));
         }
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
@@ -533,6 +539,9 @@ impl Inner {
             } else {
                 self.state.advance_cursor(&self.options.bot.id, id + 1)?;
             }
+            return Ok(());
+        }
+        if self.accept_usage(&update, id)? {
             return Ok(());
         }
         let state = self.state.clone();
@@ -670,6 +679,62 @@ impl Inner {
         self.state
             .ingest_update(&self.options.bot.id, id, None, None, None, false)?;
         Ok(())
+    }
+    /// Private controls bypass shared chat history and do not wait behind agent work.
+    fn accept_usage(self: &Arc<Self>, update: &Value, id: i64) -> Result<bool> {
+        let Some(raw) = update.get("message").or(update.get("edited_message")) else {
+            return Ok(false);
+        };
+        let ephemeral = raw["ephemeral_message_id"].as_i64();
+        let command =
+            telegram::command_from_text(raw["text"].as_str(), self.options.bot.username.as_deref());
+        let is_usage = matches!(raw["chat"]["type"].as_str(), Some("group" | "supergroup"))
+            && update.get("message").is_some()
+            && raw.get("forward_origin").is_none()
+            && command
+                .as_ref()
+                .is_some_and(|c| c.name == "usage" && c.addressed);
+        if !is_usage {
+            if ephemeral.is_some() {
+                // Other private messages must never enter the group's shared transcript.
+                self.state.advance_cursor(&self.options.bot.id, id + 1)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        let user = raw["from"]["id"].as_i64().filter(|id| *id > 0);
+        let chat = decimal(&raw["chat"]["id"]).context("Usage chat missing")?;
+        let route = Route::new(
+            &self.options.bot.id,
+            chat,
+            decimal(&raw["message_thread_id"]).unwrap_or_else(|| "0".into()),
+            raw["chat"]["type"].as_str().unwrap(),
+        );
+        let allowed = user.is_some()
+            && raw["from"]["is_bot"] != true
+            && raw.get("sender_chat").is_none()
+            && self
+                .config()
+                .allows(user.map(|id| id.to_string()).as_deref(), &route.chat_id);
+        if !allowed {
+            self.state.advance_cursor(&self.options.bot.id, id + 1)?;
+            return Ok(true);
+        }
+        self.state.ensure_route(&route)?;
+        let payload = json!({"kind":"usage", "route":route,
+            "recipient":UsageRecipient { user_id:user.unwrap(), reply_to:ephemeral },
+            "invalidArgs":!command.unwrap().args.is_empty()});
+        if let Some(inbox) = self.state.ingest_update(
+            &self.options.bot.id,
+            id,
+            Some(&route.key),
+            Some(&payload),
+            None,
+            true,
+        )? {
+            self.spawn_control(inbox);
+        }
+        Ok(true)
     }
     fn spawn_control(self: &Arc<Self>, id: i64) {
         let inner = self.clone();
@@ -818,6 +883,10 @@ impl Inner {
                 .as_deref()
                 .context("Missing inbox payload")?,
         )?;
+        if p["kind"] == "usage" {
+            self.spawn_control(id);
+            return Ok(());
+        }
         if p["kind"] != "message" {
             self.flush_batch(&row.route_key)?;
             self.enqueue(&row.route_key, Work::Inbox(id), None);
@@ -1000,6 +1069,21 @@ impl Inner {
             )?;
             let mut deferred = false;
             match p["kind"].as_str() {
+                Some("usage") => {
+                    let route: Route = serde_json::from_value(p["route"].clone())?;
+                    let recipient: UsageRecipient = serde_json::from_value(p["recipient"].clone())?;
+                    if p["invalidArgs"] == true {
+                        self.send_usage_view(
+                            &route,
+                            Some(&recipient),
+                            None,
+                            &json!({"text":"Usage: /usage"}),
+                        )
+                        .await?;
+                    } else {
+                        self.usage(&route, Some(&recipient)).await?;
+                    }
+                }
                 Some("message") => {
                     let mut m: InboundMessage = serde_json::from_value(p["message"].clone())?;
                     self.state.register_inbound(&mut m, false)?;
@@ -1034,7 +1118,7 @@ impl Inner {
                                     }
                                     "format" => self.open_format(&m.route).await?,
                                     "model" => self.open_model(&m.route).await?,
-                                    "usage" => self.usage(&m.route).await?,
+                                    "usage" => self.usage(&m.route, None).await?,
                                     _ => {
                                         self.options
                                             .telegram
@@ -1911,7 +1995,61 @@ impl Inner {
         }
         Ok(())
     }
-    async fn usage(self: &Arc<Self>, route: &Route) -> Result<()> {
+    async fn send_usage_view(
+        &self,
+        route: &Route,
+        recipient: Option<&UsageRecipient>,
+        message: Option<&Value>,
+        view: &Value,
+    ) -> Result<Option<Value>> {
+        let mut params = telegram::route_params(route);
+        merge(&mut params, view);
+        let method = match (recipient, message) {
+            (Some(recipient), Some(message)) => {
+                params["receiver_user_id"] = json!(recipient.user_id);
+                params["ephemeral_message_id"] = message.clone();
+                "editEphemeralMessageText"
+            }
+            (Some(recipient), None) => {
+                params["ephemeral_message_parameters"] =
+                    json!({"receiver_user_id":recipient.user_id});
+                if let Some(reply_to) = recipient.reply_to {
+                    params["reply_parameters"] = json!({"ephemeral_message_id":reply_to});
+                }
+                "sendMessage"
+            }
+            (None, Some(message)) => {
+                params["message_id"] = message.clone();
+                "editMessageText"
+            }
+            (None, None) => "sendMessage",
+        };
+        let result = self.options.telegram.call(method, params).await?;
+        if message.is_some() {
+            return Ok(None);
+        }
+        let field = if recipient.is_some() {
+            "ephemeral_message_id"
+        } else {
+            "message_id"
+        };
+        let id = result
+            .get(field)
+            .filter(|id| id.as_i64().is_some())
+            .cloned();
+        if recipient.is_some() {
+            ensure!(
+                id.is_some(),
+                "Telegram did not return a private usage message"
+            );
+        }
+        Ok(id)
+    }
+    async fn usage(
+        self: &Arc<Self>,
+        route: &Route,
+        recipient: Option<&UsageRecipient>,
+    ) -> Result<()> {
         let calculate =
             async {
                 let session = self.session(&route.key, Some(route)).await?;
@@ -1945,15 +2083,13 @@ impl Inner {
             biased;
             result = &mut calculate => (result, None),
             _ = tokio::time::sleep(Duration::from_millis(300)) => {
-                let mut params = telegram::route_params(route);
-                params["text"] = json!(format!(
+                let view = json!({"text":format!(
                     "<tg-emoji emoji-id=\"{}\">{}</tg-emoji> Calculating...",
                     crate::fx::projector::LIVE_STATUS_EMOJI_ID,
                     crate::fx::projector::LIVE_STATUS_EMOJI_ALT,
-                ));
-                params["parse_mode"] = json!("HTML");
-                let message = match self.options.telegram.call("sendMessage", params).await {
-                    Ok(message) => message.get("message_id").cloned(),
+                ),"parse_mode":"HTML"});
+                let message = match self.send_usage_view(route, recipient, None, &view).await {
+                    Ok(message) => message,
                     Err(error) => {
                         self.log("usage.progress_failed", json!({"error":error.to_string()}));
                         None
@@ -1969,15 +2105,8 @@ impl Inner {
                 json!({"text":"Could not load fx usage right now."})
             }
         };
-        let mut params = telegram::route_params(route);
-        merge(&mut params, &view);
-        let method = if let Some(message) = message {
-            params["message_id"] = message;
-            "editMessageText"
-        } else {
-            "sendMessage"
-        };
-        self.options.telegram.call(method, params).await?;
+        self.send_usage_view(route, recipient, message.as_ref(), &view)
+            .await?;
         Ok(())
     }
     async fn answer_callback(&self, id: &str, text: &str) -> Result<()> {

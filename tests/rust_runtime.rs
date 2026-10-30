@@ -22,6 +22,7 @@ struct Mock {
     next: Arc<std::sync::atomic::AtomicI64>,
     hang_sends: Arc<std::sync::atomic::AtomicBool>,
     hold_callbacks: Arc<std::sync::atomic::AtomicBool>,
+    reject_ephemeral: Arc<std::sync::atomic::AtomicBool>,
     release_callbacks: Arc<Notify>,
 }
 async fn api(
@@ -44,6 +45,15 @@ async fn api(
     {
         mock.release_callbacks.notified().await;
     }
+    if body.get("ephemeral_message_parameters").is_some()
+        && mock
+            .reject_ephemeral
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Json(
+            json!({"ok":false,"error_code":403,"description":"Private message unavailable"}),
+        );
+    }
     let result = match method.as_str() {
         "getMe" => json!({"id":100,"is_bot":true,"first_name":"Bot","username":"fixture_bot"}),
         "getWebhookInfo" => json!({"url":""}),
@@ -57,6 +67,10 @@ async fn api(
         "getStickerSet" => json!({"stickers":[]}),
         "getFile" => json!({"file_path":"stickers/fixture.webp"}),
         "getChatMember" => json!({"status":"member"}),
+        "sendMessage" if body.get("ephemeral_message_parameters").is_some() => {
+            json!({"ephemeral_message_id":mock.next.fetch_add(1,std::sync::atomic::Ordering::AcqRel),
+                "receiver_user":{"id":body["ephemeral_message_parameters"]["receiver_user_id"]}})
+        }
         s if s.starts_with("send") && s != "sendChatAction" && s != "sendRichMessageDraft" => {
             json!({"message_id":mock.next.fetch_add(1,std::sync::atomic::Ordering::AcqRel),"date":1,"chat":{"id":body["chat_id"].as_str().unwrap_or("42").parse::<i64>().unwrap_or(42),"type":"private"}})
         }
@@ -98,6 +112,7 @@ impl Running {
             next: Arc::new(std::sync::atomic::AtomicI64::new(1000)),
             hang_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             hold_callbacks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             release_callbacks: Arc::new(Notify::new()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -945,6 +960,7 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
         next: Arc::new(std::sync::atomic::AtomicI64::new(1)),
         hang_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         hold_callbacks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release_callbacks: Arc::new(Notify::new()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1387,4 +1403,157 @@ async fn slow_usage_replaces_its_progress_message_and_fast_usage_skips_it() {
         }
         r.stop().await;
     }
+}
+
+#[tokio::test]
+async fn group_usage_is_private_to_each_requester_and_excluded_from_shared_history() {
+    let r = Running::start_with_env("live", &[("RUNTIME_USAGE_DELAY_MS", "800")]).await;
+    let (_, menu) = r
+        .call(|method, p| method == "setMyCommands" && p["scope"]["chat_id"] == "-9")
+        .await;
+    assert_eq!(
+        menu["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["command"] == "usage")
+            .unwrap()["is_ephemeral"],
+        true
+    );
+    let (_, dm_menu) = r
+        .call(|method, p| method == "setMyCommands" && p["scope"]["chat_id"] == "42")
+        .await;
+    assert_eq!(
+        dm_menu["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["command"] == "usage")
+            .unwrap()["is_ephemeral"],
+        false
+    );
+    for (id, user, ephemeral) in [(1, 42, None), (2, 43, Some(91))] {
+        let before = r.mock.calls.lock().unwrap().len();
+        let mut message = json!({"date":1,"chat":{"id":-9,"type":"supergroup"},
+            "message_thread_id":7,"from":{"id":user,"is_bot":false,"first_name":"Ada"},"text":"/usage@fixture_bot"});
+        if let Some(ephemeral) = ephemeral {
+            message["ephemeral_message_id"] = json!(ephemeral);
+        } else {
+            message["message_id"] = json!(id);
+        }
+        r.updates
+            .send(json!({"update_id":id,"message":message}))
+            .unwrap();
+        let (_, result) = r
+            .call_after(before, |method, p| {
+                method == "editEphemeralMessageText"
+                    && p["receiver_user_id"] == user
+                    && p["text"].as_str().is_some_and(|s| s.contains("this month"))
+            })
+            .await;
+        assert!(result.get("message_id").is_none());
+        let calls = r.mock.calls.lock().unwrap();
+        let progress = &calls
+            .iter()
+            .skip(before)
+            .find(|(m, p)| m == "sendMessage" && p["chat_id"] == "-9")
+            .unwrap()
+            .1;
+        assert_eq!(
+            progress["ephemeral_message_parameters"]["receiver_user_id"],
+            user
+        );
+        assert_eq!(progress["message_thread_id"], 7);
+        assert_eq!(
+            progress["reply_parameters"]["ephemeral_message_id"].as_i64(),
+            ephemeral
+        );
+        assert!(progress["text"].as_str().unwrap().contains("Calculating"));
+        assert!(
+            calls
+                .iter()
+                .skip(before)
+                .filter(|(m, p)| m.starts_with("send") && p["chat_id"] == "-9")
+                .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == user)
+        );
+    }
+    let shared: i64 = r
+        .db()
+        .query_row(
+            "SELECT count(*) FROM chat_history WHERE route='100:-9:7'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(shared, 0);
+    assert!(!r.fx().iter().any(|v| v["method"] == "session/prompt"));
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn private_commands_never_leak_into_group_history_or_other_command_handlers() {
+    let r = Running::start("live").await;
+    for (id, text, sender) in [
+        (1, "/model", json!({"id":42,"is_bot":false})),
+        (2, "/usage", json!({"id":42,"is_bot":true})),
+    ] {
+        r.updates
+            .send(
+                json!({"update_id":id,"message":{"ephemeral_message_id":id,"date":1,
+            "chat":{"id":-9,"type":"supergroup"},"from":sender,"text":text}}),
+            )
+            .unwrap();
+    }
+    r.updates
+        .send(
+            json!({"update_id":3,"message":{"ephemeral_message_id":3,"date":1,
+        "chat":{"id":-10,"type":"supergroup"},"from":{"id":999,"is_bot":false},"text":"/usage"}}),
+        )
+        .unwrap();
+    r.message(4, -9, "/usage@fixture_bot extra");
+    r.call(|m, p| m == "sendMessage" && p["text"] == "Usage: /usage")
+        .await;
+    let calls = r.mock.calls.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .filter(|(m, p)| m == "sendMessage" && p["chat_id"] == "-9")
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|(m, p)| m == "sendMessage" && p["chat_id"] == "-10")
+    );
+    assert_eq!(
+        r.db()
+            .query_row("SELECT count(*) FROM chat_history", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(r.fx().is_empty());
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn rejected_private_usage_does_not_fall_back_to_a_public_group_reply() {
+    let r = Running::start_with_env("live", &[("RUNTIME_USAGE_DELAY_MS", "800")]).await;
+    r.mock
+        .reject_ephemeral
+        .store(true, std::sync::atomic::Ordering::Release);
+    r.message(1, -9, "/usage@fixture_bot");
+    r.event(|event| event["event"] == "update.failed").await;
+    let calls = r.mock.calls.lock().unwrap().clone();
+    let group: Vec<_> = calls
+        .iter()
+        .filter(|(m, p)| m.starts_with("send") && p["chat_id"] == "-9")
+        .collect();
+    assert!(!group.is_empty());
+    assert!(
+        group.iter().all(|(m, p)| m == "sendMessage"
+            && p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
+    assert!(!calls.iter().any(|(m, _)| m == "editMessageText"));
+    r.stop().await;
 }
