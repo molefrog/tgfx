@@ -38,9 +38,8 @@ pub fn provider_icons(stickers: Option<&[Value]>) -> HashMap<String, String> {
 pub fn session_confirmation(action: &str, id: &str) -> Value {
     let clear = action == "clear";
     let text = if clear {
-        json!(
-            "Clear this conversation? This stops the current task and discards queued requests. Files are kept."
-        )
+        json!([{"type":"bold","text":"Clear this conversation?"},
+            " Start fresh and stop any work in progress. Your files and memory will stay."])
     } else {
         json!([{"type":"bold","text":"Compact this conversation?"},
             " Reduce context usage by turning earlier messages into a shorter summary."])
