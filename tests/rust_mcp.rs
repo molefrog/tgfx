@@ -104,6 +104,7 @@ impl Fixture {
             token: "123:TEST".into(),
             bot_id: "123".into(),
             route_key: route,
+            history_only: false,
             workspace,
             home,
             database,
@@ -938,4 +939,87 @@ async fn distinct_attachments_with_the_same_filename_download_separately() {
             b"original unmodified image bytes"
         );
     }
+}
+
+#[tokio::test]
+async fn whisper_history_capability_cannot_act_or_read_other_conversations() {
+    let f = Fixture::new(true).await;
+    let public = tgfx::types::Route::new("123", "-100", "0", "supergroup");
+    let private = public.whisper(42);
+    let other = tgfx::types::Route::new("123", "-200", "0", "supergroup");
+    f.state.ensure_route(&private).unwrap();
+    for id in 1..=6 {
+        f.state
+            .history
+            .record_bot(&public.key, &id.to_string(), Some(&format!("PUBLIC_{id}")))
+            .unwrap();
+    }
+    f.state
+        .history
+        .record_bot(&private.key, "1", Some("PRIVATE_SECRET"))
+        .unwrap();
+    f.state
+        .history
+        .record_bot(&other.key, "1", Some("OTHER_GROUP_SECRET"))
+        .unwrap();
+    f.state
+        .register_event_context(&private, "whisper_context")
+        .unwrap();
+    f.state
+        .history
+        .snapshot_from(&private.key, &public.key, "whisper_context")
+        .unwrap();
+    f.state
+        .history
+        .record_bot(&public.key, "7", Some("AFTER_SNAPSHOT"))
+        .unwrap();
+    let mut env = f.env.clone();
+    env.route_key = private.key.clone();
+    env.history_only = true;
+    let calls = f.mock.calls.lock().unwrap().len();
+    let server = TelegramMcp::new(env).await.unwrap();
+    assert_eq!(
+        server
+            .tools()
+            .iter()
+            .map(|t| t.name.as_ref())
+            .collect::<Vec<_>>(),
+        vec!["read_history"]
+    );
+    let result = server
+        .execute("read_history", json!({"limit":2}))
+        .await
+        .unwrap();
+    let visible = result.to_string();
+    assert!(visible.contains("PUBLIC_6"));
+    assert!(!visible.contains("PRIVATE_SECRET"));
+    assert!(!visible.contains("OTHER_GROUP_SECRET"));
+    assert!(!visible.contains("AFTER_SNAPSHOT"));
+    let older = server
+        .execute(
+            "read_history",
+            json!({"cursor":result["older_cursor"],"limit":2}),
+        )
+        .await
+        .unwrap();
+    assert!(older.to_string().contains("PUBLIC_4"));
+    assert!(
+        server
+            .execute("read_history", json!({"route":other.key}))
+            .await
+            .is_err()
+    );
+    for tool in [
+        "send_message",
+        "set_reaction",
+        "download_attachment",
+        "ask_question",
+    ] {
+        assert!(server.execute(tool, json!({})).await.is_err());
+    }
+    assert_eq!(f.mock.calls.lock().unwrap().len(), calls);
+    f.state
+        .deactivate_context(&private.key, "whisper_context")
+        .unwrap();
+    assert!(server.execute("read_history", json!({})).await.is_err());
 }

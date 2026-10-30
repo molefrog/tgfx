@@ -2393,7 +2393,7 @@ async fn whisper_keeps_user_topic_and_group_sessions_separate() {
         "One per user/topic plus the public group session"
     );
     for session in &sessions[..3] {
-        assert_eq!(session["params"]["mcpServers"], json!([]));
+        assert_eq!(session["params"]["mcpServers"].as_array().unwrap().len(), 1);
         assert!(
             session["params"]["_meta"]["fx"]["systemPrompt"]
                 .to_string()
@@ -2402,7 +2402,7 @@ async fn whisper_keeps_user_topic_and_group_sessions_separate() {
     }
     for prompt in requests.iter().filter(|r| r["method"] == "session/prompt") {
         if prompt["params"]["prompt"].to_string().contains("PRIVATE_") {
-            assert_eq!(prompt["params"]["prompt"].as_array().unwrap().len(), 1);
+            assert_eq!(prompt["params"]["prompt"].as_array().unwrap().len(), 2);
             assert!(!prompt.to_string().contains("SHARED_MEMORY_CANARY"));
         }
     }
@@ -2622,5 +2622,96 @@ async fn whisper_does_not_grant_new_approval_rights_to_group_members() {
             .iter()
             .any(|(_, p)| callback_data(p, "fxp:").is_some())
     );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_replies_preserve_unrecognized_slash_text() {
+    let r = Running::start("final").await;
+    whisper(&r, 1, 42, 7, "");
+    r.call(|m, p| m == "sendMessage" && text(p).contains("privately"))
+        .await;
+    for (id, question) in [
+        (2, "/;?$/$$:"),
+        (3, "/home/alex/report.txt"),
+        (4, "/explain this example"),
+    ] {
+        let after = r.mock.calls.lock().unwrap().len();
+        r.updates
+            .send(json!({"update_id":id,"message":{
+                "ephemeral_message_id":id,"chat":{"id":-9,"type":"supergroup"},
+                "message_thread_id":7,"from":{"id":42,"is_bot":false},"text":question
+            }}))
+            .unwrap();
+        let (_, reply) = r
+            .call_after(after, |m, p| {
+                m == "sendRichMessage"
+                    && p["ephemeral_message_parameters"]["receiver_user_id"] == 42
+            })
+            .await;
+        assert_eq!(
+            reply["ephemeral_message_parameters"]["receiver_user_id"],
+            42
+        );
+        assert_eq!(
+            r.fx().last().unwrap()["params"]["prompt"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["text"],
+            question
+        );
+    }
+    assert_eq!(
+        r.db()
+            .query_row("SELECT count(*) FROM chat_history", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_receives_only_current_public_topic_history() {
+    let r = Running::start("final").await;
+    for (id, topic, message) in [(1, 7, "PUBLIC_TOPIC_FACT"), (2, 8, "OTHER_TOPIC_SECRET")] {
+        r.updates
+            .send(json!({"update_id":id,"message":{
+                "message_id":id,"date":1,"chat":{"id":-9,"type":"supergroup"},
+                "message_thread_id":topic,"from":{"id":42,"is_bot":false},"text":message
+            }}))
+            .unwrap();
+    }
+    whisper(&r, 3, 42, 7, "PRIVATE_USER_SECRET");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("PRIVATE_USER_SECRET"))
+        .await;
+    for id in [4, 6] {
+        if id == 6 {
+            r.updates
+                .send(json!({"update_id":5,"message":{
+                    "message_id":5,"date":2,"chat":{"id":-9,"type":"supergroup"},
+                    "message_thread_id":7,"from":{"id":42,"is_bot":false},"text":"NEW_PUBLIC_FACT"
+                }}))
+                .unwrap();
+        }
+        let after = r.mock.calls.lock().unwrap().len();
+        whisper(&r, id, 43, 7, "BLOCKS");
+        let (_, reply) = r
+            .call_after(after, |m, p| {
+                m == "sendRichMessage" && text(p).contains("PUBLIC_TOPIC_FACT")
+            })
+            .await;
+        let result = text(&reply);
+        assert!(!result.contains("PRIVATE_USER_SECRET"));
+        assert!(!result.contains("OTHER_TOPIC_SECRET"));
+        if id == 6 {
+            assert!(result.contains("NEW_PUBLIC_FACT"));
+        }
+        assert_eq!(
+            reply["ephemeral_message_parameters"]["receiver_user_id"],
+            43
+        );
+    }
     r.stop().await;
 }

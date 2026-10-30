@@ -211,6 +211,10 @@ impl History {
         Ok(())
     }
     pub fn snapshot(&self, route: &str, context: &str) -> Result<()> {
+        self.snapshot_from(route, route, context)
+    }
+    /// Give an isolated reader a fixed boundary in another route's history.
+    pub fn snapshot_from(&self, route: &str, source: &str, context: &str) -> Result<()> {
         let db = self.db()?;
         db.execute(
             "INSERT INTO history_turns VALUES (?,?,?,?,0)",
@@ -218,7 +222,7 @@ impl History {
                 self.workspace,
                 route,
                 context,
-                self.latest_seq_with(&db, route)?
+                self.latest_seq_with(&db, source)?
             ],
         )?;
         Ok(())
