@@ -2,10 +2,33 @@
 
 Small project, small rules. When in doubt, write less.
 
+## Project scope
+
+TGFX is a reusable Rust CLI/package that connects Telegram to a locally
+installed Vercel `fx` coding agent through ACP. Other people install it and run
+it in their own project folders.
+
+Keep reusable Telegram features and fixes here. A Docker bot used to dogfood
+TGFX is a separate, task-specific playground: its prompts, integrations,
+credentials, and deployment configuration belong outside this package. Use
+that playground to discover gaps and test new features, then bring generally
+useful behavior into TGFX. Updating the package and updating a running bot are
+separate steps.
+
 ## Toolkit
 
 Rust is the runtime and test harness. Prefer standard-library and existing
 crate APIs. Keep `Cargo.lock` committed.
+
+## README
+
+Keep [README.md](README.md) minimal and written for users. Cover what TGFX
+does, how to start, and the few details needed to use it. New features do not
+automatically need documentation; prefer a short edit to an existing section.
+Explain internals only when they help users make a choice or use a feature.
+Keep architecture, implementation details, and exhaustive behavior elsewhere.
+When asking the user to review a README change, explain what you added, show
+the focused diff, and give your judgment on whether it fits this scope.
 
 ## Link locally
 
