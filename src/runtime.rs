@@ -77,7 +77,6 @@ struct Inner {
 struct Actor {
     sender: mpsc::UnboundedSender<Work>,
     waiting: Arc<std::sync::atomic::AtomicUsize>,
-    notified: Arc<std::sync::atomic::AtomicBool>,
 }
 enum Work {
     Inbox(i64),
@@ -541,7 +540,7 @@ impl Inner {
                     None,
                     true,
                 )? {
-                    self.enqueue(&route.key, Work::Inbox(inbox), None);
+                    self.enqueue(&route.key, Work::Inbox(inbox));
                 }
             } else {
                 self.state.advance_cursor(&self.options.bot.id, id + 1)?;
@@ -624,7 +623,7 @@ impl Inner {
                 {
                     self.spawn_control(inbox);
                 } else {
-                    self.enqueue(&route.key, Work::Inbox(inbox), None);
+                    self.enqueue(&route.key, Work::Inbox(inbox));
                 }
             }
             return Ok(());
@@ -651,7 +650,7 @@ impl Inner {
                 allowed,
             )? {
                 self.flush_batch(&route.key)?;
-                self.enqueue(&route.key, Work::Inbox(inbox), None);
+                self.enqueue(&route.key, Work::Inbox(inbox));
             }
             return Ok(());
         }
@@ -679,7 +678,7 @@ impl Inner {
                 None,
                 enabled,
             )? {
-                self.enqueue(&route.key, Work::Inbox(inbox), None);
+                self.enqueue(&route.key, Work::Inbox(inbox));
             }
             return Ok(());
         }
@@ -768,7 +767,7 @@ impl Inner {
             _ = self.stopping.cancelled() => { self.signal_control_ready(id); },
         }
     }
-    fn enqueue(self: &Arc<Self>, key: &str, work: Work, route: Option<&Route>) {
+    fn enqueue(self: &Arc<Self>, key: &str, work: Work) {
         let actor = {
             let mut actors = lock(&self.actors);
             if let Some(a) = actors.get(key) {
@@ -778,7 +777,6 @@ impl Inner {
                 let actor = Actor {
                     sender,
                     waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                    notified: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 };
                 let task_actor = actor.clone();
                 let inner = self.clone();
@@ -848,15 +846,6 @@ impl Inner {
                                 );
                             }
                         }
-                        if task_actor
-                            .waiting
-                            .load(std::sync::atomic::Ordering::Acquire)
-                            == 0
-                        {
-                            task_actor
-                                .notified
-                                .store(false, std::sync::atomic::Ordering::Release);
-                        }
                     }
                 });
                 lock(&self.tasks).push(task);
@@ -866,28 +855,9 @@ impl Inner {
         };
         let waiting = actor
             .waiting
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let busy = waiting > 0 || lock(&self.active).contains_key(key);
-        if busy
-            && let Some(route) = route
-            && !actor
-                .notified
-                .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
-            let api = self.options.telegram.clone();
-            let route = route.clone();
-            let command = if route.chat_kind != "private" {
-                self.options
-                    .bot
-                    .username
-                    .as_ref()
-                    .map(|n| format!("/stop@{n}"))
-                    .unwrap_or_else(|| "/stop".into())
-            } else {
-                "/stop".into()
-            };
-            lock(&self.tasks).push(tokio::spawn(async move{let _=api.send_text(&route,&format!("Your message is queued. I'm still working on the previous request. Send {command} to cancel it and discard queued requests.")).await;}));
-        }
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        self.emit(json!({"type":"queue","route":{"key":key,"chat":key},"waiting":waiting}));
         let _ = actor.sender.send(work);
     }
     async fn schedule_persisted(self: &Arc<Self>, id: i64, delay: Duration) -> Result<()> {
@@ -905,7 +875,7 @@ impl Inner {
         }
         if p["kind"] != "message" {
             self.flush_batch(&row.route_key)?;
-            self.enqueue(&row.route_key, Work::Inbox(id), None);
+            self.enqueue(&row.route_key, Work::Inbox(id));
             return Ok(());
         }
         let message: InboundMessage = serde_json::from_value(p["message"].clone())?;
@@ -1002,7 +972,7 @@ impl Inner {
         }) {
             self.spawn_control(id);
         } else {
-            self.enqueue(&message.route.key, Work::Inbox(id), Some(&message.route));
+            self.enqueue(&message.route.key, Work::Inbox(id));
         }
         Ok(())
     }
@@ -1062,14 +1032,7 @@ impl Inner {
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
         )?;
-        self.enqueue(
-            key,
-            Work::Inbox(primary),
-            messages
-                .iter()
-                .any(|(_, m)| m.invokes_agent.unwrap_or(false))
-                .then_some(&first.route),
-        );
+        self.enqueue(key, Work::Inbox(primary));
         Ok(())
     }
     async fn dispatch(self: &Arc<Self>, id: i64) {
@@ -1327,7 +1290,6 @@ impl Inner {
                 inbox,
                 card,
             },
-            None,
         );
         self.signal_control_ready(inbox);
         if !clear {
@@ -1409,7 +1371,7 @@ impl Inner {
                 return Ok(());
             }
         }
-        self.enqueue(&key, Work::Event(event), None);
+        self.enqueue(&key, Work::Event(event));
         Ok(())
     }
 }
@@ -2465,7 +2427,7 @@ impl Inner {
                                 .await?;
                         }
                     } else {
-                        self.enqueue(&route.key, Work::Inbox(row.id), None);
+                        self.enqueue(&route.key, Work::Inbox(row.id));
                     }
                     self.signal_control_ready(row.id);
                     self.answer_callback(callback_id, "Confirmed").await?;

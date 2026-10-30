@@ -780,7 +780,7 @@ async fn route_queues_controls_stop_and_format_remain_independent() {
     r.call(|m, p| m == "sendRichMessageDraft" && text(p).contains("WAIT_READY"))
         .await;
     r.message(2, 42, "DISCARDED");
-    r.call(|m, p| m == "sendMessage" && text(p).contains("queued"))
+    r.event(|v| v["type"] == "queue" && v["waiting"].as_u64().is_some_and(|n| n > 0))
         .await;
     r.callback(3, "fmt:final", 1000);
     r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb3")
@@ -834,6 +834,14 @@ async fn route_queues_controls_stop_and_format_remain_independent() {
         .cloned()
         .collect::<Vec<_>>();
     assert!(!text(&finals[0].1).contains("details"));
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "sendMessage" && text(p).contains("queued"))
+    );
     r.stop().await;
 }
 #[tokio::test]
