@@ -326,7 +326,7 @@ fn model_menu_only_offers_supported_settings_and_marks_the_active_choice() {
     let view = model_menu(&config, "id", Some(0), 0, None, false).unwrap();
     assert_eq!(
         view["text"],
-        "Choose a model for the bot.\nCurrent model: <b>Grok</b> ⚡"
+        "Choose a model for the bot. Current model: <b>Grok</b> ⚡"
     );
     let rows = view["reply_markup"]["inline_keyboard"].as_array().unwrap();
     assert_eq!(rows[rows.len() - 2].as_array().unwrap().len(), 1);

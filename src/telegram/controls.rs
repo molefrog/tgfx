@@ -166,7 +166,7 @@ pub fn model_picker_with_icons(
         rows.push(json!([{"text":"Close","callback_data":format!("model:{id}:x")}]))
     }
     Some(
-        json!({"text":format!("Choose a model for the bot.\nCurrent model: <b>{}</b>",html(&current_label)),"parse_mode":"HTML","reply_markup":{"inline_keyboard":rows}}),
+        json!({"text":format!("Choose a model for the bot. Current model: <b>{}</b>",html(&current_label)),"parse_mode":"HTML","reply_markup":{"inline_keyboard":rows}}),
     )
 }
 
