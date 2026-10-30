@@ -1912,28 +1912,72 @@ impl Inner {
         Ok(())
     }
     async fn usage(self: &Arc<Self>, route: &Route) -> Result<()> {
-        let session = self.session(&route.key, Some(route)).await?;
-        let config = session.config_options();
-        let model = config
-            .iter()
-            .find(|v| v["id"] == "model")
-            .and_then(|v| v["currentValue"].as_str())
-            .unwrap_or("Model");
-        let spend =
-            match crate::fx::usage::read(&self.options.fx_binary, &self.options.workspace).await {
-                Ok(report) => crate::fx::usage::gateway_spend(&report),
-                Err(error) => {
-                    self.log(
-                        "usage.spend_unavailable",
-                        json!({"error":error.to_string()}),
-                    );
-                    None
-                }
+        let calculate =
+            async {
+                let session = self.session(&route.key, Some(route)).await?;
+                let config = session.config_options();
+                let model = config
+                    .iter()
+                    .find(|v| v["id"] == "model")
+                    .and_then(|v| v["currentValue"].as_str())
+                    .unwrap_or("Model");
+                let spend =
+                    match crate::fx::usage::read(&self.options.fx_binary, &self.options.workspace)
+                        .await
+                    {
+                        Ok(report) => crate::fx::usage::gateway_spend(&report),
+                        Err(error) => {
+                            self.log(
+                                "usage.spend_unavailable",
+                                json!({"error":error.to_string()}),
+                            );
+                            None
+                        }
+                    };
+                Ok::<_, anyhow::Error>(telegram::usage_report(
+                    model,
+                    session.context_usage(),
+                    spend,
+                ))
             };
-        let view = telegram::usage_report(model, session.context_usage(), spend);
+        tokio::pin!(calculate);
+        let (result, message) = tokio::select! {
+            biased;
+            result = &mut calculate => (result, None),
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                let mut params = telegram::route_params(route);
+                params["text"] = json!(format!(
+                    "<tg-emoji emoji-id=\"{}\">{}</tg-emoji> Calculating...",
+                    crate::fx::projector::LIVE_STATUS_EMOJI_ID,
+                    crate::fx::projector::LIVE_STATUS_EMOJI_ALT,
+                ));
+                params["parse_mode"] = json!("HTML");
+                let message = match self.options.telegram.call("sendMessage", params).await {
+                    Ok(message) => message.get("message_id").cloned(),
+                    Err(error) => {
+                        self.log("usage.progress_failed", json!({"error":error.to_string()}));
+                        None
+                    }
+                };
+                (calculate.await, message)
+            }
+        };
+        let view = match result {
+            Ok(view) => view,
+            Err(error) => {
+                self.log("usage.failed", json!({"error":error.to_string()}));
+                json!({"text":"Could not load fx usage right now."})
+            }
+        };
         let mut params = telegram::route_params(route);
         merge(&mut params, &view);
-        self.options.telegram.call("sendMessage", params).await?;
+        let method = if let Some(message) = message {
+            params["message_id"] = message;
+            "editMessageText"
+        } else {
+            "sendMessage"
+        };
+        self.options.telegram.call(method, params).await?;
         Ok(())
     }
     async fn answer_callback(&self, id: &str, text: &str) -> Result<()> {

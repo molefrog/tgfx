@@ -2,6 +2,9 @@ use super::tools::*;
 use crate::{secrets::redact, types::OutputMode};
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Instant};
+pub const LIVE_STATUS_EMOJI_ID: &str = "5573473356579078196";
+pub const LIVE_STATUS_EMOJI_ALT: &str = "🙂";
+
 #[derive(Clone, Debug)]
 enum Entry {
     Assistant {
@@ -395,7 +398,7 @@ if let Some(at)=t.finished_at{v["finishedAt"]=json!(at)}v}).collect();
                 "Thinking…".into()
             };
             let mut blocks = vec![
-                json!({"type":"thinking","text":[{"type":"custom_emoji","custom_emoji_id":"5573473356579078196","alternative_text":"🙂"},format!(" {line}{suffix}")]}),
+                json!({"type":"thinking","text":[{"type":"custom_emoji","custom_emoji_id":LIVE_STATUS_EMOJI_ID,"alternative_text":LIVE_STATUS_EMOJI_ALT},format!(" {line}{suffix}")]}),
             ];
             blocks.extend(self.waiting_blocks());
             return json!({"blocks":blocks});

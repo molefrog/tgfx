@@ -1324,3 +1324,67 @@ async fn usage_works_during_a_turn_even_without_billing_data() {
         r.stop().await;
     }
 }
+
+#[tokio::test]
+async fn slow_usage_replaces_its_progress_message_and_fast_usage_skips_it() {
+    for (delay, provider) in [
+        ("0", "ai_gateway"),
+        ("800", "ai_gateway"),
+        ("800", "broken"),
+    ] {
+        let r = Running::start_with_env(
+            "live",
+            &[
+                ("RUNTIME_USAGE_DELAY_MS", delay),
+                ("RUNTIME_USAGE_PROVIDER", provider),
+            ],
+        )
+        .await;
+        // Warm the ACP connection so only the requested calculation delay matters.
+        model_menu(&r).await;
+        let before = r.mock.calls.lock().unwrap().len();
+        let card = r.mock.next.load(std::sync::atomic::Ordering::Acquire);
+        r.message(2, 42, "/usage");
+        let (method, result) = r
+            .call_after(before, |m, p| {
+                ["sendMessage", "editMessageText"].contains(&m)
+                    && p["text"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("Context usage"))
+            })
+            .await;
+        let progress: Vec<_> = r
+            .mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(before)
+            .filter(|(m, p)| {
+                m == "sendMessage"
+                    && p["text"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("Calculating..."))
+            })
+            .cloned()
+            .collect();
+        if delay == "0" {
+            assert!(progress.is_empty());
+            assert_eq!(method, "sendMessage");
+        } else {
+            assert_eq!(progress.len(), 1);
+            assert!(
+                progress[0].1["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(tgfx::fx::projector::LIVE_STATUS_EMOJI_ID)
+            );
+            assert_eq!(method, "editMessageText");
+            assert_eq!(result["message_id"], card);
+        }
+        if provider == "broken" {
+            assert!(!result["text"].as_str().unwrap().contains("Gateway"));
+        }
+        r.stop().await;
+    }
+}

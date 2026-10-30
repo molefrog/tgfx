@@ -58,6 +58,7 @@ def answer(i,p):
 if "--version" in sys.argv:print("0.0.15");sys.exit()
 if "doctor" in sys.argv:print(json.dumps({"fail_count":0,"warn_count":0,"model":"fixture","auth":"fixture","workspace":os.getcwd(),"checks":[]}));sys.exit()
 if "usage" in sys.argv:
+ time.sleep(float(os.environ.get("RUNTIME_USAGE_DELAY_MS", "0"))/1000)
  totals={k:0 for k in ["total_tokens","input_tokens","output_tokens","cache_read_tokens","cache_write_tokens","reasoning_tokens","request_count","spend"]}
  provider=os.environ.get("RUNTIME_USAGE_PROVIDER","ai_gateway")
  if provider=="broken":print("unavailable",file=sys.stderr);sys.exit(1)
