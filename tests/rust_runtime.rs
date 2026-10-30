@@ -455,6 +455,63 @@ async fn closing_or_selecting_unchanged_values_deletes_the_picker_without_writin
     r.stop().await;
 }
 #[tokio::test]
+async fn completed_model_picker_actions_do_not_become_interrupted_after_restart() {
+    let mut r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
+    let mut id = 0;
+    let mut completed = vec![];
+    for action in ["x", "s.0", "a.e.0", "a.f.0"] {
+        id += 1;
+        let prefix = model_menu_at(&r, id).await;
+        if action.starts_with("a.") {
+            model_click(&r, &mut id, &prefix, "c.settings").await;
+        }
+        let before = r.mock.calls.lock().unwrap().len();
+        id += 1;
+        r.callback(id, &format!("{prefix}:{action}"), 1000);
+        r.call_after(before, |method, _| method == "deleteMessage")
+            .await;
+        completed.push(id);
+    }
+    // Telegram records the delete request before its response reaches the bot.
+    // Wait for dispatch to finish before restarting, rather than racing that response.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let pending: i64 = r
+                .db()
+                .query_row(
+                    "SELECT count(*) FROM telegram_inbox WHERE status IN ('dispatching','running')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if pending == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("completed picker actions must finish dispatch");
+    r.restart().await;
+    for update in completed {
+        let status: String = r
+            .db()
+            .query_row(
+                "SELECT status FROM telegram_inbox WHERE update_id=?",
+                [update],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "done");
+    }
+    assert!(
+        !r.mock.calls.lock().unwrap().iter().any(|(method, params)| {
+            method == "sendMessage" && text(params).contains("interrupted")
+        })
+    );
+    r.stop().await;
+}
+#[tokio::test]
 async fn choosing_a_model_closes_the_menu_and_reopening_refreshes_supported_controls() {
     let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
     let prefix = model_menu(&r).await;

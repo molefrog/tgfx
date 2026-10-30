@@ -2341,7 +2341,7 @@ impl Inner {
                     Some("x") => {
                         self.answer_callback(callback_id, "").await?;
                         self.delete_model_picker(id, route, &message_id).await?;
-                        return Ok(true);
+                        return Ok(false);
                     }
                     Some("s") | Some("a") => {
                         let model_selection = action[0] == "s";
@@ -2390,7 +2390,7 @@ impl Inner {
                         {
                             self.answer_callback(callback_id, "").await?;
                             self.delete_model_picker(id, route, &message_id).await?;
-                            return Ok(true);
+                            return Ok(false);
                         }
                         if !model_selection && lock(&self.active).contains_key(&route.key) {
                             self.answer_callback(
