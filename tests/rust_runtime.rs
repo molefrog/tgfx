@@ -2730,6 +2730,35 @@ async fn whisper_receives_only_current_public_topic_history() {
 }
 
 #[tokio::test]
+async fn whisper_language_guidance_distinguishes_the_question_from_history() {
+    let r = Running::start("final").await;
+    r.updates
+        .send(json!({"update_id":1,"message":{
+            "message_id":1,"date":1,"chat":{"id":-9,"type":"supergroup"},
+            "message_thread_id":7,"from":{"id":42,"is_bot":false},
+            "text":"The public discussion has English text."
+        }}))
+        .unwrap();
+    let question = "v это вова Vladimir Beliaev";
+    whisper(&r, 2, 42, 7, question);
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains(question))
+        .await;
+    let calls = r.fx();
+    let blocks = calls.last().unwrap()["params"]["prompt"]
+        .as_array()
+        .unwrap();
+    let context: Value = serde_json::from_str(blocks[0]["text"].as_str().unwrap()).unwrap();
+    let instructions = context["telegram_context"]["instructions"]
+        .as_str()
+        .unwrap();
+    assert!(instructions.contains("language of the current user message"));
+    assert!(instructions.contains("conversation when the message is ambiguous"));
+    assert!(instructions.contains("metadata, not a reply-language preference"));
+    assert_eq!(blocks.last().unwrap()["text"], question);
+    r.stop().await;
+}
+
+#[tokio::test]
 async fn expired_whisper_reply_target_retries_without_losing_privacy() {
     let r = Running::start("final").await;
     r.mock
