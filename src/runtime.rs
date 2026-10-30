@@ -63,6 +63,7 @@ struct Inner {
     actors: Mutex<HashMap<String, Actor>>,
     sessions: AsyncMutex<HashMap<String, SessionSlot>>,
     session_starts: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    model_controls: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     active: Mutex<HashMap<String, Active>>,
     batches: Mutex<HashMap<String, Batch>>,
     pending_models: Mutex<HashMap<String, String>>,
@@ -157,6 +158,7 @@ impl Runtime {
                 actors: Mutex::new(HashMap::new()),
                 sessions: AsyncMutex::new(HashMap::new()),
                 session_starts: Mutex::new(HashMap::new()),
+                model_controls: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashMap::new()),
                 batches: Mutex::new(HashMap::new()),
                 pending_models: Mutex::new(HashMap::new()),
@@ -2150,11 +2152,19 @@ impl Inner {
         }
         result
     }
+    fn model_control(&self, route: &str) -> Arc<AsyncMutex<()>> {
+        lock(&self.model_controls)
+            .entry(route.into())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
     async fn open_model(
         self: &Arc<Self>,
         route: &Route,
         recipient: Option<PrivateRecipient>,
     ) -> Result<()> {
+        let control = self.model_control(&route.key);
+        let _control = control.lock().await;
         let session = self.session(&route.key, Some(route)).await?;
         let config = session.config_options();
         let model = config
@@ -2560,6 +2570,8 @@ impl Inner {
                 }
             }
             "model" => {
+                let control = self.model_control(&route.key);
+                let _control = control.lock().await;
                 let interaction = self.state.interaction(id)?;
                 let Some(i) = interaction.filter(|i| {
                     i["kind"] == "model_picker"

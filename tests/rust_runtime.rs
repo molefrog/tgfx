@@ -22,6 +22,8 @@ struct Mock {
     next: Arc<std::sync::atomic::AtomicI64>,
     hang_sends: Arc<std::sync::atomic::AtomicBool>,
     hold_callbacks: Arc<std::sync::atomic::AtomicBool>,
+    hold_model_response: Arc<std::sync::atomic::AtomicBool>,
+    release_model_response: Arc<Notify>,
     reject_ephemeral: Arc<std::sync::atomic::AtomicBool>,
     release_callbacks: Arc<Notify>,
 }
@@ -44,6 +46,14 @@ async fn api(
             .load(std::sync::atomic::Ordering::Acquire)
     {
         mock.release_callbacks.notified().await;
+    }
+    if method == "sendMessage"
+        && callback_data(&body, "model:").is_some()
+        && mock
+            .hold_model_response
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        mock.release_model_response.notified().await;
     }
     if body.get("ephemeral_message_parameters").is_some()
         && mock
@@ -119,6 +129,8 @@ impl Running {
             next: Arc::new(std::sync::atomic::AtomicI64::new(1000)),
             hang_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             hold_callbacks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hold_model_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            release_model_response: Arc::new(Notify::new()),
             reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             release_callbacks: Arc::new(Notify::new()),
         };
@@ -1043,6 +1055,8 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
         next: Arc::new(std::sync::atomic::AtomicI64::new(1)),
         hang_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         hold_callbacks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        hold_model_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        release_model_response: Arc::new(Notify::new()),
         reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release_callbacks: Arc::new(Notify::new()),
     };
@@ -2269,4 +2283,35 @@ async fn check_queued_album_edit(edited_id: i64) {
             .iter()
             .any(|block| block["text"] == "REVISED_CAPTION")
     }));
+}
+
+#[tokio::test]
+async fn model_callbacks_wait_until_the_sent_card_is_recorded() {
+    let r = Running::start("live").await;
+    r.mock
+        .hold_model_response
+        .store(true, std::sync::atomic::Ordering::Release);
+    let prefix = model_menu(&r).await;
+    r.callback(2, &format!("{prefix}:x"), 1000);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let dispatched: i64 = r
+                .db()
+                .query_row(
+                    "SELECT count(*) FROM telegram_inbox WHERE update_id=2 AND status<>'received'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if dispatched == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    r.mock.release_model_response.notify_one();
+    r.call(|method, _| method == "deleteMessage").await;
+    r.stop().await;
 }
