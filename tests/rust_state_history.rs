@@ -10,6 +10,46 @@ fn fixture() -> (tempfile::TempDir, State) {
     let s = State::open(&d.path().join("state.db"), d.path()).unwrap();
     (d, s)
 }
+#[test]
+fn context_usage_is_bound_to_its_route_session_and_model() {
+    let (_d, s) = fixture();
+    let public = Route::new("100", "-9", "0", "supergroup");
+    let private = public.whisper(42);
+    for route in [&public, &private] {
+        s.ensure_route(route).unwrap();
+        s.set_route_session(&route.key, "session", false).unwrap();
+    }
+    let usage = tgfx::fx::usage::ContextUsage {
+        used: 12,
+        size: 100,
+    };
+    s.save_context_usage(&private.key, "session", "model", usage)
+        .unwrap();
+    assert_eq!(
+        s.context_usage(&private.key, "session", "model").unwrap(),
+        Some(usage)
+    );
+    assert_eq!(
+        s.context_usage(&public.key, "session", "model").unwrap(),
+        None
+    );
+    assert_eq!(
+        s.context_usage(&private.key, "other", "model").unwrap(),
+        None
+    );
+    assert_eq!(
+        s.context_usage(&private.key, "session", "other").unwrap(),
+        None
+    );
+    s.reset_route(&private.key).unwrap();
+    // A late notification from the cleared session cannot restore its count.
+    s.save_context_usage(&private.key, "session", "model", usage)
+        .unwrap();
+    assert_eq!(
+        s.context_usage(&private.key, "session", "model").unwrap(),
+        None
+    );
+}
 fn message(update: i64, id: i64, text: &str, edited: bool) -> InboundMessage {
     let raw = json!({"message_id":id,"date":id,"chat":{"id":-9,"type":"supergroup","title":"Team"},"from":{"id":42,"is_bot":false,"first_name":"Ada"},"text":text});
     let update = json!({"update_id":update,if edited{"edited_message"}else{"message"}:raw});

@@ -26,6 +26,14 @@ CREATE TABLE IF NOT EXISTS routes (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS context_usage (
+  route_key TEXT PRIMARY KEY REFERENCES routes(route_key) ON UPDATE CASCADE ON DELETE CASCADE,
+  session_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  used INTEGER NOT NULL CHECK (used >= 0),
+  size INTEGER NOT NULL CHECK (size > 0)
+);
+
 CREATE TABLE IF NOT EXISTS telegram_principals (
   ref TEXT PRIMARY KEY,
   bot_id TEXT NOT NULL,
@@ -139,4 +147,3 @@ CREATE TABLE IF NOT EXISTS context_capabilities (
 );
 CREATE INDEX IF NOT EXISTS context_route_active
   ON context_capabilities(route_key, active, created_at DESC);
-

@@ -120,6 +120,9 @@ fn valid_permission(request: &Value, response: Value) -> Value {
         rejected_permission(request)
     }
 }
+fn model_id(options: &[Value]) -> Option<&str> {
+    options.iter().find(|v| v["id"] == "model")?["currentValue"].as_str()
+}
 fn capture_update(inner: &Weak<Inner>, notification: Value) {
     if let Some(i) = inner.upgrade() {
         let update = notification.get("update").unwrap_or(&notification);
@@ -129,6 +132,9 @@ fn capture_update(inner: &Weak<Inner>, notification: Value) {
         if update["sessionUpdate"] == "config_option_update"
             && let Some(a) = update["configOptions"].as_array()
         {
+            if model_id(&i.config.read().unwrap()) != model_id(a) {
+                *i.usage.write().unwrap() = None;
+            }
             *i.config.write().unwrap() = a.clone();
         }
         if let Some(tx) = i.events.lock().unwrap().as_ref() {
@@ -348,6 +354,14 @@ impl FxSession {
     pub fn context_usage(&self) -> Option<usage::ContextUsage> {
         *self.inner.usage.read().unwrap()
     }
+    pub fn clear_context_usage(&self) {
+        *self.inner.usage.write().unwrap() = None;
+    }
+    pub fn model_id(&self) -> String {
+        model_id(&self.inner.config.read().unwrap())
+            .unwrap_or("Model")
+            .to_owned()
+    }
     pub fn replaced_previous(&self) -> bool {
         self.inner.replaced.load(Ordering::Acquire)
     }
@@ -536,6 +550,9 @@ impl FxSession {
             .any(|o| o["id"] == id && o["currentValue"] == value)
         {
             bail!("FX did not apply requested {id} configuration")
+        }
+        if model_id(&self.inner.config.read().unwrap()) != model_id(&options) {
+            *self.inner.usage.write().unwrap() = None;
         }
         *self.inner.config.write().unwrap() = options.clone();
         Ok(options)

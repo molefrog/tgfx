@@ -1733,7 +1733,7 @@ impl Inner {
                 tokio::select! {
                     _ = active.cancel.cancelled() => bail!("Turn cancelled"),
                     _ = self.stopping.cancelled() => bail!("TGFX stopped"),
-                    result = session.set_config_option("model", &model) => { result?; },
+                    result = session.set_config_option("model", &model) => { result?; self.state.clear_context_usage(&key)?; },
                 }
             }
             tokio::select! {
@@ -1857,7 +1857,7 @@ impl Inner {
     }
     async fn drive_prompt(
         self: &Arc<Self>,
-        _key: &str,
+        key: &str,
         route: Option<&Route>,
         session: &FxSession,
         blocks: Vec<Value>,
@@ -1903,6 +1903,10 @@ impl Inner {
                 event = receiver.recv(), if receiver_open => {
                     match event {
                         Some(FxEvent::Update(update)) => {
+                            if let Some(usage) = crate::fx::usage::ContextUsage::from_update(update.get("update").unwrap_or(&update))
+                            {
+                                self.record_context_usage(key, session, usage);
+                            }
                             lock(&projector).apply(&update);
                             offer_draft();
                             if let Some(route) = route.filter(|r| r.whisper_user().is_none()) {
@@ -1954,10 +1958,26 @@ impl Inner {
         if let Some(draft) = draft {
             draft.stop().await;
         }
+        if let Some(usage) = session.context_usage() {
+            self.record_context_usage(key, session, usage);
+        }
         let mut projector = std::mem::take(&mut *lock(&projector));
         projector.set_waiting(None);
         result?;
         Ok(projector)
+    }
+    fn record_context_usage(
+        &self,
+        key: &str,
+        session: &FxSession,
+        usage: crate::fx::usage::ContextUsage,
+    ) {
+        if let Err(error) =
+            self.state
+                .save_context_usage(key, &session.session_id(), &session.model_id(), usage)
+        {
+            self.log("usage.cache_failed", json!({"error":error.to_string()}));
+        }
     }
     async fn run_external(self: &Arc<Self>, event: ExternalEvent) -> Result<()> {
         let key = event_destination(&event, &self.options.bot.id);
@@ -2299,6 +2319,8 @@ impl Inner {
                 _ = self.stopping.cancelled() => bail!("TGFX stopped"),
                 session = self.session(&route.key, Some(route)) => session?,
             };
+            session.clear_context_usage();
+            self.state.clear_context_usage(&route.key)?;
             self.state.mark_inbox(row.id, "running", None)?;
             self.drive_prompt(
                 &route.key,
@@ -2468,12 +2490,12 @@ impl Inner {
         let calculate =
             async {
                 let session = self.session(&route.key, Some(route)).await?;
-                let config = session.config_options();
-                let model = config
-                    .iter()
-                    .find(|v| v["id"] == "model")
-                    .and_then(|v| v["currentValue"].as_str())
-                    .unwrap_or("Model");
+                let model = session.model_id();
+                let context = session.context_usage().or(self.state.context_usage(
+                    &route.key,
+                    &session.session_id(),
+                    &model,
+                )?);
                 let spend =
                     match crate::fx::usage::read(&self.options.fx_binary, &self.options.workspace)
                         .await
@@ -2487,11 +2509,7 @@ impl Inner {
                             None
                         }
                     };
-                Ok::<_, anyhow::Error>(telegram::usage_report(
-                    model,
-                    session.context_usage(),
-                    spend,
-                ))
+                Ok::<_, anyhow::Error>(telegram::usage_report(&model, context, spend))
             };
         tokio::pin!(calculate);
         let (result, message) = tokio::select! {
@@ -2912,6 +2930,9 @@ impl Inner {
                                 }
                             }
                             config = session.config_options();
+                            if model_selection {
+                                self.state.clear_context_usage(&route.key)?;
+                            }
                             self.state.resolve_interaction(id, choice)?;
                             if model_selection {
                                 merge(&mut edit, &telegram::selected_model(choice));

@@ -557,7 +557,7 @@ fn child_environment_excludes_service_credentials_and_control_endpoints() {
 }
 
 #[tokio::test]
-async fn context_usage_is_retained_after_prompt_and_replayed_on_load() {
+async fn context_usage_needs_a_live_update_after_loading_fx() {
     use tgfx::fx::usage::ContextUsage;
     let root = tempfile::tempdir().unwrap();
     let opts = options(root.path());
@@ -577,9 +577,24 @@ async fn context_usage_is_retained_after_prompt_and_replayed_on_load() {
     loaded_options.saved_session = Some(session.session_id());
     session.close().await.unwrap();
     let loaded = FxSession::start(loaded_options).await.unwrap();
-    assert_eq!(loaded.context_usage(), expected);
+    assert_eq!(loaded.context_usage(), None);
     loaded.close().await.unwrap();
     let fresh = FxSession::start(opts).await.unwrap();
     assert_eq!(fresh.context_usage(), None);
     fresh.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_changes_discard_the_previous_context_measurement() {
+    let root = tempfile::tempdir().unwrap();
+    let session = FxSession::start(options(root.path())).await.unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    session
+        .prompt(vec![json!({"type":"text","text":"USAGE"})], tx)
+        .await
+        .unwrap();
+    assert!(session.context_usage().is_some());
+    session.set_config_option("model", "next").await.unwrap();
+    assert_eq!(session.context_usage(), None);
+    session.close().await.unwrap();
 }

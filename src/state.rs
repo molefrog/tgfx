@@ -207,6 +207,7 @@ impl State {
         let mut discarded = 0;
         if changed {
             let t = now();
+            tx.execute("DELETE FROM context_usage", [])?;
             tx.execute(
                 "UPDATE routes SET session_id=NULL,generation=generation+1,updated_at=?",
                 [&t],
@@ -372,6 +373,10 @@ impl State {
     }
     pub fn set_route_session(&self, key: &str, id: &str, replaced: bool) -> Result<()> {
         self.connection()?.execute(
+            "DELETE FROM context_usage WHERE route_key=? AND (session_id<>? OR ?)",
+            params![key, id, replaced],
+        )?;
+        self.connection()?.execute(
             "UPDATE routes SET session_id=?,generation=generation+?,updated_at=? WHERE route_key=?",
             params![id, i64::from(replaced), now(), key],
         )?;
@@ -381,8 +386,45 @@ impl State {
         Ok(())
     }
     pub fn reset_route(&self, key: &str) -> Result<()> {
+        self.clear_context_usage(key)?;
         self.connection()?.execute("UPDATE routes SET session_id=NULL,generation=generation+1,updated_at=? WHERE route_key=?",params![now(),key])?;
         self.expire_route_capabilities(key)
+    }
+    pub fn save_context_usage(
+        &self,
+        key: &str,
+        session: &str,
+        model: &str,
+        usage: crate::fx::usage::ContextUsage,
+    ) -> Result<()> {
+        if usage.size == 0 {
+            return Ok(());
+        }
+        let (Ok(used), Ok(size)) = (i64::try_from(usage.used), i64::try_from(usage.size)) else {
+            return Ok(());
+        };
+        self.connection()?.execute(
+            "INSERT INTO context_usage(route_key,session_id,model,used,size) SELECT route_key,?,?,?,? FROM routes WHERE route_key=? AND session_id=? ON CONFLICT(route_key) DO UPDATE SET session_id=excluded.session_id,model=excluded.model,used=excluded.used,size=excluded.size",
+            params![session, model, used, size, key, session],
+        )?;
+        Ok(())
+    }
+    pub fn context_usage(
+        &self,
+        key: &str,
+        session: &str,
+        model: &str,
+    ) -> Result<Option<crate::fx::usage::ContextUsage>> {
+        Ok(self.connection()?.query_row(
+            "SELECT used,size FROM context_usage WHERE route_key=? AND session_id=? AND model=?",
+            params![key, session, model],
+            |r| Ok(crate::fx::usage::ContextUsage { used: r.get::<_, i64>(0)? as u64, size: r.get::<_, i64>(1)? as u64 }),
+        ).optional()?)
+    }
+    pub fn clear_context_usage(&self, key: &str) -> Result<()> {
+        self.connection()?
+            .execute("DELETE FROM context_usage WHERE route_key=?", [key])?;
+        Ok(())
     }
     pub fn expire_route_capabilities(&self, key: &str) -> Result<()> {
         let db = self.connection()?;

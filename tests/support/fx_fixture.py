@@ -2,7 +2,6 @@
 """A real stdio ACP peer. Concurrent worker prompts exercise ordered bidirectional dispatch."""
 import json, os, sys, threading, time
 lock=threading.Lock(); permissions={}; wait=threading.Event(); cancelled=False; ignore_cancel=False
-usage_path=os.path.join(os.getcwd(), ".fixture-usage.json")
 config=[{"id":"model","name":"Model","type":"select","currentValue":"fixture","options":[{"value":"fixture","name":"Fixture"},{"value":"next","name":"Next"}]},{"id":"mode","name":"Mode","type":"select","currentValue":"ask","options":[{"value":"auto","name":"Auto"},{"value":"ask","name":"Ask"}]}]
 if os.environ.get("RUNTIME_MODEL_SETTINGS") == "1":
  models=["fixture", "anthropic/claude-opus"]+[f"openai/model-{i}" for i in range(8)]
@@ -26,7 +25,6 @@ def answer(i,p):
  if text=="USAGE" or os.environ.get("RUNTIME_USAGE")=="1":
   usage={"sessionUpdate":"usage_update","used":6400,"size":256000}
   update(usage)
-  with open(usage_path,"w") as f:json.dump(usage,f)
   update({"sessionUpdate":"usage_update","used":0,"size":0})
  if p.get("_meta",{}).get("fx",{}).get("steer"):
   if text=="BLOCKS":update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":json.dumps(blocks)}})
@@ -78,8 +76,6 @@ for line in sys.stdin:
  elif m=="session/load":
   if p["sessionId"]=="missing":send({"jsonrpc":"2.0","id":i,"error":{"code":-32602,"message":"missing session"}})
   else:
-   if os.path.exists(usage_path):
-    with open(usage_path) as f:update(json.load(f))
    result(i,{"configOptions":visible_config()})
  elif m=="session/set_config_option":
   if p["configId"] in ["effort","fast","ultrafast"] and os.environ.get("RUNTIME_REJECT_SETTINGS") == "1":
