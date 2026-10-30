@@ -99,7 +99,14 @@ pub fn render(a: &Value) -> Result<Value> {
             a["action"].as_str().unwrap_or("clear"),
             a["id"].as_str().unwrap_or("id"),
         ),
-        "cost_report" => tgfx::telegram::cost_report(&a["report"]),
+        "usage_report" => tgfx::telegram::usage_report(
+            a["model"].as_str().unwrap_or("Model"),
+            a.get("context")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?,
+            a["spend"].as_f64(),
+        ),
         "parse_usage" => tgfx::fx::usage::parse_usage(a["source"].as_str().unwrap_or(""))?,
         "selected_model" => tgfx::telegram::selected_model(&a["model"]),
         "model_picker_icons" => serde_json::to_value(tgfx::telegram::model_picker_with_icons(

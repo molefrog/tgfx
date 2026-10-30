@@ -110,7 +110,7 @@ struct Permission {
     card: Option<Value>,
 }
 fn command_list() -> Value {
-    json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation"},{"command":"compact","description":"Compact the fx conversation"},{"command":"model","description":"Choose the fx model"},{"command":"format","description":"Choose how fx replies"},{"command":"cost","description":"Show local fx usage and spend"}])
+    json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation"},{"command":"compact","description":"Compact the fx conversation"},{"command":"model","description":"Choose the fx model"},{"command":"format","description":"Choose how fx replies"},{"command":"usage","description":"Show context usage and available spend"}])
 }
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value
@@ -913,7 +913,7 @@ impl Inner {
             self.spawn_reserved_control(id).await;
         } else if command.is_some_and(|c| {
             c.addressed
-                && ["clear", "compact", "format", "model", "cost"].contains(&c.name.as_str())
+                && ["clear", "compact", "format", "model", "usage"].contains(&c.name.as_str())
         }) {
             self.spawn_control(id);
         } else {
@@ -1034,7 +1034,7 @@ impl Inner {
                                     }
                                     "format" => self.open_format(&m.route).await?,
                                     "model" => self.open_model(&m.route).await?,
-                                    "cost" => self.cost(&m.route, None, "24h").await?,
+                                    "usage" => self.usage(&m.route).await?,
                                     _ => {
                                         self.options
                                             .telegram
@@ -1911,34 +1911,29 @@ impl Inner {
         }
         Ok(())
     }
-    async fn cost(&self, route: &Route, message: Option<&Value>, period: &str) -> Result<()> {
-        let result = async {
-            let usage = crate::fx::usage::read_usage(
-                &self.options.fx_binary,
-                &self.options.workspace,
-                period,
-            )
-            .await?;
-            let view = telegram::cost_report(&usage);
-            let mut p = telegram::route_params(route);
-            merge(&mut p, &view);
-            let method = if let Some(message) = message {
-                p["message_id"] = message.clone();
-                "editMessageText"
-            } else {
-                "sendRichMessage"
+    async fn usage(self: &Arc<Self>, route: &Route) -> Result<()> {
+        let session = self.session(&route.key, Some(route)).await?;
+        let config = session.config_options();
+        let model = config
+            .iter()
+            .find(|v| v["id"] == "model")
+            .and_then(|v| v["currentValue"].as_str())
+            .unwrap_or("Model");
+        let spend =
+            match crate::fx::usage::read(&self.options.fx_binary, &self.options.workspace).await {
+                Ok(report) => crate::fx::usage::gateway_spend(&report),
+                Err(error) => {
+                    self.log(
+                        "usage.spend_unavailable",
+                        json!({"error":error.to_string()}),
+                    );
+                    None
+                }
             };
-            self.options.telegram.call(method, p).await?;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
-        if let Err(e) = result {
-            self.log("usage.failed", json!({"error":e.to_string()}));
-            self.options
-                .telegram
-                .send_text(route, "Could not load fx usage right now.")
-                .await?;
-        }
+        let view = telegram::usage_report(model, session.context_usage(), spend);
+        let mut params = telegram::route_params(route);
+        merge(&mut params, &view);
+        self.options.telegram.call("sendMessage", params).await?;
         Ok(())
     }
     async fn answer_callback(&self, id: &str, text: &str) -> Result<()> {
@@ -2003,10 +1998,8 @@ impl Inner {
                 }
             }
             "cost" => {
-                self.answer_callback(callback_id, "").await?;
-                if crate::fx::usage::PERIODS.contains(&id) {
-                    self.cost(route, Some(&message_id), id).await?;
-                }
+                self.answer_callback(callback_id, "Use /usage to see current usage")
+                    .await?;
             }
             "session" => {
                 let interaction = self.state.interaction(id)?;

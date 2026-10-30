@@ -267,9 +267,6 @@ fn rich_controls_and_icons_match_frankenstein_schema() {
         json!({"blocks":[{"type":"paragraph","text":[span]}]}),
     )
     .unwrap();
-    let report = json!({"period":"24h","totals":{"spend":1.0,"request_count":3,"total_tokens":100},"models":[]});
-    serde_json::from_value::<InputRichMessage>(cost_report(&report)["rich_message"].clone())
-        .unwrap();
 }
 #[tokio::test]
 async fn continuous_stream_updates_do_not_postpone_commits() {

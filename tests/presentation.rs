@@ -72,7 +72,7 @@ cases! {
     group_migration => "migration",
     confirmation_buttons => "session_confirmation",
     usage_validation => "parse_usage",
-    usage_presentation => "cost_report",
+    usage_presentation => "usage_report",
     selected_model_presentation => "selected_model",
     model_pagination_and_icons => "model_picker_icons",
 }

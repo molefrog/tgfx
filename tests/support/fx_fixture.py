@@ -2,6 +2,7 @@
 """A real stdio ACP peer. Concurrent worker prompts exercise ordered bidirectional dispatch."""
 import json, os, sys, threading, time
 lock=threading.Lock(); permissions={}; wait=threading.Event(); cancelled=False; ignore_cancel=False
+usage_path=os.path.join(os.getcwd(), ".fixture-usage.json")
 config=[{"id":"model","name":"Model","type":"select","currentValue":"fixture","options":[{"value":"fixture","name":"Fixture"},{"value":"next","name":"Next"}]},{"id":"mode","name":"Mode","type":"select","currentValue":"ask","options":[{"value":"auto","name":"Auto"},{"value":"ask","name":"Ask"}]}]
 if os.environ.get("RUNTIME_MODEL_SETTINGS") == "1":
  models=["fixture", "anthropic/claude-opus"]+[f"openai/model-{i}" for i in range(8)]
@@ -22,6 +23,11 @@ def answer(i,p):
  global cancelled, ignore_cancel
  blocks=p.get("prompt",[]); text=blocks[-1].get("text","") if blocks else ""
  update({"sessionUpdate":"fixture_future_update","_meta":{"unknown":True}})
+ if text=="USAGE" or os.environ.get("RUNTIME_USAGE")=="1":
+  usage={"sessionUpdate":"usage_update","used":6400,"size":256000}
+  update(usage)
+  with open(usage_path,"w") as f:json.dump(usage,f)
+  update({"sessionUpdate":"usage_update","used":0,"size":0})
  if p.get("_meta",{}).get("fx",{}).get("steer"):
   if text=="BLOCKS":update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":json.dumps(blocks)}})
   cancelled=False;wait.set();result(i,{"stopReason":"end_turn"});return
@@ -53,7 +59,10 @@ if "--version" in sys.argv:print("0.0.15");sys.exit()
 if "doctor" in sys.argv:print(json.dumps({"fail_count":0,"warn_count":0,"model":"fixture","auth":"fixture","workspace":os.getcwd(),"checks":[]}));sys.exit()
 if "usage" in sys.argv:
  totals={k:0 for k in ["total_tokens","input_tokens","output_tokens","cache_read_tokens","cache_write_tokens","reasoning_tokens","request_count","spend"]}
- print(json.dumps({"kind":"usage","schema_version":1,"period":"24h","totals":totals,"models":[]}));sys.exit()
+ provider=os.environ.get("RUNTIME_USAGE_PROVIDER","ai_gateway")
+ if provider=="broken":print("unavailable",file=sys.stderr);sys.exit(1)
+ totals["spend"]=6.94 if provider=="ai_gateway" else 0
+ print(json.dumps({"kind":"usage","schema_version":2,"source":provider,"status":"unavailable" if provider=="unavailable" else "ready","period":sys.argv[sys.argv.index("--period")+1],"totals":totals,"models":[]}));sys.exit()
 for line in sys.stdin:
  try:r=json.loads(line)
  except ValueError:continue
@@ -65,7 +74,10 @@ for line in sys.stdin:
  elif m=="session/new":result(i,{"sessionId":"fixture","configOptions":visible_config()})
  elif m=="session/load":
   if p["sessionId"]=="missing":send({"jsonrpc":"2.0","id":i,"error":{"code":-32602,"message":"missing session"}})
-  else:result(i,{"configOptions":visible_config()})
+  else:
+   if os.path.exists(usage_path):
+    with open(usage_path) as f:update(json.load(f))
+   result(i,{"configOptions":visible_config()})
  elif m=="session/set_config_option":
   if p["configId"] in ["effort","fast","ultrafast"] and os.environ.get("RUNTIME_REJECT_SETTINGS") == "1":
    send({"jsonrpc":"2.0","id":i,"error":{"code":-32602,"message":"setting unavailable"}});continue

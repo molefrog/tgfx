@@ -271,7 +271,7 @@ async fn cli_preflight_and_usage_use_real_subprocess() {
         .await
         .unwrap();
     assert_eq!(inspect["version"], "0.0.15");
-    let usage = tgfx::fx::usage::read(&opts.binary, root.path(), "24h")
+    let usage = tgfx::fx::usage::read(&opts.binary, root.path())
         .await
         .unwrap();
     assert_eq!(usage["kind"], "usage");
@@ -553,4 +553,32 @@ fn child_environment_excludes_service_credentials_and_control_endpoints() {
         .map(|(key, _)| key.to_string_lossy().into_owned())
         .collect();
     assert_eq!(kept, vec!["PATH", "HOME", "FX_API_KEY", "HTTPS_PROXY"]);
+}
+
+#[tokio::test]
+async fn context_usage_is_retained_after_prompt_and_replayed_on_load() {
+    use tgfx::fx::usage::ContextUsage;
+    let root = tempfile::tempdir().unwrap();
+    let opts = options(root.path());
+    let session = FxSession::start(opts.clone()).await.unwrap();
+    assert_eq!(session.context_usage(), None);
+    let (tx, _) = mpsc::unbounded_channel();
+    session
+        .prompt(vec![json!({"type":"text","text":"USAGE"})], tx)
+        .await
+        .unwrap();
+    let expected = Some(ContextUsage {
+        used: 6400,
+        size: 256000,
+    });
+    assert_eq!(session.context_usage(), expected);
+    let mut loaded_options = opts.clone();
+    loaded_options.saved_session = Some(session.session_id());
+    session.close().await.unwrap();
+    let loaded = FxSession::start(loaded_options).await.unwrap();
+    assert_eq!(loaded.context_usage(), expected);
+    loaded.close().await.unwrap();
+    let fresh = FxSession::start(opts).await.unwrap();
+    assert_eq!(fresh.context_usage(), None);
+    fresh.close().await.unwrap();
 }

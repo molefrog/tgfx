@@ -1265,3 +1265,62 @@ async fn nonstreaming_compaction_edits_its_visible_progress_message() {
     );
     r.stop().await;
 }
+
+#[tokio::test]
+async fn usage_reports_current_context_and_survives_runtime_restart() {
+    let mut r = Running::start_with_env("live", &[("RUNTIME_USAGE", "1")]).await;
+    let (_, registered) = r.call(|method, _| method == "setMyCommands").await;
+    let commands = registered["commands"].as_array().unwrap();
+    assert!(commands.iter().any(|c| c["command"] == "usage"));
+    assert!(!commands.iter().any(|c| c["command"] == "cost"));
+    r.message(1, 42, "/usage");
+    let (_, empty) = r
+        .call(|m, p| {
+            m == "sendMessage"
+                && p["text"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("not available yet"))
+        })
+        .await;
+    assert!(empty["text"].as_str().unwrap().contains("$6.94"));
+    assert!(!r.fx().iter().any(|v| v["method"] == "session/prompt"));
+    r.message(2, 42, "hello");
+    r.event(|v| v["event"] == "turn.delivered").await;
+    let before = r.mock.calls.lock().unwrap().len();
+    r.message(3, 42, "/usage");
+    let (_, view) = r
+        .call_after(before, |m, p| {
+            m == "sendMessage" && p["text"].as_str().is_some_and(|s| s.contains("2.5%"))
+        })
+        .await;
+    assert!(view["text"].as_str().unwrap().contains("6.4K / 256K"));
+    r.restart().await;
+    r.message(4, 42, "/usage");
+    r.call(|m, p| m == "sendMessage" && p["text"].as_str().is_some_and(|s| s.contains("2.5%")))
+        .await;
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn usage_works_during_a_turn_even_without_billing_data() {
+    for provider in ["grok", "broken"] {
+        let r = Running::start_with_env(
+            "live",
+            &[("RUNTIME_USAGE", "1"), ("RUNTIME_USAGE_PROVIDER", provider)],
+        )
+        .await;
+        r.message(1, 42, "WAIT");
+        r.call(|m, p| m == "sendRichMessageDraft" && text(p).contains("WAIT_READY"))
+            .await;
+        let before = r.mock.calls.lock().unwrap().len();
+        r.message(2, 42, "/usage");
+        let (_, view) = r
+            .call_after(before, |m, p| {
+                m == "sendMessage" && p["text"].as_str().is_some_and(|s| s.contains("2.5%"))
+            })
+            .await;
+        assert!(!view["text"].as_str().unwrap().contains("Gateway"));
+        r.message(3, 42, "/stop");
+        r.stop().await;
+    }
+}

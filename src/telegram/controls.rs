@@ -425,75 +425,51 @@ fn compact(number: u64) -> String {
     };
     format!(
         "{}{suffix}",
-        format!("{value:.2}")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
+        format!(
+            "{value:.precision$}",
+            precision = if suffix == "K" { 1 } else { 2 }
+        )
+        .trim_end_matches('0')
+        .trim_end_matches('.')
     )
 }
-fn model_name(model: &str) -> String {
-    model
-        .rsplit('/')
-        .next()
-        .unwrap_or(model)
-        .split('-')
-        .map(|part| match part.to_lowercase().as_str() {
-            "claude" => "Claude".into(),
-            "deepseek" => "DeepSeek".into(),
-            "fast" => "Fast".into(),
-            "gemini" => "Gemini".into(),
-            "glm" => "GLM".into(),
-            "gpt" => "GPT".into(),
-            "kimi" => "Kimi".into(),
-            "pro" => "Pro".into(),
-            _ => {
-                if part.len() > 1
-                    && part.as_bytes()[0].is_ascii_alphabetic()
-                    && part.as_bytes()[1..].iter().all(u8::is_ascii_digit)
-                {
-                    part.to_uppercase()
-                } else {
-                    let mut chars = part.chars();
-                    chars
-                        .next()
-                        .map(|first| format!("{}{}", first.to_uppercase(), chars.as_str()))
-                        .unwrap_or_default()
-                }
+/// A fixed-width, fractional Unicode bar keeps small context percentages visible.
+fn context_bar(usage: crate::fx::usage::ContextUsage) -> String {
+    const FRACTIONS: [char; 8] = ['░', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    let size = u128::from(usage.size);
+    let units = ((u128::from(usage.used.min(usage.size)) * 160 + size / 2) / size) as usize;
+    (0..20)
+        .map(|cell| {
+            let filled = units.saturating_sub(cell * 8);
+            if filled >= 8 {
+                '█'
+            } else {
+                FRACTIONS[filled]
             }
         })
-        .collect::<Vec<String>>()
-        .join(" ")
+        .collect()
 }
-pub fn cost_report(report: &Value) -> Value {
-    let totals = &report["totals"];
-    let period = report["period"].as_str().unwrap_or("24h");
-    let label = match period {
-        "7d" => "7 days",
-        "30d" => "30 days",
-        _ => "24 hours",
-    };
-    let mut text = format!(
-        "**Usage**\n\n_Last {label}_\n\n**\\${:.2} spent** across **{} requests**\n\n**{} tokens** processed\n\n**Token breakdown**\n\n- Input: **{}**\n- Output: **{}**\n- Cache read: **{}**\n- Reasoning: **{}**",
-        totals["spend"].as_f64().unwrap_or(0.),
-        totals["request_count"].as_u64().unwrap_or(0),
-        compact(totals["total_tokens"].as_u64().unwrap_or(0)),
-        compact(totals["input_tokens"].as_u64().unwrap_or(0)),
-        compact(totals["output_tokens"].as_u64().unwrap_or(0)),
-        compact(totals["cache_read_tokens"].as_u64().unwrap_or(0)),
-        compact(totals["reasoning_tokens"].as_u64().unwrap_or(0))
-    );
-    if let Some(models) = report["models"].as_array().filter(|a| !a.is_empty()) {
-        text.push_str("\n\n| Model | Cost | Tokens |\n| :--- | ---: | ---: |\n");
-        for m in models {
-            text.push_str(&format!(
-                "| {} | \\${:.2} | {} |\n",
-                model_name(m["model"].as_str().unwrap_or(""))
-                    .replace('\\', "\\\\")
-                    .replace('|', "\\|")
-                    .replace('\n', " "),
-                m["totals"]["spend"].as_f64().unwrap_or(0.),
-                compact(m["totals"]["total_tokens"].as_u64().unwrap_or(0))
-            ));
-        }
+
+pub fn usage_report(
+    model: &str,
+    context: Option<crate::fx::usage::ContextUsage>,
+    spend: Option<f64>,
+) -> Value {
+    let model = model.rsplit('/').next().unwrap_or(model);
+    let mut text = format!("<b>{}</b>\n\n", html(model));
+    if let Some(context) = context.filter(|context| context.size > 0) {
+        text.push_str(&format!(
+            "Context  <code>{}</code>  {:.1}%\n{} / {} tokens",
+            context_bar(context),
+            context.used as f64 / context.size as f64 * 100.,
+            compact(context.used),
+            compact(context.size),
+        ));
+    } else {
+        text.push_str("Context usage is not available yet.");
     }
-    json!({"rich_message":serde_json::to_value(crate::markdown::render(&text).unwrap()).unwrap(),"reply_markup":{"inline_keyboard":[([( "24h","24 hours"),("7d","7 days"),("30d","30 days")].map(|(p,l)|json!({"text":l,"callback_data":if p==period{"cost:n".into()}else{format!("cost:{p}")}})))]}})
+    if let Some(spend) = spend.filter(|spend| spend.is_finite() && *spend >= 0.) {
+        text.push_str(&format!("\n\nGateway spend · ${spend:.2} this month"));
+    }
+    json!({"text":text,"parse_mode":"HTML"})
 }

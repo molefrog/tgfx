@@ -17,7 +17,7 @@ Not 𝒕𝒈(𝒇x): the aim is chatting with your agent from Telegram the way y
 - [x] Can send stickers and react to messages
 - [x] Interactive model picker with reasoning effort and Regular / Fast / Ultrafast speed controls (`/model`, when supported by the model)
 - [x] Conversation compaction (`/compact`) and fresh starts (`/clear`), with inline confirmation buttons
-- [x] Cost reports (`/cost`)
+- [x] Context usage and available spend (`/usage`)
 - [x] Approval cards for destructive actions
 - [x] Bots can be group admins: pin messages, moderate, and more
 - [x] Custom emoji icons for tool calls and popular MCPs ([see below](#custom-icons))

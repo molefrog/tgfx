@@ -50,6 +50,7 @@ pub struct FxSession {
 struct Inner {
     id: RwLock<String>,
     config: RwLock<Vec<Value>>,
+    usage: RwLock<Option<usage::ContextUsage>>,
     agent: RwLock<Value>,
     replaced: AtomicBool,
     connection: RwLock<Option<ConnectionTo<Agent>>>,
@@ -121,6 +122,9 @@ fn valid_permission(request: &Value, response: Value) -> Value {
 fn capture_update(inner: &Weak<Inner>, notification: Value) {
     if let Some(i) = inner.upgrade() {
         let update = notification.get("update").unwrap_or(&notification);
+        if let Some(usage) = usage::ContextUsage::from_update(update) {
+            *i.usage.write().unwrap() = Some(usage);
+        }
         if update["sessionUpdate"] == "config_option_update"
             && let Some(a) = update["configOptions"].as_array()
         {
@@ -139,6 +143,7 @@ impl FxSession {
         let inner = Arc::new(Inner {
             id: RwLock::new(String::new()),
             config: RwLock::new(vec![]),
+            usage: RwLock::new(None),
             agent: RwLock::new(Value::Null),
             replaced: AtomicBool::new(false),
             connection: RwLock::new(None),
@@ -329,6 +334,9 @@ impl FxSession {
     }
     pub fn config_options(&self) -> Vec<Value> {
         self.inner.config.read().unwrap().clone()
+    }
+    pub fn context_usage(&self) -> Option<usage::ContextUsage> {
+        *self.inner.usage.read().unwrap()
     }
     pub fn replaced_previous(&self) -> bool {
         self.inner.replaced.load(Ordering::Acquire)
