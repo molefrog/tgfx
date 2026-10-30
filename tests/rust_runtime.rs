@@ -1407,43 +1407,80 @@ async fn group_session_actions_stay_private_and_out_of_shared_history() {
 }
 
 #[tokio::test]
-async fn only_the_requester_can_confirm_and_cancel_never_runs_an_action() {
-    let r = Running::start("live").await;
-    // A public command from an older client still gets a private response.
-    r.message(1, -9, "/clear@fixture_bot");
-    let c = r.event(|e| e["event"] == "session.confirmation").await;
-    let card = c["message_id"].as_i64().unwrap();
-    let generation: i64 = r
-        .db()
-        .query_row(
-            "SELECT generation FROM routes WHERE route_key='100:-9:0'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    // Public command has no topic in this case.
-    for (id, user, choice) in [(2, 43, "confirm"), (3, 42, "cancel"), (4, 42, "confirm")] {
-        r.updates.send(json!({"update_id":id,"callback_query":{
-            "id":format!("cb{id}"),"from":{"id":user,"is_bot":false},"data":format!("session:{}:{choice}", c["id"].as_str().unwrap()),
-            "message":{"ephemeral_message_id":card,"chat":{"id":-9,"type":"supergroup"}}
-        }})).unwrap();
-        r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == format!("cb{id}"))
-            .await;
-    }
-    r.call(|m, p| m == "editEphemeralMessageText" && text(p).contains("Cancelled"))
-        .await;
-    assert!(r.fx().is_empty());
-    assert_eq!(
-        r.db()
+async fn only_the_requester_can_confirm_and_cancelling_deletes_the_card() {
+    for chat in [42, -9] {
+        let r = Running::start("live").await;
+        r.message(1, chat, "/clear@fixture_bot");
+        let c = r.event(|e| e["event"] == "session.confirmation").await;
+        let card = c["message_id"].as_i64().unwrap();
+        let route = format!("100:{chat}:0");
+        let generation: i64 = r
+            .db()
             .query_row(
-                "SELECT generation FROM routes WHERE route_key='100:-9:0'",
-                [],
-                |row| row.get::<_, i64>(0)
+                "SELECT generation FROM routes WHERE route_key=?",
+                [&route],
+                |row| row.get(0),
             )
-            .unwrap(),
-        generation
-    );
-    r.stop().await;
+            .unwrap();
+        let before = r.mock.calls.lock().unwrap().len();
+        for (id, user, choice) in [(2, 43, "confirm"), (3, 42, "cancel"), (4, 42, "confirm")] {
+            let mut message =
+                json!({"chat":{"id":chat,"type":if chat < 0 {"supergroup"} else {"private"}}});
+            message[if chat < 0 {
+                "ephemeral_message_id"
+            } else {
+                "message_id"
+            }] = json!(card);
+            r.updates.send(json!({"update_id":id,"callback_query":{
+                "id":format!("cb{id}"),"from":{"id":user,"is_bot":false},
+                "data":format!("session:{}:{choice}", c["id"].as_str().unwrap()),"message":message
+            }})).unwrap();
+            r.call(|m, p| {
+                m == "answerCallbackQuery" && p["callback_query_id"] == format!("cb{id}")
+            })
+            .await;
+        }
+        let method = if chat < 0 {
+            "deleteEphemeralMessage"
+        } else {
+            "deleteMessage"
+        };
+        let (_, deleted) = r.call(|m, _| m == method).await;
+        assert_eq!(deleted["chat_id"], chat.to_string());
+        if chat < 0 {
+            assert_eq!(deleted["receiver_user_id"], 42);
+            assert_eq!(deleted["ephemeral_message_id"], card);
+        } else {
+            assert_eq!(deleted["message_id"], card);
+        }
+        assert!(
+            r.mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(before)
+                .all(|(m, _)| ![
+                    "sendMessage",
+                    "sendRichMessage",
+                    "editMessageText",
+                    "editEphemeralMessageText"
+                ]
+                .contains(&m.as_str()))
+        );
+        assert!(r.fx().is_empty());
+        assert_eq!(
+            r.db()
+                .query_row(
+                    "SELECT generation FROM routes WHERE route_key=?",
+                    [&route],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            generation
+        );
+        r.stop().await;
+    }
 }
 
 #[tokio::test]

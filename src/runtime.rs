@@ -2440,14 +2440,20 @@ impl Inner {
                     return Ok(true);
                 }
                 self.signal_control_ready(row.id);
-                self.answer_callback(callback_id, "Cancelled").await?;
-                self.edit_session_card(
-                    route,
-                    &card,
-                    "Cancelled. The conversation is unchanged.",
-                    false,
-                )
-                .await?;
+                self.answer_callback(callback_id, "").await?;
+                let (method, params) = if let Some(recipient) = &card.recipient {
+                    (
+                        "deleteEphemeralMessage",
+                        json!({"chat_id":route.chat_id,
+                        "receiver_user_id":recipient.user_id,"ephemeral_message_id":card.message_id}),
+                    )
+                } else {
+                    (
+                        "deleteMessage",
+                        json!({"chat_id":route.chat_id,"message_id":card.message_id}),
+                    )
+                };
+                self.options.telegram.call(method, params).await?;
             }
             "fxp" => {
                 if !in_approvals {
