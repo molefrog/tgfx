@@ -166,7 +166,7 @@ pub fn model_picker_with_icons(
         rows.push(json!([{"text":"Close","callback_data":format!("model:{id}:x")}]))
     }
     Some(
-        json!({"text":format!("Choose model: <b>{}</b>",html(&current_label)),"parse_mode":"HTML","reply_markup":{"inline_keyboard":rows}}),
+        json!({"text":format!("Choose a model for the bot.\nCurrent model: <b>{}</b>",html(&current_label)),"parse_mode":"HTML","reply_markup":{"inline_keyboard":rows}}),
     )
 }
 
@@ -233,11 +233,14 @@ pub fn model_setting_choices(config: &[Value], panel: &str) -> Vec<Value> {
             .map(|o| {
                 let value = o["value"].as_str().unwrap_or_default();
                 let name = match value {
-                    "auto" => "Default",
-                    "xhigh" => "Extra high",
+                    "auto" => "Auto",
+                    "xhigh" => "Extra High",
                     "high" => "High",
                     "medium" => "Medium",
                     "low" => "Low",
+                    "minimal" => "Minimal",
+                    "none" => "None",
+                    "max" => "Max",
                     _ => o["name"].as_str().unwrap_or(value),
                 };
                 json!({"name":name,"value":value,"changes":[["effort",value]]})
@@ -255,9 +258,9 @@ pub fn model_setting_choices(config: &[Value], panel: &str) -> Vec<Value> {
         return vec![];
     }
     let mut choices = vec![
-        json!({"name":"Regular","value":"regular","changes":toggles.iter().map(|o|json!([o["id"],"false"])).collect::<Vec<_>>()}),
+        json!({"name":"Regular Speed","value":"regular","changes":toggles.iter().map(|o|json!([o["id"],"false"])).collect::<Vec<_>>()}),
     ];
-    for (id, name) in [("fast", "Fast"), ("ultrafast", "Ultrafast")] {
+    for (id, name) in [("fast", "⚡ Fast"), ("ultrafast", "⚡⚡ Ultrafast")] {
         if toggles.iter().any(|o| o["id"] == id) {
             choices.push(json!({"name":name,"value":id,"changes":[[id,"true"]]}));
         }
@@ -284,7 +287,27 @@ fn current_setting(config: &[Value], panel: &str) -> String {
     "regular".into()
 }
 
-/// Keep the model list and its settings in one card, with small focused submenus.
+pub fn model_settings_summary(config: &[Value]) -> Option<String> {
+    let mut labels = vec![];
+    for panel in ["e", "f"] {
+        let current = current_setting(config, panel);
+        let choices = model_setting_choices(config, panel);
+        if let Some(name) = choices
+            .iter()
+            .find(|choice| choice["value"] == current)
+            .and_then(|choice| choice["name"].as_str())
+        {
+            labels.push(if panel == "e" {
+                format!("{name} Effort")
+            } else {
+                name.into()
+            });
+        }
+    }
+    (!labels.is_empty()).then(|| labels.join(" · "))
+}
+
+/// One summary button opens the supported effort and speed choices together.
 pub fn model_menu(
     config: &[Value],
     id: &str,
@@ -296,50 +319,57 @@ pub fn model_menu(
     let model = config.iter().find(|o| o["id"] == "model")?;
     let options = select_options(model);
     let mut view = model_picker(&options, &config_value(model), id, provider, page, icons)?;
-    let mut settings = vec![];
-    for (key, title) in [("e", "Effort"), ("f", "Speed")] {
-        let choices = model_setting_choices(config, key);
-        if choices.is_empty() {
-            continue;
-        }
-        let current = current_setting(config, key);
-        let label = choices
+    let speed = current_setting(config, "f");
+    let badge = match speed.as_str() {
+        "fast" => " ⚡",
+        "ultrafast" => " ⚡⚡",
+        _ => "",
+    };
+    if !badge.is_empty()
+        && model_setting_choices(config, "f")
             .iter()
-            .find(|o| o["value"] == current)
-            .and_then(|o| o["name"].as_str())
-            .unwrap_or(&current);
-        settings.push(json!({"text":format!("{title} · {label} ›"),"callback_data":format!("model:{id}:c.{key}")}));
+            .any(|choice| choice["value"] == speed)
+    {
+        view["text"] = json!(format!(
+            "{}{badge}",
+            view["text"].as_str().unwrap_or_default()
+        ));
     }
-    if let Some(panel) = panel {
-        let choices = model_setting_choices(config, panel);
-        if choices.is_empty() {
-            return Some(view);
+    let summary = model_settings_summary(config);
+    if panel.is_some() && summary.is_some() {
+        let mut rows = vec![];
+        for panel in ["e", "f"] {
+            let current = current_setting(config, panel);
+            let buttons = model_setting_choices(config, panel)
+                .iter()
+                .enumerate()
+                .map(|(index, choice)| {
+                    json!({"text":format!("{}{}",if choice["value"]==current{"✓ "}else{""},choice["name"].as_str().unwrap_or_default()),"callback_data":format!("model:{id}:a.{panel}.{index}")})
+                })
+                .collect::<Vec<_>>();
+            rows.extend(
+                buttons
+                    .chunks(if panel == "f" { 3 } else { 2 })
+                    .map(|row| json!(row)),
+            );
         }
-        let current = current_setting(config, panel);
-        let buttons = choices.iter().enumerate().map(|(index, o)| {
-            json!({"text":format!("{}{}",if o["value"]==current{"✓ "}else{""},o["name"].as_str().unwrap_or_default()),"callback_data":format!("model:{id}:a.{panel}.{index}")})
-        }).collect::<Vec<_>>();
-        let mut rows = buttons
-            .chunks(if panel == "f" { 3 } else { 2 })
-            .map(|row| json!(row))
-            .collect::<Vec<_>>();
         rows.push(json!([{"text":"‹ Models","callback_data":format!("model:{id}:b")},{"text":"Close","callback_data":format!("model:{id}:x")}]));
-        let (title, hint) = if panel == "e" {
-            (
-                "Reasoning effort",
-                "How much the model thinks before answering. Default lets FX choose.",
-            )
-        } else {
-            (
-                "Response speed",
-                "Choose a speed lane for this model. Faster lanes may cost more.",
-            )
+        let title = match (
+            model_setting_choices(config, "e").is_empty(),
+            model_setting_choices(config, "f").is_empty(),
+        ) {
+            (false, false) => "Effort and speed",
+            (false, true) => "Reasoning effort",
+            _ => "Response speed",
         };
-        view["text"] = json!(format!("<b>{title}</b>\n\n{hint}"));
+        view["text"] = json!(format!(
+            "<b>{title}</b>\n\n{}",
+            html(summary.as_deref().unwrap())
+        ));
         view["reply_markup"]["inline_keyboard"] = json!(rows);
-    } else if !settings.is_empty() {
+    } else if let Some(summary) = summary {
         let rows = view["reply_markup"]["inline_keyboard"].as_array_mut()?;
-        rows.insert(rows.len().saturating_sub(1), json!(settings));
+        rows.insert(rows.len().saturating_sub(1), json!([{"text":format!("{summary} ›"),"callback_data":format!("model:{id}:c.settings")} ]));
     }
     Some(view)
 }
@@ -354,7 +384,7 @@ pub fn custom_icons(kind: Option<&str>) -> Vec<Value> {
         .collect()
 }
 pub fn selected_model(model: &Value) -> Value {
-    json!({"text":format!("Model changed to\n\n<b>{}</b>",html(model["name"].as_str().or(model["value"].as_str()).unwrap_or(""))),"reply_markup":{"inline_keyboard":[]}})
+    json!({"text":format!("Changed model to <b>{}</b>",html(model["name"].as_str().or(model["value"].as_str()).unwrap_or(""))),"reply_markup":{"inline_keyboard":[]}})
 }
 pub fn reply_style_picker(current: crate::types::OutputMode) -> Value {
     let modes = [

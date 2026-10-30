@@ -346,9 +346,15 @@ fn callback_data(value: &Value, prefix: &str) -> Option<String> {
         .map(str::to_owned)
 }
 async fn model_menu(r: &Running) -> String {
-    r.message(1, 42, "/model");
+    model_menu_at(r, 1).await
+}
+async fn model_menu_at(r: &Running, update: i64) -> String {
+    let before = r.mock.calls.lock().unwrap().len();
+    r.message(update, 42, "/model");
     let (_, menu) = r
-        .call(|m, p| m == "sendMessage" && callback_data(p, "model:").is_some())
+        .call_after(before, |m, p| {
+            m == "sendMessage" && callback_data(p, "model:").is_some()
+        })
         .await;
     callback_data(&menu, "model:")
         .unwrap()
@@ -364,27 +370,30 @@ async fn model_click(r: &Running, id: &mut i64, prefix: &str, action: &str) -> V
     r.call_after(before, |m, _| m == "editMessageText").await.1
 }
 #[tokio::test]
-async fn model_settings_apply_through_acp_and_keep_the_current_page() {
+async fn model_settings_apply_through_acp_and_close_the_menu() {
     let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
     let prefix = model_menu(&r).await;
     let mut id = 1;
     model_click(&r, &mut id, &prefix, "v.2.1").await;
-    model_click(&r, &mut id, &prefix, "c.e").await;
+    let settings = model_click(&r, &mut id, &prefix, "c.settings").await;
+    assert!(callback_data(&settings, &format!("{prefix}:a.e.")).is_some());
+    assert!(callback_data(&settings, &format!("{prefix}:a.f.")).is_some());
     let effort = model_click(&r, &mut id, &prefix, "a.e.1").await;
-    assert!(callback_data(&effort, &format!("{prefix}:v.2.0")).is_some());
-    assert!(text(&effort).contains("Effort · High"));
+    assert!(callback_data(&effort, &prefix).is_none());
+    assert!(text(&effort).contains("High Effort"));
+    id += 1;
+    r.callback(id, &format!("{prefix}:a.e.2"), 1000);
+    let (_, expired) = r
+        .call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == format!("cb{id}"))
+        .await;
+    assert!(text(&expired).contains("expired"));
     for (index, label) in [(1, "Fast"), (2, "Ultrafast"), (0, "Regular")] {
-        let submenu = model_click(&r, &mut id, &prefix, "c.f").await;
-        assert_eq!(
-            submenu["reply_markup"]["inline_keyboard"][0]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
+        id += 1;
+        let prefix = model_menu_at(&r, id).await;
+        model_click(&r, &mut id, &prefix, "c.settings").await;
         let view = model_click(&r, &mut id, &prefix, &format!("a.f.{index}")).await;
-        assert!(text(&view).contains(&format!("Speed · {label}")));
-        assert!(callback_data(&view, &format!("{prefix}:v.2.0")).is_some());
+        assert!(text(&view).contains(label));
+        assert!(callback_data(&view, &prefix).is_none());
     }
     let writes: Vec<_> = r
         .fx()
@@ -405,11 +414,46 @@ async fn model_settings_apply_through_acp_and_keep_the_current_page() {
     r.stop().await;
 }
 #[tokio::test]
-async fn changing_model_refreshes_supported_controls_without_closing_the_menu() {
+async fn closing_or_selecting_unchanged_values_deletes_the_picker_without_writing_settings() {
+    let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
+    let mut id = 0;
+    for action in ["x", "s.0", "a.e.0", "a.f.0"] {
+        id += 1;
+        let prefix = model_menu_at(&r, id).await;
+        if action != "s.0" {
+            model_click(&r, &mut id, &prefix, "c.settings").await;
+        }
+        let before = r.mock.calls.lock().unwrap().len();
+        id += 1;
+        r.callback(id, &format!("{prefix}:{action}"), 1000);
+        let (_, deleted) = r
+            .call_after(before, |method, _| method == "deleteMessage")
+            .await;
+        assert_eq!(deleted["chat_id"], "42");
+        assert_eq!(deleted["message_id"], 1000);
+    }
+    assert!(
+        r.fx().iter().all(
+            |v| v["method"] != "session/set_config_option" || v["params"]["configId"] == "mode"
+        )
+    );
+    r.stop().await;
+}
+#[tokio::test]
+async fn choosing_a_model_closes_the_menu_and_reopening_refreshes_supported_controls() {
     let r = Running::start_with_env("live", &[("RUNTIME_MODEL_SETTINGS", "1")]).await;
     let prefix = model_menu(&r).await;
     let view = model_click(&r, &mut 1, &prefix, "s.1").await;
     assert!(text(&view).contains("claude-opus"));
+    assert!(
+        view["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Changed model to ")
+    );
+    assert!(callback_data(&view, &prefix).is_none());
+    let prefix = model_menu_at(&r, 3).await;
+    let view = model_click(&r, &mut 3, &prefix, "p.0").await;
     assert!(callback_data(&view, &format!("{prefix}:c.")).is_none());
     assert!(callback_data(&view, &format!("{prefix}:x")).is_some());
     r.stop().await;
@@ -426,7 +470,7 @@ async fn rejected_setting_keeps_the_menu_usable_and_does_not_claim_success() {
     .await;
     let prefix = model_menu(&r).await;
     let mut id = 1;
-    model_click(&r, &mut id, &prefix, "c.e").await;
+    model_click(&r, &mut id, &prefix, "c.settings").await;
     r.callback(3, &format!("{prefix}:a.e.1"), 1000);
     let (_, answer) = r
         .call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "cb3")
@@ -434,7 +478,7 @@ async fn rejected_setting_keeps_the_menu_usable_and_does_not_claim_success() {
     assert!(text(&answer).contains("could not apply"));
     id = 3;
     let view = model_click(&r, &mut id, &prefix, "b").await;
-    assert!(text(&view).contains("Effort · Default"));
+    assert!(text(&view).contains("Auto Effort"));
     r.stop().await;
 }
 #[tokio::test]
@@ -454,7 +498,9 @@ async fn effort_stays_unchanged_while_a_turn_is_running() {
             |v| v["method"] == "session/set_config_option" && v["params"]["configId"] != "mode"
         )
     );
-    r.message(4, 42, "/stop");
+    r.callback(4, &format!("{prefix}:a.e.0"), 1000);
+    r.call(|method, _| method == "deleteMessage").await;
+    r.message(5, 42, "/stop");
     r.stop().await;
 }
 #[tokio::test]

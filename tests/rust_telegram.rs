@@ -324,10 +324,14 @@ fn model_menu_only_offers_supported_settings_and_marks_the_active_choice() {
         json!({"id":"fast","type":"select","currentValue":"true","options":[{"value":"false","name":"off"},{"value":"true","name":"on"}]}),
     ];
     let view = model_menu(&config, "id", Some(0), 0, None, false).unwrap();
+    assert_eq!(
+        view["text"],
+        "Choose a model for the bot.\nCurrent model: <b>Grok</b> ⚡"
+    );
     let rows = view["reply_markup"]["inline_keyboard"].as_array().unwrap();
-    assert_eq!(rows[rows.len() - 2][0]["text"], "Effort · Default ›");
-    assert_eq!(rows[rows.len() - 2][1]["text"], "Speed · Fast ›");
-    let speed = model_menu(&config, "id", Some(0), 0, Some("f"), false).unwrap();
+    assert_eq!(rows[rows.len() - 2].as_array().unwrap().len(), 1);
+    assert_eq!(rows[rows.len() - 2][0]["text"], "Auto Effort · ⚡ Fast ›");
+    let speed = model_menu(&config, "id", Some(0), 0, Some("settings"), false).unwrap();
     assert_eq!(
         speed["reply_markup"]["inline_keyboard"][0]
             .as_array()
@@ -336,14 +340,54 @@ fn model_menu_only_offers_supported_settings_and_marks_the_active_choice() {
         2
     );
     assert_eq!(
-        speed["reply_markup"]["inline_keyboard"][0][1]["text"],
-        "✓ Fast"
+        speed["reply_markup"]["inline_keyboard"][0][0]["text"],
+        "✓ Auto"
+    );
+    assert_eq!(
+        speed["reply_markup"]["inline_keyboard"][1][1]["text"],
+        "✓ ⚡ Fast"
     );
     assert_eq!(
         model_setting_choices(&config, "f")[0]["changes"],
         json!([["fast", "false"]])
     );
+    assert_eq!(
+        model_setting_choices(&config, "f")[0]["name"],
+        "Regular Speed"
+    );
+    config.pop();
+    assert_eq!(
+        model_settings_summary(&config).as_deref(),
+        Some("Auto Effort")
+    );
+    let effort_only = model_menu(&config, "id", None, 0, Some("settings"), false).unwrap();
+    assert!(!effort_only.to_string().contains("a.f."));
+    assert!(
+        !model_menu(&config, "id", None, 0, None, false).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains('⚡')
+    );
+    config.push(json!({"id":"ultrafast","type":"boolean","currentValue":true}));
+    assert!(
+        model_menu(&config, "id", None, 0, None, false).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("⚡⚡")
+    );
+    assert_eq!(
+        model_settings_summary(&config).as_deref(),
+        Some("Auto Effort · ⚡⚡ Ultrafast")
+    );
+    assert_eq!(model_setting_choices(&config, "f").len(), 2);
+    assert!(
+        model_setting_choices(&config, "f")
+            .iter()
+            .all(|choice| choice["value"] != "fast")
+    );
     config.truncate(1);
     assert!(model_setting_choices(&config, "f").is_empty());
     assert!(model_setting_choices(&config, "e").is_empty());
+    let unsupported = model_menu(&config, "id", None, 0, None, false).unwrap();
+    assert!(!unsupported.to_string().contains("c.settings"));
 }

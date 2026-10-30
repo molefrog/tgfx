@@ -1951,6 +1951,17 @@ impl Inner {
             .await?;
         Ok(())
     }
+    async fn delete_model_picker(&self, id: &str, route: &Route, message_id: &Value) -> Result<()> {
+        self.options
+            .telegram
+            .call(
+                "deleteMessage",
+                json!({"chat_id":route.chat_id,"message_id":message_id}),
+            )
+            .await?;
+        self.state.expire_interaction(id)?;
+        Ok(())
+    }
     async fn callback(
         self: &Arc<Self>,
         row: &InboxRow,
@@ -2162,20 +2173,12 @@ impl Inner {
                 let mut panel = None;
                 match action.first().copied() {
                     Some("x") => {
-                        self.state.expire_interaction(id)?;
-                        edit["text"] = json!("Model picker closed");
-                        edit["reply_markup"] = json!({"inline_keyboard":[]});
+                        self.answer_callback(callback_id, "").await?;
+                        self.delete_model_picker(id, route, &message_id).await?;
+                        return Ok(true);
                     }
                     Some("s") | Some("a") => {
                         let model_selection = action[0] == "s";
-                        if !model_selection && lock(&self.active).contains_key(&route.key) {
-                            self.answer_callback(
-                                callback_id,
-                                "Wait for the current turn to finish, or use /stop.",
-                            )
-                            .await?;
-                            return Ok(false);
-                        }
                         let choices = if model_selection {
                             stored["options"]
                                 .as_array()
@@ -2205,6 +2208,32 @@ impl Inner {
                         let changes = choice["changes"]
                             .as_array()
                             .context("Missing configuration changes")?;
+                        let unchanged = changes.iter().all(|change| {
+                            config.iter().any(|option| {
+                                option["id"] == change[0]
+                                    && option["currentValue"]
+                                        .as_str()
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| option["currentValue"].to_string())
+                                        == change[1].as_str().unwrap_or_default()
+                            })
+                        });
+                        if unchanged
+                            && !(model_selection
+                                && lock(&self.pending_models).contains_key(&route.key))
+                        {
+                            self.answer_callback(callback_id, "").await?;
+                            self.delete_model_picker(id, route, &message_id).await?;
+                            return Ok(true);
+                        }
+                        if !model_selection && lock(&self.active).contains_key(&route.key) {
+                            self.answer_callback(
+                                callback_id,
+                                "Wait for the current turn to finish, or use /stop.",
+                            )
+                            .await?;
+                            return Ok(false);
+                        }
                         if model_selection && lock(&self.active).contains_key(&route.key) {
                             let model = changes[0][1].as_str().context("Model value missing")?;
                             lock(&self.pending_models).insert(route.key.clone(), model.into());
@@ -2240,6 +2269,16 @@ impl Inner {
                                 }
                             }
                             config = session.config_options();
+                            self.state.resolve_interaction(id, choice)?;
+                            if model_selection {
+                                merge(&mut edit, &telegram::selected_model(choice));
+                                edit["parse_mode"] = json!("HTML");
+                            } else {
+                                let summary = telegram::model_settings_summary(&config)
+                                    .unwrap_or_else(|| "Updated".into());
+                                edit["text"] = json!(format!("Model settings: {summary}"));
+                                edit["reply_markup"] = json!({"inline_keyboard":[]});
+                            }
                         }
                     }
                     Some("p") | Some("v") => {
