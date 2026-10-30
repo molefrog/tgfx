@@ -47,7 +47,14 @@ pub fn attachment_refs(m: &Value) -> Vec<AttachmentRef> {
         "video_note",
     ] {
         let value = if kind == "photo" {
-            m[kind].as_array().and_then(|a| a.last())
+            m[kind].as_array().and_then(|a| {
+                a.iter().max_by_key(|v| {
+                    v["width"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .saturating_mul(v["height"].as_u64().unwrap_or(0))
+                })
+            })
         } else {
             m.get(kind)
         };
@@ -66,6 +73,8 @@ pub fn attachment_refs(m: &Value) -> Vec<AttachmentRef> {
                 }
                 .into(),
             )
+        } else if kind == "photo" {
+            Some("image/jpeg".into())
         } else {
             v["mime_type"].as_str().map(str::to_owned)
         };

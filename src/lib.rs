@@ -4,6 +4,7 @@ pub mod events;
 pub mod files;
 pub mod fx;
 pub mod history;
+pub mod images;
 pub mod lock;
 pub mod markdown;
 pub mod mcp;

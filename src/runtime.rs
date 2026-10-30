@@ -323,7 +323,7 @@ impl Inner {
     }
     fn settings(&self) {
         let c = self.config();
-        self.emit(json!({"type":"settings","settings":{"output":c.output,"customIcons":c.custom_icons,"paused":self.paused.load(std::sync::atomic::Ordering::Acquire),"yolo":self.options.yolo,"dmReply":c.dm_reply,"groupReply":c.group_reply,"chatReplies":c.chat_replies,"chatFormats":c.chat_formats,"allowedChats":c.access.user_ids.into_iter().chain(c.access.chat_ids).collect::<Vec<_>>()}}));
+        self.emit(json!({"type":"settings","settings":{"output":c.output,"customIcons":c.custom_icons,"imagePreviews":c.image_previews,"paused":self.paused.load(std::sync::atomic::Ordering::Acquire),"yolo":self.options.yolo,"dmReply":c.dm_reply,"groupReply":c.group_reply,"chatReplies":c.chat_replies,"chatFormats":c.chat_formats,"allowedChats":c.access.user_ids.into_iter().chain(c.access.chat_ids).collect::<Vec<_>>()}}));
     }
     fn apply_control(&self, control: RuntimeControl) -> Result<()> {
         match control {
@@ -1566,7 +1566,11 @@ impl Inner {
         }
     }
     async fn prepare_stickers(&self, m: &mut InboundMessage) -> Result<()> {
-        for sticker in m.attachments.iter_mut().filter(|a| a.kind == "sticker") {
+        for sticker in m
+            .attachments
+            .iter_mut()
+            .filter(|a| a.kind == "sticker" && !crate::images::eligible(a))
+        {
             let (file, response) = self.options.telegram.download(&sticker.file_id).await?;
             let extension = std::path::Path::new(&file)
                 .extension()
@@ -1628,6 +1632,14 @@ impl Inner {
                 _ = self.stopping.cancelled() => bail!("TGFX stopped"),
                 result = self.prepare_stickers(&mut m) => result?,
             }
+            let previews = tokio::select! {
+                _ = active.cancel.cancelled() => bail!("Turn cancelled"),
+                _ = self.stopping.cancelled() => bail!("TGFX stopped"),
+                previews = crate::images::prepare(
+                    &self.options.telegram, &self.options.paths.files, &mut m,
+                    self.config().image_previews && session.agent_info()["agentCapabilities"]["promptCapabilities"]["image"] == true,
+                ) => previews,
+            };
             self.state.register_inbound(&mut m, true)?;
             let bootstrap = self.take_bootstrap(&key).await;
             let prompt = async {
@@ -1641,11 +1653,11 @@ impl Inner {
                             }
                         }
                         self.state.register_inbound(message, false)?;
-                        blocks.extend(self.prompt_blocks(message).await?);
+                        blocks.extend(self.prompt_blocks(message, &previews).await?);
                     }
                     blocks
                 } else {
-                    self.prompt_blocks(&m).await?
+                    self.prompt_blocks(&m, &previews).await?
                 };
                 if let Some(preview) = self.state.history.preview(&m, bootstrap)? {
                     blocks.insert(0, json!({"type":"text","text":json!({"telegram_context":preview}).to_string()}));
@@ -1696,8 +1708,24 @@ impl Inner {
         }
         result
     }
-    async fn prompt_blocks(&self, m: &InboundMessage) -> Result<Vec<Value>> {
+    async fn prompt_blocks(
+        &self,
+        m: &InboundMessage,
+        previews: &crate::images::Previews,
+    ) -> Result<Vec<Value>> {
         let mut envelope = telegram::to_envelope(m);
+        for attachment in envelope["telegram_message"]["attachments"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            if let Some(preview) = attachment["ref"]
+                .as_str()
+                .and_then(|reference| previews.get(reference))
+            {
+                attachment["preview"] = preview.status.clone();
+            }
+        }
         let admin = self.admin_context(&m.route).await;
         if admin["capabilities"]
             .as_array()
@@ -1709,6 +1737,12 @@ impl Inner {
             vec![json!({"type":"text","text":serde_json::to_string_pretty(&envelope)?})];
         if let Some(text) = m.text.as_ref().filter(|s| !s.trim().is_empty()) {
             blocks.push(json!({"type":"text","text":text}));
+        }
+        for a in &m.attachments {
+            if let Some(block) = previews.get(&a.reference).and_then(|p| p.block.as_ref()) {
+                blocks.push(json!({"type":"text","text":format!("Image preview for attachment {}. The original remains available through download_attachment.", a.reference)}));
+                blocks.push(block.clone());
+            }
         }
         Ok(blocks)
     }

@@ -92,6 +92,8 @@ pub struct Config {
     pub output: OutputMode,
     #[serde(default = "yes")]
     pub custom_icons: bool,
+    #[serde(default = "yes")]
+    pub image_previews: bool,
     #[serde(default = "dm_reply")]
     pub dm_reply: String,
     #[serde(default = "group_reply")]

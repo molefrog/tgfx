@@ -978,7 +978,7 @@ impl TelegramMcp {
 }
 impl ServerHandler for TelegramMcp {
     fn get_info(&self) -> ServerConfig {
-        serde_json::from_value(json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"tgfx-telegram","version":env!("CARGO_PKG_VERSION")},"instructions":"Normal assistant replies are sent automatically. Use Telegram tools for explicit actions. References are route-scoped capabilities. Download before inspecting attachments. Use get_recent_messages for recent live refs, and read_history for full observed history."})).unwrap()
+        serde_json::from_value(json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"tgfx-telegram","version":env!("CARGO_PKG_VERSION")},"instructions":"Normal assistant replies are sent automatically. Use Telegram tools for explicit actions. References are route-scoped capabilities. Included image previews are already visible; download_attachment retrieves originals and other attachments. Use get_recent_messages for recent live refs, and read_history for full observed history."})).unwrap()
     }
     fn get_tool(&self, name: &str) -> Option<Tool> {
         self.tools().into_iter().find(|t| t.name == name)

@@ -220,6 +220,7 @@ pub fn save_settings(workspace: &Path, config: &Config, changed: &[&str]) -> Res
     for key in [
         "output",
         "customIcons",
+        "imagePreviews",
         "dmReply",
         "groupReply",
         "chatReplies",

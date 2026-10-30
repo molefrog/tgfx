@@ -238,3 +238,21 @@ fn managed_access_allows_reply_preferences_but_never_new_grants() {
     assert!(!out.status.success());
     assert_eq!(std::fs::read(p).unwrap(), before);
 }
+
+#[test]
+fn image_preview_configuration_defaults_on_and_survives_other_setting_edits() {
+    let d = tempfile::tempdir().unwrap();
+    let path = setup(d.path());
+    let out = run(d.path(), &["access", "--json"]);
+    let view: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(view["settings"]["imagePreviews"], true);
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["imagePreviews"] = json!(false);
+    std::fs::write(&path, config.to_string()).unwrap();
+    assert!(run(d.path(), &["allow", "77"]).status.success());
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["imagePreviews"], false);
+    let out = run(d.path(), &["access", "--json"]);
+    let view: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(view["settings"]["imagePreviews"], false);
+}

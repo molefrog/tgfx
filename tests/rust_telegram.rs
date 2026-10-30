@@ -392,3 +392,14 @@ fn model_menu_only_offers_supported_settings_and_marks_the_active_choice() {
     let unsupported = model_menu(&config, "id", None, 0, None, false).unwrap();
     assert!(!unsupported.to_string().contains("c.settings"));
 }
+
+#[test]
+fn photo_selection_uses_pixels_rather_than_variant_order_or_file_size() {
+    let refs = attachment_refs(&json!({"photo":[
+        {"file_id":"thumbnail","width":320,"height":240,"file_size":1000},
+        {"file_id":"largest","width":1600,"height":1200,"file_size":127000},
+        {"file_id":"last","width":1280,"height":960,"file_size":145000}
+    ]}));
+    assert_eq!(refs[0].file_id, "largest");
+    assert_eq!(refs[0].mime_type.as_deref(), Some("image/jpeg"));
+}

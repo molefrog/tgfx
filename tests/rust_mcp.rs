@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, State as AxumState},
-    routing::post,
+    routing::{get, post},
 };
 use rusqlite::params;
 use serde_json::{Value, json};
@@ -47,6 +47,7 @@ async fn endpoint(
         "getChatMember" => {
             json!({"status":"administrator","can_pin_messages":true,"can_manage_topics":true,"can_delete_messages":true,"can_restrict_members":true,"can_invite_users":true})
         }
+        "getFile" => json!({"file_path":"original.png"}),
         "getStickerSet" => {
             json!({"name":"pack","title":"Pack","sticker_type":"regular","stickers":[{"file_id":"sticker-id","file_unique_id":"unique","width":512,"height":512,"emoji":"🦀"}]})
         }
@@ -93,6 +94,10 @@ impl Fixture {
         let root = format!("http://{}", listener.local_addr().unwrap());
         let router = Router::new()
             .route("/bot123:TEST/{method}", post(endpoint))
+            .route(
+                "/file/bot123:TEST/original.png",
+                get(|| async { b"original unmodified image bytes".as_slice() }),
+            )
             .with_state(mock.clone());
         let http = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let env = McpEnvironment {
@@ -863,4 +868,39 @@ async fn check_native_proxy(modern: bool) {
         .unwrap();
     assert!(status.success());
     broker.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn original_attachments_remain_downloadable_without_a_preview() {
+    let f = Fixture::new(false).await;
+    let attachments = json!([{"ref":"att_original","kind":"document","fileId":"original-file","fileUniqueId":"original","mimeType":"image/png","name":"original.png"}]);
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE context_capabilities SET attachments_json=?",
+            [attachments.to_string()],
+        )
+        .unwrap();
+    let result = f
+        .server
+        .execute(
+            "download_attachment",
+            json!({"attachment_ref":"att_original"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(result["path"].as_str().unwrap()).unwrap(),
+        b"original unmodified image bytes"
+    );
+    assert!(
+        f.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "getFile" && p["file_id"] == "original-file")
+    );
 }

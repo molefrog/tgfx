@@ -78,6 +78,13 @@ async fn api(
     };
     Json(json!({"ok":true,"result":result}))
 }
+fn fixture_image() -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(4, 3)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
+}
 struct Running {
     root: tempfile::TempDir,
     child: tokio::process::Child,
@@ -121,7 +128,7 @@ impl Running {
             .route("/bot100:fake/{method}", post(api))
             .route(
                 "/file/bot100:fake/stickers/fixture.webp",
-                get(|| async { "synthetic-sticker-bytes" }),
+                get(|| async { fixture_image() }),
             )
             .with_state(mock.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -963,6 +970,16 @@ async fn forwarded_stickers_keep_prepared_local_image_paths_in_each_envelope() {
         method == "sendRichMessage" && text(params).contains("FORWARDED_CAPTION")
     })
     .await;
+    assert!(
+        r.fx()
+            .iter()
+            .filter(|v| v["method"] == "session/prompt")
+            .any(|v| v["params"]["prompt"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["type"] == "image"))
+    );
     let mut sticker = None;
     for request in r
         .fx()
@@ -991,7 +1008,7 @@ async fn forwarded_stickers_keep_prepared_local_image_paths_in_each_envelope() {
     assert_eq!(sticker["sticker"]["image"]["state"], "local");
     let path = sticker["sticker"]["image"]["path"].as_str().unwrap();
     assert!(Path::new(path).is_file());
-    assert_eq!(std::fs::read(path).unwrap(), b"synthetic-sticker-bytes");
+    assert_eq!(std::fs::read(path).unwrap(), fixture_image());
     r.stop().await;
 }
 #[tokio::test]
@@ -1849,5 +1866,137 @@ async fn rejected_private_usage_does_not_fall_back_to_a_public_group_reply() {
             && p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
     );
     assert!(!calls.iter().any(|(m, _)| m == "editMessageText"));
+    r.stop().await;
+}
+
+fn image_message(id: i64, album: bool, kind: &str) -> Value {
+    let mut message = json!({"message_id":id,"date":1,"chat":{"id":42,"type":"private"},"from":{"id":42,"first_name":"Ada"},"caption":"IMAGE_CHECK"});
+    if album {
+        message["media_group_id"] = json!("images");
+    }
+    let file = json!({"file_id":format!("image-{id}"),"file_unique_id":format!("unique-{id}"),"width":4,"height":3,"file_size":100,"mime_type":"image/png","file_name":"original.png"});
+    message[kind] = if kind == "photo" { json!([file]) } else { file };
+    json!({"update_id":id,"message":message})
+}
+fn image_prompt(r: &Running) -> Vec<Value> {
+    r.fx()
+        .into_iter()
+        .find(|v| v["method"] == "session/prompt")
+        .unwrap()["params"]["prompt"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+#[tokio::test]
+async fn album_previews_share_one_limit_and_keep_all_original_refs() {
+    let r = Running::start("final").await;
+    for id in 1..=5 {
+        r.updates.send(image_message(id, true, "photo")).unwrap();
+    }
+    r.call(|m, _| m == "sendRichMessage").await;
+    let blocks = image_prompt(&r);
+    assert_eq!(
+        blocks.iter().filter(|b| b["type"] == "image").count(),
+        tgfx::images::MAX_INCLUDED_IMAGES
+    );
+    let envelope: Value = serde_json::from_str(
+        blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .find(|s| s.contains("telegram_message"))
+            .unwrap(),
+    )
+    .unwrap();
+    let attachments = envelope["telegram_message"]["attachments"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attachments.len(), 5);
+    assert_eq!(
+        attachments
+            .iter()
+            .filter(|a| a["preview"]["included"] == true)
+            .count(),
+        tgfx::images::MAX_INCLUDED_IMAGES
+    );
+    assert!(attachments.iter().all(|a| a["ref"].as_str().is_some()));
+    assert_eq!(
+        r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == "getFile")
+            .count(),
+        tgfx::images::MAX_INCLUDED_IMAGES
+    );
+    r.stop().await;
+}
+#[tokio::test]
+async fn image_preview_setting_disables_downloads_and_image_blocks() {
+    let r = Running::start_with_defaults("final", &[], json!({"imagePreviews":false})).await;
+    r.updates.send(image_message(1, false, "document")).unwrap();
+    r.call(|m, _| m == "sendRichMessage").await;
+    let blocks = image_prompt(&r);
+    assert!(!blocks.iter().any(|b| b["type"] == "image"));
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "getFile")
+    );
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b["text"].as_str().is_some_and(|s| s.contains("disabled")))
+    );
+    r.stop().await;
+}
+#[tokio::test]
+async fn image_documents_include_exact_bytes_and_retain_original_files() {
+    use base64::Engine;
+    let r = Running::start("final").await;
+    r.updates.send(image_message(1, false, "document")).unwrap();
+    r.call(|m, _| m == "sendRichMessage").await;
+    let blocks = image_prompt(&r);
+    let image = blocks.iter().find(|b| b["type"] == "image").unwrap();
+    assert_eq!(image["mimeType"], "image/png");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(image["data"].as_str().unwrap())
+            .unwrap(),
+        fixture_image()
+    );
+    let files = r.root.path().join("home/files/100");
+    let context = std::fs::read_dir(files)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let path = std::fs::read_dir(context)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(std::fs::read(path).unwrap(), fixture_image());
+    r.stop().await;
+}
+#[tokio::test]
+async fn agents_without_image_support_receive_attachment_refs_without_downloads() {
+    let r = Running::start_with_env("final", &[("FX_NO_IMAGES", "1")]).await;
+    r.updates.send(image_message(1, false, "photo")).unwrap();
+    r.call(|m, _| m == "sendRichMessage").await;
+    assert!(!image_prompt(&r).iter().any(|b| b["type"] == "image"));
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "getFile")
+    );
     r.stop().await;
 }
