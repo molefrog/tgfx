@@ -122,7 +122,7 @@ struct SessionCard {
     recipient: Option<PrivateRecipient>,
 }
 fn command_list(group: bool) -> Value {
-    json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation","is_ephemeral":group},{"command":"compact","description":"Compact the fx conversation","is_ephemeral":group},{"command":"model","description":"Choose the fx model"},{"command":"format","description":"Choose how fx replies"},{"command":"usage","description":"Show context usage and available spend","is_ephemeral":group}])
+    json!([{"command":"stop","description":"Stop the current task and discard queued requests"},{"command":"clear","description":"Start a fresh fx conversation","is_ephemeral":group},{"command":"compact","description":"Compact the fx conversation","is_ephemeral":group},{"command":"model","description":"Choose the fx model","is_ephemeral":group},{"command":"format","description":"Choose how fx replies"},{"command":"usage","description":"Show context usage and available spend","is_ephemeral":group}])
 }
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value
@@ -698,7 +698,7 @@ impl Inner {
             && update.get("message").is_some()
             && raw.get("forward_origin").is_none()
             && command.as_ref().is_some_and(|c| {
-                ["usage", "clear", "compact"].contains(&c.name.as_str()) && c.addressed
+                ["usage", "clear", "compact", "model"].contains(&c.name.as_str()) && c.addressed
             });
         if !is_control {
             if ephemeral.is_some() {
@@ -728,7 +728,7 @@ impl Inner {
         }
         self.state.ensure_route(&route)?;
         let command = command.unwrap();
-        let payload = json!({"kind":if command.name == "usage" {"usage"} else {"session_request"}, "route":route,
+        let payload = json!({"kind":match command.name.as_str() { "usage" => "usage", "model" => "model_request", _ => "session_request" }, "route":route,
             "action":command.name, "ownerId":user.unwrap(),
             "recipient":PrivateRecipient { user_id:user.unwrap(), reply_to:ephemeral },
             "invalidArgs":!command.args.is_empty()});
@@ -873,7 +873,7 @@ impl Inner {
             self.spawn_control(id);
             return Ok(());
         }
-        if p["kind"] != "message" {
+        if p["kind"] != "message" || p["albumMessages"].is_array() {
             self.flush_batch(&row.route_key)?;
             self.enqueue(&row.route_key, Work::Inbox(id));
             return Ok(());
@@ -992,36 +992,23 @@ impl Inner {
                 }
             }
         }
-        messages.sort_by_key(|(_, m)| m.update_id);
-        let Some((primary, first)) = messages.first().cloned() else {
+        let forwarded = batch.group.starts_with("forwarded:");
+        messages.sort_by_key(|(_, m)| {
+            if forwarded {
+                m.update_id
+            } else {
+                m.message_id.parse().unwrap_or(m.update_id)
+            }
+        });
+        let Some((primary, _)) = messages.first() else {
             return Ok(());
         };
-        let payload = if batch.group.starts_with("forwarded:") {
+        let primary = *primary;
+        let payload = if forwarded {
             json!({"kind":"forwarded","messages":messages.iter().map(|(_,m)|m).collect::<Vec<_>>()})
         } else {
-            let mut combined = first.clone();
-            combined.attachments = messages
-                .iter()
-                .flat_map(|(_, m)| m.attachments.clone())
-                .collect();
-            combined.history_seq = messages.iter().filter_map(|(_, m)| m.history_seq).max();
-            combined.history_message_ids =
-                Some(messages.iter().map(|(_, m)| m.message_id.clone()).collect());
-            combined.invokes_agent = Some(
-                messages
-                    .iter()
-                    .any(|(_, m)| m.invokes_agent.unwrap_or(false)),
-            );
-            if let Some(m) = messages
-                .iter()
-                .find_map(|(_, m)| m.text.as_ref().map(|_| m))
-            {
-                combined.text = m.text.clone();
-                combined.text_kind = m.text_kind.clone();
-            }
-            let provenance = combined.provenance.get_or_insert(json!({}));
-            provenance["album"]=json!(messages.iter().enumerate().map(|(position,(_,m))|json!({"position":position,"message_ref":m.message_ref,"attachment_refs":m.attachments.iter().map(|a|&a.reference).collect::<Vec<_>>()})).collect::<Vec<_>>());
-            json!({"kind":"message","message":combined})
+            let members: Vec<_> = messages.iter().map(|(_, m)| m.clone()).collect();
+            json!({"kind":"message","message":InboundMessage::album(&members),"albumMessages":members})
         };
         self.state.coalesce_inbox(
             primary,
@@ -1071,7 +1058,7 @@ impl Inner {
                         .await?;
                     }
                 }
-                Some("usage") => {
+                Some("usage") | Some("model_request") => {
                     let route: Route = serde_json::from_value(p["route"].clone())?;
                     let recipient: PrivateRecipient =
                         serde_json::from_value(p["recipient"].clone())?;
@@ -1080,11 +1067,15 @@ impl Inner {
                             &route,
                             Some(&recipient),
                             None,
-                            &json!({"text":"Usage: /usage"}),
+                            &json!({"text":format!("Usage: /{}", p["action"].as_str().unwrap_or("usage"))}),
                         )
                         .await?;
                     } else {
-                        self.usage(&route, Some(&recipient)).await?;
+                        if p["kind"] == "model_request" {
+                            self.open_model(&route, Some(recipient)).await?;
+                        } else {
+                            self.usage(&route, Some(&recipient)).await?;
+                        }
                     }
                 }
                 Some("message") => {
@@ -1133,7 +1124,7 @@ impl Inner {
                                         }
                                     }
                                     "format" => self.open_format(&m.route).await?,
-                                    "model" => self.open_model(&m.route).await?,
+                                    "model" => self.open_model(&m.route, None).await?,
                                     "usage" => self.usage(&m.route, None).await?,
                                     _ => {
                                         self.options
@@ -1242,11 +1233,16 @@ impl Inner {
                 .and_then(|r| r.payload_json)
                 .and_then(|p| serde_json::from_str::<Value>(&p).ok())
                 .is_some_and(|p| {
-                    ["session_request", "session_action", "usage"]
-                        .contains(&p["kind"].as_str().unwrap_or(""))
+                    [
+                        "session_request",
+                        "session_action",
+                        "usage",
+                        "model_request",
+                    ]
+                    .contains(&p["kind"].as_str().unwrap_or(""))
                         || p["update"]["callback_query"]["data"]
                             .as_str()
-                            .is_some_and(|d| d.starts_with("session:"))
+                            .is_some_and(|d| d.starts_with("session:") || d.starts_with("model:"))
                 });
             if !self.stopping.is_cancelled() && !control {
                 let _ = self
@@ -1311,15 +1307,19 @@ impl Inner {
     }
     async fn clear_route(&self, route: &Route, through: Option<i64>) -> Result<()> {
         lock(&self.pending_models).remove(&route.key);
-        let previous = self.sessions.lock().await.remove(&route.key);
+        let previous = {
+            let mut sessions = self.sessions.lock().await;
+            let previous = sessions.remove(&route.key);
+            self.state.reset_route(&route.key)?;
+            self.state.history.reset(&route.key, through)?;
+            previous
+        };
         if let Some(slot) = previous {
             let _ = slot.session.close().await;
             if let Some(lease) = slot.lease {
                 lease.revoke().await;
             }
         }
-        self.state.reset_route(&route.key)?;
-        self.state.history.reset(&route.key, through)?;
         Ok(())
     }
     async fn emit_external(self: &Arc<Self>, value: Value) -> Result<Value> {
@@ -1409,10 +1409,11 @@ impl Inner {
                 lease.revoke().await;
             }
         }
-        let saved = if let Some(route) = route {
-            self.state.ensure_route(route)?.session_id
+        let (saved, generation) = if let Some(route) = route {
+            let row = self.state.ensure_route(route)?;
+            (row.session_id, Some(row.generation))
         } else {
-            self.events.session()?
+            (self.events.session()?, None)
         };
         let c = self.config();
         let lease = if let Some(route) = route {
@@ -1500,24 +1501,37 @@ impl Inner {
             }
         };
         let replaced = session.replaced_previous();
+        {
+            // Clearing and publishing a session share this lock. A control can
+            // finish loading after /clear, but must not restore its old session.
+            let mut sessions = self.sessions.lock().await;
+            if route.is_some() {
+                ensure!(
+                    self.state
+                        .route(key)?
+                        .is_some_and(|row| Some(row.generation) == generation),
+                    "Conversation changed while FX was starting; open the control again"
+                );
+                self.state
+                    .set_route_session(key, &session.session_id(), replaced)?;
+            } else {
+                self.events.save_session(&session.session_id())?;
+            }
+            sessions.insert(
+                key.into(),
+                SessionSlot {
+                    session: session.clone(),
+                    bootstrap: saved.is_none() || replaced,
+                    lease,
+                },
+            );
+        }
         if let Some(route) = route {
-            self.state
-                .set_route_session(key, &session.session_id(), replaced)?;
             if replaced {
                 let _=self.options.telegram.send_text(route,"The previous fx session could not be resumed, so this route started a fresh session.").await;
             }
             self.emit(json!({"type":"session","route":self.label(route),"state":"ready","sessionId":session.session_id()}));
-        } else {
-            self.events.save_session(&session.session_id())?;
         }
-        self.sessions.lock().await.insert(
-            key.into(),
-            SessionSlot {
-                session: session.clone(),
-                bootstrap: saved.is_none() || replaced,
-                lease,
-            },
-        );
         Ok(session)
     }
     async fn take_bootstrap(&self, key: &str) -> bool {
@@ -2136,7 +2150,11 @@ impl Inner {
         }
         result
     }
-    async fn open_model(self: &Arc<Self>, route: &Route) -> Result<()> {
+    async fn open_model(
+        self: &Arc<Self>,
+        route: &Route,
+        recipient: Option<PrivateRecipient>,
+    ) -> Result<()> {
         let session = self.session(&route.key, Some(route)).await?;
         let config = session.config_options();
         let model = config
@@ -2147,27 +2165,39 @@ impl Inner {
         ensure!(!options.is_empty(), "fx did not return selectable models");
         let id = uuid::Uuid::new_v4().simple().to_string();
         self.state.expire_interactions(&route.key, "model_picker")?;
+        let mut payload =
+            json!({"options":options,"currentValue":model["currentValue"],"configOptions":config});
         self.state.create_interaction(
             &id,
             &self.options.bot.id,
             &route.key,
             "model_picker",
-            &json!({"options":options,"currentValue":model["currentValue"],"configOptions":config}),
+            &payload,
             &interaction_expiry(10),
         )?;
         let view = telegram::model_menu(&config, &id, None, 0, None, self.config().custom_icons)
             .context("Empty model picker")?;
-        let mut params = telegram::route_params(route);
-        merge(&mut params, &view);
-        if let Err(error) = self.options.telegram.call("sendMessage", params).await {
-            self.log("model.icons_failed", json!({"error":error.to_string()}));
-            let mut params = telegram::route_params(route);
-            merge(
-                &mut params,
-                &telegram::model_menu(&config, &id, None, 0, None, false).unwrap(),
-            );
-            self.options.telegram.call("sendMessage", params).await?;
-        }
+        let message = match self
+            .send_control_view(route, recipient.as_ref(), None, &view)
+            .await
+        {
+            Ok(message) => message,
+            Err(error) => {
+                self.log("model.icons_failed", json!({"error":error.to_string()}));
+                self.send_control_view(
+                    route,
+                    recipient.as_ref(),
+                    None,
+                    &telegram::model_menu(&config, &id, None, 0, None, false).unwrap(),
+                )
+                .await?
+            }
+        };
+        payload["card"] = serde_json::to_value(SessionCard {
+            message_id: message.context("Model picker message missing")?,
+            recipient,
+        })?;
+        self.state.update_interaction_payload(&id, &payload)?;
         Ok(())
     }
     async fn send_control_view(
@@ -2299,14 +2329,20 @@ impl Inner {
             .await?;
         Ok(())
     }
-    async fn delete_model_picker(&self, id: &str, route: &Route, message_id: &Value) -> Result<()> {
-        self.options
-            .telegram
-            .call(
-                "deleteMessage",
-                json!({"chat_id":route.chat_id,"message_id":message_id}),
+    async fn delete_model_picker(&self, id: &str, route: &Route, card: &SessionCard) -> Result<()> {
+        let (method, params) = if let Some(recipient) = &card.recipient {
+            (
+                "deleteEphemeralMessage",
+                json!({"chat_id":route.chat_id,
+                "receiver_user_id":recipient.user_id,"ephemeral_message_id":card.message_id}),
             )
-            .await?;
+        } else {
+            (
+                "deleteMessage",
+                json!({"chat_id":route.chat_id,"message_id":card.message_id}),
+            )
+        };
+        self.options.telegram.call(method, params).await?;
         self.state.expire_interaction(id)?;
         Ok(())
     }
@@ -2536,6 +2572,22 @@ impl Inner {
                     return Ok(false);
                 };
                 let mut stored: Value = serde_json::from_str(i["payload_json"].as_str().unwrap())?;
+                let mut card: SessionCard = serde_json::from_value(stored["card"].clone())?;
+                if let Some(recipient) = &card.recipient {
+                    if card.message_id != cb["message"]["ephemeral_message_id"]
+                        || Some(recipient.user_id) != cb["from"]["id"].as_i64()
+                    {
+                        self.answer_callback(
+                            callback_id,
+                            "This model picker belongs to another request",
+                        )
+                        .await?;
+                        return Ok(false);
+                    }
+                } else {
+                    card.message_id = message_id.clone();
+                }
+
                 let mut config = stored["configOptions"].as_array().cloned().unwrap_or_else(|| {
                     vec![json!({"id":"model","type":"select","options":stored["options"],"currentValue":stored["currentValue"]})]
                 });
@@ -2546,7 +2598,7 @@ impl Inner {
                 match action.first().copied() {
                     Some("x") => {
                         self.answer_callback(callback_id, "").await?;
-                        self.delete_model_picker(id, route, &message_id).await?;
+                        self.delete_model_picker(id, route, &card).await?;
                         return Ok(false);
                     }
                     Some("s") | Some("a") => {
@@ -2595,7 +2647,7 @@ impl Inner {
                                 && lock(&self.pending_models).contains_key(&route.key))
                         {
                             self.answer_callback(callback_id, "").await?;
-                            self.delete_model_picker(id, route, &message_id).await?;
+                            self.delete_model_picker(id, route, &card).await?;
                             return Ok(false);
                         }
                         if !model_selection && lock(&self.active).contains_key(&route.key) {
@@ -2695,7 +2747,14 @@ impl Inner {
                 }
                 self.answer_callback(callback_id, "").await?;
                 if edit.get("text").is_some() {
-                    let _ = self.options.telegram.call("editMessageText", edit).await;
+                    edit.as_object_mut().unwrap().remove("message_id");
+                    self.send_control_view(
+                        route,
+                        card.recipient.as_ref(),
+                        Some(&card.message_id),
+                        &edit,
+                    )
+                    .await?;
                 }
             }
             "choice" => {

@@ -573,8 +573,9 @@ impl TelegramMcp {
                     .as_str()
                     .or(attachment.name.as_deref())
                     .unwrap_or(&file_path);
+                let name = format!("attachment_{reference}_{}", super::files::safe_name(name));
                 let path =
-                    super::files::safe_download_path(&self.env.files, &active.context, name)?;
+                    super::files::safe_download_path(&self.env.files, &active.context, &name)?;
                 let bytes =
                     super::files::write_response_limited(response, &path, 20 * 1024 * 1024).await?;
                 Ok(

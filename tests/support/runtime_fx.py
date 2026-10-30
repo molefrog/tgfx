@@ -14,6 +14,10 @@ class LoggingInput:
    import urllib.request, threading
    urllib.request.urlopen(urllib.request.Request(os.environ['RUNTIME_FX_READY_URL'],b'{}',{'Content-Type':'application/json'}),timeout=3).close()
    threading.Event().wait()
+  if path and os.environ.get('RUNTIME_HOLD_LOAD') == '1' and json.loads(line).get('method') == 'session/load':
+   import time
+   open(path+'.loading','w').close()
+   while not os.path.exists(path+'.resume'): time.sleep(.01)
   return line
 sys.stdin = LoggingInput()
 path = os.path.join(os.path.dirname(__file__), 'fx_fixture.py')

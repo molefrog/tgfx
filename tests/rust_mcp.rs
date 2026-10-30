@@ -904,3 +904,38 @@ async fn original_attachments_remain_downloadable_without_a_preview() {
             .any(|(m, p)| m == "getFile" && p["file_id"] == "original-file")
     );
 }
+
+#[tokio::test]
+async fn distinct_attachments_with_the_same_filename_download_separately() {
+    let f = Fixture::new(false).await;
+    let attachments = json!([
+        {"ref":"att_one","kind":"document","fileId":"file-one","fileUniqueId":"one","name":"report.pdf"},
+        {"ref":"att_two","kind":"document","fileId":"file-two","fileUniqueId":"two","name":"report.pdf"}
+    ]);
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE context_capabilities SET attachments_json=?",
+            [attachments.to_string()],
+        )
+        .unwrap();
+    let first = f
+        .server
+        .execute("download_attachment", json!({"attachment_ref":"att_one"}))
+        .await
+        .unwrap();
+    let second = f
+        .server
+        .execute("download_attachment", json!({"attachment_ref":"att_two"}))
+        .await
+        .unwrap();
+    assert_ne!(first["path"], second["path"]);
+    for result in [first, second] {
+        assert_eq!(
+            std::fs::read(result["path"].as_str().unwrap()).unwrap(),
+            b"original unmodified image bytes"
+        );
+    }
+}
