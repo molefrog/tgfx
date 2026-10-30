@@ -837,7 +837,7 @@ impl Inner {
                                 };
                                 let result = if let Some(card) = &card {
                                     inner.finish_session_card(&route, card, inbox,
-                                        if result.is_ok() {"Conversation cleared."} else {"Could not clear the conversation. Please try again."}).await.and(result)
+                                        if result.is_ok() {"✓ Conversation cleared."} else {"Could not clear the conversation. Please try again."}).await.and(result)
                                 } else {
                                     result
                                 };
@@ -2130,7 +2130,7 @@ impl Inner {
         .await;
         lock(&self.active).remove(&route.key);
         let message = if result.is_ok() {
-            "Conversation compacted."
+            "✓ Conversation compacted."
         } else if active.cancel.is_cancelled() {
             "Compaction cancelled."
         } else {
