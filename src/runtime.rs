@@ -2418,7 +2418,28 @@ impl Inner {
             }
             (None, None) => send_method,
         };
-        let result = self.options.telegram.call(method, params).await?;
+        let result = match self.options.telegram.call(method, params.clone()).await {
+            Err(error)
+                if recipient.is_some()
+                    && message.is_none()
+                    && params.get("reply_parameters").is_some()
+                    && error
+                        .downcast_ref::<telegram::TelegramError>()
+                        .is_some_and(|e| {
+                            e.code == Some(400)
+                                && (e.description.contains("REPLY_TO_INVALID")
+                                    || e.description
+                                        .to_lowercase()
+                                        .contains("reply message not found"))
+                        }) =>
+            {
+                // Telegram can expire an ephemeral reply target while FX works.
+                // Retain the recipient; only remove the now-invalid quote target.
+                params.as_object_mut().unwrap().remove("reply_parameters");
+                self.options.telegram.call(method, params).await?
+            }
+            result => result?,
+        };
         if message.is_some() {
             return Ok(None);
         }

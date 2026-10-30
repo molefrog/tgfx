@@ -25,6 +25,7 @@ struct Mock {
     hold_model_response: Arc<std::sync::atomic::AtomicBool>,
     release_model_response: Arc<Notify>,
     reject_ephemeral: Arc<std::sync::atomic::AtomicBool>,
+    reject_ephemeral_replies: Arc<std::sync::atomic::AtomicBool>,
     release_callbacks: Arc<Notify>,
 }
 async fn api(
@@ -62,6 +63,16 @@ async fn api(
     {
         return Json(
             json!({"ok":false,"error_code":403,"description":"Private message unavailable"}),
+        );
+    }
+    if body.get("ephemeral_message_parameters").is_some()
+        && body.get("reply_parameters").is_some()
+        && mock
+            .reject_ephemeral_replies
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Json(
+            json!({"ok":false,"error_code":400,"description":"Bad Request: REPLY_TO_INVALID"}),
         );
     }
     let result = match method.as_str() {
@@ -132,6 +143,7 @@ impl Running {
             hold_model_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             release_model_response: Arc::new(Notify::new()),
             reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reject_ephemeral_replies: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             release_callbacks: Arc::new(Notify::new()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1058,6 +1070,7 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
         hold_model_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release_model_response: Arc::new(Notify::new()),
         reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reject_ephemeral_replies: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release_callbacks: Arc::new(Notify::new()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2713,5 +2726,33 @@ async fn whisper_receives_only_current_public_topic_history() {
             43
         );
     }
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn expired_whisper_reply_target_retries_without_losing_privacy() {
+    let r = Running::start("final").await;
+    r.mock
+        .reject_ephemeral_replies
+        .store(true, std::sync::atomic::Ordering::Release);
+    whisper(&r, 1, 42, 7, "EXPIRED_TARGET_REPLY");
+    r.call(|m, p| m == "sendRichMessage" && p.get("reply_parameters").is_none())
+        .await;
+    let attempts: Vec<_> = r
+        .mock
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "sendRichMessage")
+        .cloned()
+        .collect();
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts[0].1.get("reply_parameters").is_some());
+    assert!(
+        attempts
+            .iter()
+            .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
     r.stop().await;
 }
