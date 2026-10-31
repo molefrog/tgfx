@@ -61,6 +61,7 @@ pub struct ContextCapability {
     pub sender_ref: Option<String>,
     pub attachments_json: String,
     pub expires_at: String,
+    pub private_user_id: Option<i64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageReference {
@@ -139,7 +140,10 @@ impl State {
         if db.query_row("SELECT [notnull] FROM pragma_table_info('context_capabilities') WHERE name='message_ref'",[],|r|r.get::<_,i64>(0))?!=0{
             db.execute_batch("BEGIN; ALTER TABLE context_capabilities RENAME TO legacy_context_capabilities; DROP INDEX context_route_active;")?;
             let schema=include_str!("state_schema.sql");let section=&schema[schema.find("CREATE TABLE IF NOT EXISTS context_capabilities").unwrap()..];db.execute_batch(section)?;
-            db.execute_batch("INSERT INTO context_capabilities SELECT * FROM legacy_context_capabilities; DROP TABLE legacy_context_capabilities; COMMIT;")?;
+            db.execute_batch("INSERT INTO context_capabilities(context_ref,bot_id,route_key,chat_id,topic_id,message_ref,message_id,sender_ref,attachments_json,active,expires_at,created_at) SELECT * FROM legacy_context_capabilities; DROP TABLE legacy_context_capabilities; COMMIT;")?;
+        }
+        if db.query_row("SELECT 1 FROM pragma_table_info('context_capabilities') WHERE name='private_user_id'", [], |r| r.get::<_, i64>(0)).optional()?.is_none() {
+            db.execute_batch("ALTER TABLE context_capabilities ADD COLUMN private_user_id INTEGER")?;
         }
         if db
             .query_row(
@@ -475,7 +479,7 @@ impl State {
                 [&message.route.key],
             )?;
             db.execute(
-                "INSERT OR REPLACE INTO context_capabilities VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
+                "INSERT OR REPLACE INTO context_capabilities(context_ref,bot_id,route_key,chat_id,topic_id,message_ref,message_id,sender_ref,attachments_json,active,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
                 params![
                     message.context_ref,
                     message.route.bot_id,
@@ -494,13 +498,39 @@ impl State {
         Ok(())
     }
     pub fn register_event_context(&self, route: &Route, context: &str) -> Result<()> {
+        self.register_context(route, context, None)
+    }
+    fn register_context(
+        &self,
+        route: &Route,
+        context: &str,
+        private_user: Option<i64>,
+    ) -> Result<()> {
         let db = self.connection()?;
         db.execute(
             "UPDATE context_capabilities SET active=0 WHERE route_key=?",
             [&route.key],
         )?;
-        db.execute("INSERT INTO context_capabilities(context_ref,bot_id,route_key,chat_id,topic_id,attachments_json,expires_at,created_at) VALUES (?,?,?,?,?,'[]',?,?)",params![context,route.bot_id,route.key,route.chat_id,route.topic_id,expires(1),now()])?;
+        db.execute("INSERT INTO context_capabilities(context_ref,bot_id,route_key,chat_id,topic_id,attachments_json,expires_at,created_at,private_user_id) VALUES (?,?,?,?,?,'[]',?,?,?)",params![context,route.bot_id,route.key,route.chat_id,route.topic_id,expires(1),now(),private_user])?;
         Ok(())
+    }
+    pub fn register_private_context(&self, route: &Route, context: &str, user: i64) -> Result<()> {
+        self.register_context(route, context, Some(user))
+    }
+    pub fn record_ephemeral(&self, route: &str, user: i64, message: i64, text: &str) -> Result<()> {
+        self.connection()?.execute(
+            "INSERT OR REPLACE INTO ephemeral_messages VALUES (?,?,?,?,?)",
+            params![route, user, message, text, now()],
+        )?;
+        Ok(())
+    }
+    pub fn ephemeral_excerpt(
+        &self,
+        route: &str,
+        user: i64,
+        message: i64,
+    ) -> Result<Option<String>> {
+        Ok(self.connection()?.query_row("SELECT text FROM ephemeral_messages WHERE route_key=? AND user_id=? AND message_id=?", params![route,user,message], |r| r.get::<_,String>(0)).optional()?.map(|s|s.chars().take(2000).collect()))
     }
     pub fn active_context(&self, key: &str) -> Result<Option<ContextCapability>> {
         one(&*self.connection()?,"SELECT * FROM context_capabilities WHERE route_key=? AND active=1 AND expires_at>? ORDER BY created_at DESC LIMIT 1",params![key,now()])?.map(serde_json::from_value).transpose().context("Read context")
@@ -789,6 +819,7 @@ impl State {
             }
             tx.execute("UPDATE routes SET route_key=?,chat_id=?,chat_kind=?,updated_at=? WHERE route_key=?",params![key,new,if route.whisper_user().is_some() { "whisper" } else { "supergroup" },now(),r.route_key])?;
             for table in [
+                "ephemeral_messages",
                 "telegram_principals",
                 "telegram_inbox",
                 "telegram_outbox",
@@ -817,6 +848,10 @@ impl State {
         let db = self.connection()?;
         let retention = expires(-7);
         for (sql, date) in [
+            (
+                "DELETE FROM ephemeral_messages WHERE created_at<?",
+                &retention,
+            ),
             (
                 "DELETE FROM telegram_inbox WHERE status IN ('done','discarded') AND updated_at<?",
                 &retention,

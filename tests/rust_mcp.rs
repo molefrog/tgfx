@@ -104,7 +104,6 @@ impl Fixture {
             token: "123:TEST".into(),
             bot_id: "123".into(),
             route_key: route,
-            history_only: false,
             workspace,
             home,
             database,
@@ -942,10 +941,10 @@ async fn distinct_attachments_with_the_same_filename_download_separately() {
 }
 
 #[tokio::test]
-async fn whisper_history_capability_cannot_act_or_read_other_conversations() {
+async fn shared_session_mcp_blocks_actions_only_while_a_whisper_is_active() {
     let f = Fixture::new(true).await;
     let public = tgfx::types::Route::new("123", "-100", "0", "supergroup");
-    let private = public.whisper(42);
+    let private = public.clone();
     let other = tgfx::types::Route::new("123", "-200", "0", "supergroup");
     f.state.ensure_route(&private).unwrap();
     for id in 1..=6 {
@@ -954,16 +953,13 @@ async fn whisper_history_capability_cannot_act_or_read_other_conversations() {
             .record_bot(&public.key, &id.to_string(), Some(&format!("PUBLIC_{id}")))
             .unwrap();
     }
-    f.state
-        .history
-        .record_bot(&private.key, "1", Some("PRIVATE_SECRET"))
-        .unwrap();
+
     f.state
         .history
         .record_bot(&other.key, "1", Some("OTHER_GROUP_SECRET"))
         .unwrap();
     f.state
-        .register_event_context(&private, "whisper_context")
+        .register_private_context(&private, "whisper_context", 42)
         .unwrap();
     f.state
         .history
@@ -973,11 +969,8 @@ async fn whisper_history_capability_cannot_act_or_read_other_conversations() {
         .history
         .record_bot(&public.key, "7", Some("AFTER_SNAPSHOT"))
         .unwrap();
-    let mut env = f.env.clone();
-    env.route_key = private.key.clone();
-    env.history_only = true;
+    let server = TelegramMcp::new(f.env.clone()).await.unwrap();
     let calls = f.mock.calls.lock().unwrap().len();
-    let server = TelegramMcp::new(env).await.unwrap();
     assert_eq!(
         server
             .tools()
@@ -1010,7 +1003,7 @@ async fn whisper_history_capability_cannot_act_or_read_other_conversations() {
             .is_err()
     );
     for tool in [
-        "send_message",
+        "send_sticker_by_id",
         "set_reaction",
         "download_attachment",
         "ask_question",
@@ -1018,8 +1011,37 @@ async fn whisper_history_capability_cannot_act_or_read_other_conversations() {
         assert!(server.execute(tool, json!({})).await.is_err());
     }
     assert_eq!(f.mock.calls.lock().unwrap().len(), calls);
+    assert!(
+        server
+            .execute("send_sticker_by_id", json!({"file_id":"fixture-sticker"}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("private reply")
+    );
     f.state
         .deactivate_context(&private.key, "whisper_context")
         .unwrap();
     assert!(server.execute("read_history", json!({})).await.is_err());
+    f.state
+        .register_event_context(&public, "public_again")
+        .unwrap();
+    assert!(
+        server
+            .tools()
+            .iter()
+            .any(|tool| tool.name == "send_sticker_by_id")
+    );
+    server
+        .execute("send_sticker_by_id", json!({"file_id":"fixture-sticker"}))
+        .await
+        .unwrap();
+    assert!(
+        f.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(method, _)| method == "sendSticker")
+    );
 }

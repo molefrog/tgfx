@@ -110,6 +110,15 @@ CREATE TABLE IF NOT EXISTS telegram_interactions (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ephemeral_messages (
+  route_key TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(route_key, user_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS managed_pins (
   bot_id TEXT NOT NULL,
   route_key TEXT NOT NULL,
@@ -143,7 +152,8 @@ CREATE TABLE IF NOT EXISTS context_capabilities (
   attachments_json TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
   expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  private_user_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS context_route_active
   ON context_capabilities(route_key, active, created_at DESC);

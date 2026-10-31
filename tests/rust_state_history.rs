@@ -10,6 +10,23 @@ fn fixture() -> (tempfile::TempDir, State) {
     let s = State::open(&d.path().join("state.db"), d.path()).unwrap();
     (d, s)
 }
+
+#[test]
+fn hidden_reply_references_are_scoped_to_user_and_topic() {
+    let (_d, s) = fixture();
+    s.record_ephemeral("100:-9:7", 42, 1, "FIRST").unwrap();
+    s.record_ephemeral("100:-9:7", 43, 1, "SECOND").unwrap();
+    assert_eq!(
+        s.ephemeral_excerpt("100:-9:7", 42, 1).unwrap().as_deref(),
+        Some("FIRST")
+    );
+    assert_eq!(
+        s.ephemeral_excerpt("100:-9:7", 43, 1).unwrap().as_deref(),
+        Some("SECOND")
+    );
+    assert!(s.ephemeral_excerpt("100:-9:8", 42, 1).unwrap().is_none());
+    assert!(s.ephemeral_excerpt("100:-9:7", 44, 1).unwrap().is_none());
+}
 #[test]
 fn context_usage_is_bound_to_its_route_session_and_model() {
     let (_d, s) = fixture();

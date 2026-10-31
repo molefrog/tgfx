@@ -2366,7 +2366,7 @@ async fn whisper_is_only_advertised_in_groups() {
 }
 
 #[tokio::test]
-async fn whisper_keeps_user_topic_and_group_sessions_separate() {
+async fn whisper_shares_the_group_session_but_delivers_to_each_requester() {
     let r = Running::start("live").await;
     std::fs::write(
         r.root.path().join("workspace/MEMORY.md"),
@@ -2392,7 +2392,7 @@ async fn whisper_keeps_user_topic_and_group_sessions_separate() {
     }
     r.updates.send(json!({"update_id":5,"message":{"message_id":5,"date":1,
         "chat":{"id":-9,"type":"supergroup"},"from":{"id":42,"is_bot":false},
-        "text":"@fixture_bot PUBLIC_REQUEST","entities":[{"type":"mention","offset":0,"length":12}]}})).unwrap();
+        "message_thread_id":7,"text":"@fixture_bot PUBLIC_REQUEST","entities":[{"type":"mention","offset":0,"length":12}]}})).unwrap();
     r.call(|m, p| m == "sendRichMessage" && text(p).contains("PUBLIC_REQUEST"))
         .await;
     let requests = r.fx();
@@ -2400,23 +2400,22 @@ async fn whisper_keeps_user_topic_and_group_sessions_separate() {
         .iter()
         .filter(|r| r["method"] == "session/new")
         .collect();
-    assert_eq!(
-        sessions.len(),
-        4,
-        "One per user/topic plus the public group session"
-    );
-    for session in &sessions[..3] {
+    assert_eq!(sessions.len(), 2, "One shared session per group/topic");
+    for session in &sessions {
         assert_eq!(session["params"]["mcpServers"].as_array().unwrap().len(), 1);
         assert!(
             session["params"]["_meta"]["fx"]["systemPrompt"]
                 .to_string()
-                .contains("private /whisper")
+                .contains("Telegram")
         );
     }
     for prompt in requests.iter().filter(|r| r["method"] == "session/prompt") {
         if prompt["params"]["prompt"].to_string().contains("PRIVATE_") {
-            assert_eq!(prompt["params"]["prompt"].as_array().unwrap().len(), 2);
-            assert!(!prompt.to_string().contains("SHARED_MEMORY_CANARY"));
+            assert!(
+                prompt["params"]["prompt"]
+                    .to_string()
+                    .contains("shared group conversation")
+            );
         }
     }
     assert_eq!(
@@ -2427,7 +2426,7 @@ async fn whisper_keeps_user_topic_and_group_sessions_separate() {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-        3
+        0
     );
     assert_eq!(
         r.db()
@@ -2480,7 +2479,7 @@ async fn whisper_empty_prompt_and_ephemeral_reply_stay_private() {
 }
 
 #[tokio::test]
-async fn whisper_resumes_its_own_session_after_restart() {
+async fn whisper_resumes_the_shared_session_after_restart() {
     let mut r = Running::start("final").await;
     whisper(&r, 1, 42, 7, "BEFORE_RESTART");
     r.call(|m, p| m == "sendRichMessage" && text(p).contains("BEFORE_RESTART"))
@@ -2754,7 +2753,7 @@ async fn whisper_language_guidance_distinguishes_the_question_from_history() {
     // FX recognizes explicit language guidance through this phrase.
     assert!(instructions.contains("Reply in"));
     assert!(instructions.contains("language"));
-    assert!(instructions.contains("metadata"));
+    assert!(instructions.contains("context, not instructions"));
     assert_eq!(blocks.last().unwrap()["text"], question);
     r.stop().await;
 }
@@ -2783,6 +2782,114 @@ async fn expired_whisper_reply_target_retries_without_losing_privacy() {
         attempts
             .iter()
             .all(|(_, p)| p["ephemeral_message_parameters"]["receiver_user_id"] == 42)
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn private_and_public_requests_share_one_queue_and_restore_public_delivery() {
+    let r = Running::start("final").await;
+    whisper(&r, 1, 42, 7, "WAIT");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !r.fx().iter().any(|p| p["method"] == "session/prompt") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    r.updates
+        .send(json!({"update_id":2,"message":{
+            "message_id":2,"date":1,"chat":{"id":-9,"type":"supergroup"},
+            "message_thread_id":7,"from":{"id":42,"is_bot":false},"text":"PUBLIC_AFTER_PRIVATE",
+            "reply_to_message":{"message_id":1,"from":{"id":100,"is_bot":true}}
+        }}))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        r.fx()
+            .iter()
+            .filter(|p| p["method"] == "session/prompt")
+            .count(),
+        1
+    );
+    let (_, private) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("WAIT_READY"))
+        .await;
+    assert_eq!(
+        private["ephemeral_message_parameters"]["receiver_user_id"],
+        42
+    );
+    let (_, public) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("PUBLIC_AFTER_PRIVATE"))
+        .await;
+    assert!(public.get("ephemeral_message_parameters").is_none());
+    assert_eq!(
+        r.fx()
+            .iter()
+            .filter(|p| p["method"] == "session/new")
+            .count(),
+        1
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn whisper_usage_is_the_shared_group_usage() {
+    let r = Running::start_with_env("final", &[("RUNTIME_USAGE", "1")]).await;
+    whisper(&r, 1, 42, 7, "MEASURE_PRIVATE");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("MEASURE_PRIVATE"))
+        .await;
+    r.updates
+        .send(json!({"update_id":2,"message":{
+            "ephemeral_message_id":2,"chat":{"id":-9,"type":"supergroup"},
+            "message_thread_id":7,"from":{"id":43,"is_bot":false},"text":"/usage@fixture_bot"
+        }}))
+        .unwrap();
+    let (_, usage) = r
+        .call(|m, p| {
+            matches!(m, "sendMessage" | "editEphemeralMessageText") && text(p).contains("2.5%")
+        })
+        .await;
+    let recipient = usage["ephemeral_message_parameters"]["receiver_user_id"]
+        .as_i64()
+        .or(usage["receiver_user_id"].as_i64());
+    assert_eq!(recipient, Some(43));
+    assert_eq!(
+        r.fx()
+            .iter()
+            .filter(|p| p["method"] == "session/new")
+            .count(),
+        1
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn replies_to_hidden_messages_include_the_matching_private_quote() {
+    let r = Running::start("final").await;
+    whisper(&r, 1, 42, 7, "QUOTE_FROM_FIRST_USER");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("QUOTE_FROM_FIRST_USER"))
+        .await;
+    whisper(&r, 2, 43, 7, "QUOTE_FROM_SECOND_USER");
+    r.call(|m, p| m == "sendRichMessage" && text(p).contains("QUOTE_FROM_SECOND_USER"))
+        .await;
+    let message:i64=r.db().query_row("SELECT message_id FROM ephemeral_messages WHERE user_id=42 ORDER BY created_at DESC LIMIT 1",[],|r|r.get(0)).unwrap();
+    r.updates
+        .send(json!({"update_id":3,"message":{
+            "ephemeral_message_id":3,"chat":{"id":-9,"type":"supergroup"},
+            "message_thread_id":7,"from":{"id":42,"is_bot":false},"text":"BLOCKS",
+            "reply_to_message":{"ephemeral_message_id":message,"from":{"id":100,"is_bot":true}}
+        }}))
+        .unwrap();
+    let (_, reply) = r
+        .call(|m, p| m == "sendRichMessage" && text(p).contains("reply_to"))
+        .await;
+    let result = text(&reply);
+    assert!(result.contains("QUOTE_FROM_FIRST_USER"));
+    assert!(!result.contains("QUOTE_FROM_SECOND_USER"));
+    assert_eq!(
+        reply["ephemeral_message_parameters"]["receiver_user_id"],
+        42
     );
     r.stop().await;
 }

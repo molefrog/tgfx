@@ -105,7 +105,8 @@ then remove and re-add it to the group. Keep tgfx running to collect messages
 as context for later requests; it cannot fetch messages from before it joined.
 
 Choose `/whisper` from the group's command menu to ask privately. The question
-and reply are visible only to you and the bot, with a separate conversation.
+and reply are visible only to you and the bot. They use the group's shared
+conversation, so the agent can refer to them in later public replies.
 
 ## Reply style
 
