@@ -1061,13 +1061,13 @@ async fn shared_session_mcp_blocks_actions_only_while_a_whisper_is_active() {
     for id in 1..=6 {
         f.state
             .history
-            .record_bot(&public.key, &id.to_string(), Some(&format!("PUBLIC_{id}")))
+            .record_bot(&public, &id.to_string(), Some(&format!("PUBLIC_{id}")))
             .unwrap();
     }
 
     f.state
         .history
-        .record_bot(&other.key, "1", Some("OTHER_GROUP_SECRET"))
+        .record_bot(&other, "1", Some("OTHER_GROUP_SECRET"))
         .unwrap();
     f.state
         .register_private_context(&private, "whisper_context", 42)
@@ -1078,7 +1078,7 @@ async fn shared_session_mcp_blocks_actions_only_while_a_whisper_is_active() {
         .unwrap();
     f.state
         .history
-        .record_bot(&public.key, "7", Some("AFTER_SNAPSHOT"))
+        .record_bot(&public, "7", Some("AFTER_SNAPSHOT"))
         .unwrap();
     let server = TelegramMcp::new(f.env.clone()).await.unwrap();
     let calls = f.mock.calls.lock().unwrap().len();
