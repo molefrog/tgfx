@@ -228,7 +228,21 @@ pub async fn deliver(
     rich: Value,
     text: &str,
 ) -> Result<Vec<Value>> {
-    let mut params = super::route_params(route);
+    deliver_reply(api, route, rich, text, None).await
+}
+pub async fn deliver_reply(
+    api: &TelegramApi,
+    route: &Route,
+    rich: Value,
+    text: &str,
+    reply_to: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut base = super::route_params(route);
+    if let Some(id) = reply_to {
+        base["reply_parameters"] =
+            json!({"message_id":id.parse::<i64>()?,"allow_sending_without_reply":true});
+    }
+    let mut params = base.clone();
     params["rich_message"] = rich;
     match retry_call(api, "sendRichMessage", params).await {
         Ok(v) => Ok(vec![v]),
@@ -236,7 +250,7 @@ pub async fn deliver(
             tracing::warn!(error=%rich_error,"rich reply failed; using plain text");
             let mut sent = vec![];
             for part in split_text(text, 4000) {
-                let mut p = super::route_params(route);
+                let mut p = base.clone();
                 p["text"] = json!(part);
                 sent.push(retry_call(api, "sendMessage", p).await?)
             }

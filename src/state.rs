@@ -11,6 +11,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+mod chat_sessions;
+
 #[derive(Clone)]
 pub struct State {
     pub db: Arc<Mutex<Connection>>,
@@ -167,7 +169,9 @@ impl State {
         }
         let db = Arc::new(Mutex::new(db));
         let history = History::new(db.clone(), workspace.to_string_lossy().into_owned())?;
-        Ok(Self { db, history })
+        let state = Self { db, history };
+        state.migrate_chat_sessions()?;
+        Ok(state)
     }
     pub fn connection(&self) -> Result<MutexGuard<'_, Connection>> {
         self.db
@@ -322,7 +326,7 @@ impl State {
         Ok(self.connection()?.execute("UPDATE telegram_inbox SET status='discarded',payload_json=NULL,updated_at=? WHERE route_key=? AND status IN ('received','interrupted','failed') AND (? IS NULL OR id<>?)",params![now(),route,except,except])?)
     }
     pub fn ensure_route(&self, route: &Route) -> Result<RouteRow> {
-        self.connection()?.execute("INSERT INTO routes(route_key,bot_id,chat_id,topic_id,chat_kind,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(route_key) DO UPDATE SET chat_kind=excluded.chat_kind,updated_at=excluded.updated_at",params![route.key,route.bot_id,route.chat_id,route.topic_id,route.chat_kind,now()])?;
+        self.connection()?.execute("INSERT INTO routes(route_key,bot_id,chat_id,topic_id,chat_kind,updated_at) VALUES (?,?,?,'0',?,?) ON CONFLICT(route_key) DO UPDATE SET chat_kind=excluded.chat_kind,updated_at=excluded.updated_at",params![route.key,route.bot_id,route.chat_id,route.chat_kind,now()])?;
         self.route(&route.key)?.context("Route missing")
     }
     pub fn route(&self, key: &str) -> Result<Option<RouteRow>> {
@@ -520,14 +524,24 @@ impl State {
         id: &str,
         text: Option<&str>,
     ) -> Result<String> {
-        self.history.record_bot(&route.key, id, text)?;
+        self.history.record_bot(route, id, text)?;
         let reference = new_ref("msg");
         self.connection()?.execute("INSERT INTO telegram_messages(ref,bot_id,route_key,chat_id,topic_id,message_id,owned_by_bot,excerpt,created_at,expires_at) VALUES (?,?,?,?,?,?,1,?,?,?) ON CONFLICT(bot_id,chat_id,message_id) DO UPDATE SET ref=excluded.ref,excerpt=coalesce(excluded.excerpt,telegram_messages.excerpt),expires_at=excluded.expires_at",params![reference,route.bot_id,route.key,route.chat_id,route.topic_id,id,message_excerpt(text),now(),expires(30)])?;
         Ok(reference)
     }
     pub fn update_message_excerpt(&self, reference: &str, key: &str, text: &str) -> Result<()> {
         if let Some(m) = self.managed_message_reference(reference, key)? {
-            self.history.record_bot(key, &m.message_id, Some(text))?;
+            let route = Route::new(
+                &m.bot_id,
+                &m.chat_id,
+                &m.topic_id,
+                if m.chat_id.starts_with('-') {
+                    "supergroup"
+                } else {
+                    "private"
+                },
+            );
+            self.history.record_bot(&route, &m.message_id, Some(text))?;
         }
         self.connection()?.execute(
             "UPDATE telegram_messages SET excerpt=? WHERE ref=? AND route_key=?",
@@ -549,6 +563,8 @@ impl State {
         payload: &Value,
     ) -> Result<i64> {
         let db = self.connection()?;
+        let mut payload = payload.clone();
+        payload["route"] = serde_json::to_value(route)?;
         db.execute("INSERT INTO telegram_outbox(effect_key,bot_id,route_key,inbox_id,kind,payload_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,'pending',?,?) ON CONFLICT(effect_key) DO NOTHING",params![effect,route.bot_id,route.key,inbox,kind,payload.to_string(),now(),now()])?;
         Ok(db.query_row(
             "SELECT id FROM telegram_outbox WHERE effect_key=?",

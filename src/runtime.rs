@@ -509,8 +509,7 @@ impl Inner {
             .context("Telegram update missing ID")?;
         if let Some(stopped) = update.get("stopped_message_generation") {
             let chat = decimal(&stopped["chat"]["id"]).unwrap_or_default();
-            let topic = decimal(&stopped["message_thread_id"]).unwrap_or_else(|| "0".into());
-            let key = format!("{}:{chat}:{topic}", self.options.bot.id);
+            let key = format!("{}:{chat}:0", self.options.bot.id);
             self.state
                 .ingest_update(&self.options.bot.id, id, None, None, None, false)?;
             let c = self.config();
@@ -904,7 +903,8 @@ impl Inner {
                         message.sender.id.as_deref().unwrap_or("unknown")
                     )
                 })
-        };
+        }
+        .map(|group| format!("{group}:thread:{}", message.route.topic_id));
         if lock(&self.batches).get(&row.route_key).map(|b| &b.group) != group.as_ref() {
             self.flush_batch(&row.route_key)?;
         }
@@ -1636,7 +1636,7 @@ impl Inner {
             ensure!(!active.cancel.is_cancelled() && !self.stopping.is_cancelled(), "Turn cancelled");
             let rich = projected.rich(mode, true);
             let text = projected.plain_final(mode);
-            let final_payload=json!({"chatId":m.route.chat_id,"topicId":m.route.topic_id,"rich":rich,"plain":if text.trim().is_empty(){projected.status()}else{text}});
+            let final_payload=json!({"chatId":m.route.chat_id,"topicId":m.route.topic_id,"replyToMessageId":if m.route.chat_kind=="private"{None}else{Some(&m.message_id)},"rich":rich,"plain":if text.trim().is_empty(){projected.status()}else{text}});
             let outbox_id = self.state.create_outbox(&format!("final:{}:{}", self.options.bot.id, row.id), &m.route, Some(row.id), "rich_final", &final_payload)?;
             let outbox = self.state.recoverable_outbox()?.into_iter().find(|r| r.id == outbox_id).context("Final outbox disappeared")?;
             let delivery = tokio::select! {
@@ -1676,6 +1676,9 @@ impl Inner {
         previews: &crate::images::Previews,
     ) -> Result<Vec<Value>> {
         let mut envelope = telegram::to_envelope(m);
+        if let Some(root) = self.state.history.thread_root(m)? {
+            envelope["telegram_message"]["thread"]["root"] = root;
+        }
         for attachment in envelope["telegram_message"]["attachments"]
             .as_array_mut()
             .into_iter()
@@ -1875,7 +1878,7 @@ impl Inner {
     }
     async fn deliver_outbox(&self, row: &OutboxRow) -> Result<()> {
         let payload: Value = serde_json::from_str(&row.payload_json)?;
-        let route = if payload["route"].is_object() {
+        let mut route: Route = if payload["route"].is_object() {
             serde_json::from_value(payload["route"].clone())?
         } else {
             self.state
@@ -1883,6 +1886,13 @@ impl Inner {
                 .context("Delivery route missing")?
                 .as_route()
         };
+        if let Some(destination) = self.state.route(&row.route_key)? {
+            // A group may have migrated to a new chat ID while this reply was pending.
+            route.key = destination.route_key;
+            route.bot_id = destination.bot_id;
+            route.chat_id = destination.chat_id;
+            route.chat_kind = destination.chat_kind;
+        }
         let rich = payload
             .get("rich")
             .or_else(|| payload.get("richMessage"))
@@ -1923,11 +1933,25 @@ impl Inner {
                 }
                 Err(error) => {
                     self.log("delivery.edit_failed", json!({"error":error.to_string()}));
-                    telegram::deliver(&self.options.telegram, &route, rich, text).await
+                    telegram::deliver_reply(
+                        &self.options.telegram,
+                        &route,
+                        rich,
+                        text,
+                        payload["replyToMessageId"].as_str(),
+                    )
+                    .await
                 }
             }
         } else {
-            telegram::deliver(&self.options.telegram, &route, rich, text).await
+            telegram::deliver_reply(
+                &self.options.telegram,
+                &route,
+                rich,
+                text,
+                payload["replyToMessageId"].as_str(),
+            )
+            .await
         };
         match delivered {
             Ok(sent) => {

@@ -911,9 +911,9 @@ async fn quoted_document_fixture() -> (Fixture, TelegramMcp, tgfx::types::Inboun
 }
 
 #[tokio::test]
-async fn quoted_document_is_downloadable_across_a_reply_thread_boundary() {
+async fn quoted_and_original_documents_are_downloadable_in_the_shared_chat() {
     let (f, server, reply, original_ref) = quoted_document_fixture().await;
-    assert_ne!(reply.route.key, f.env.route_key);
+    assert_eq!(reply.route.key, f.env.route_key);
     let reference = reply.reply.as_ref().unwrap()["attachment_refs"][0]
         .as_str()
         .unwrap();
@@ -929,15 +929,15 @@ async fn quoted_document_is_downloadable_across_a_reply_thread_boundary() {
         server
             .execute(
                 "download_attachment",
-                json!({"attachment_ref":original_ref})
+                json!({"attachment_ref":original_ref,"filename":"original-receipt.pdf"})
             )
             .await
-            .is_err()
+            .is_ok()
     );
 }
 
 #[tokio::test]
-async fn quoted_document_remains_in_its_observing_threads_history() {
+async fn quoted_document_remains_in_the_shared_chats_history() {
     let (f, server, reply, _) = quoted_document_fixture().await;
     let reference = reply.reply.as_ref().unwrap()["attachment_refs"][0]
         .as_str()
@@ -965,20 +965,19 @@ async fn quoted_document_remains_in_its_observing_threads_history() {
         b"original unmodified image bytes"
     );
     let history = server.execute("read_history", json!({})).await.unwrap();
-    assert_eq!(
-        history["messages"][0]["reply_attachment_refs"],
-        json!([reference])
-    );
-    assert!(
-        history["messages"][0]["attachments"][0]
-            .get("fileId")
-            .is_none()
-    );
+    let quoted = history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["message_id"] == "12")
+        .unwrap();
+    assert_eq!(quoted["reply_attachment_refs"], json!([reference]));
+    assert!(quoted["attachments"][0].get("fileId").is_none());
     assert!(
         f.server
             .execute("download_attachment", json!({"attachment_ref":reference}))
             .await
-            .is_err()
+            .is_ok()
     );
 }
 
