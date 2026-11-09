@@ -870,6 +870,118 @@ async fn check_native_proxy(modern: bool) {
     broker.close().await.unwrap();
 }
 
+async fn quoted_document_fixture() -> (Fixture, TelegramMcp, tgfx::types::InboundMessage, String) {
+    let f = Fixture::new(true).await;
+    let bot = tgfx::types::BotIdentity {
+        id: "123".into(),
+        username: Some("test_bot".into()),
+        display_name: "Test".into(),
+    };
+    let document = json!({"message_id":11,"date":100,"chat":{"id":-100,"type":"supergroup"},
+        "from":{"id":42,"first_name":"Ada"},
+        "document":{"file_id":"original-file","file_unique_id":"original","file_name":"receipt.pdf","mime_type":"application/pdf"}});
+    let mut original = tgfx::telegram::normalize_with_lookup(
+        &json!({"update_id":1,"message":document}),
+        &bot,
+        |_, _| None,
+    )
+    .unwrap();
+    f.state.register_inbound(&mut original, false).unwrap();
+    f.state.history.record_inbound(&mut original).unwrap();
+    let original_ref = original.attachments[0].reference.clone();
+    let mut reply = tgfx::telegram::normalize_with_lookup(
+        &json!({"update_id":2,"message":{"message_id":12,"date":101,"message_thread_id":11,
+            "chat":{"id":-100,"type":"supergroup"},"from":{"id":42,"first_name":"Ada"},
+            "text":"@test_bot read this","reply_to_message":document}}),
+        &bot,
+        |_, message_id| (message_id == "11").then(|| original.message_ref.clone()),
+    )
+    .unwrap();
+    f.state.ensure_route(&reply.route).unwrap();
+    f.state.register_inbound(&mut reply, true).unwrap();
+    f.state.history.record_inbound(&mut reply).unwrap();
+    f.state
+        .history
+        .snapshot(&reply.route.key, &reply.context_ref)
+        .unwrap();
+    let mut env = f.env.clone();
+    env.route_key = reply.route.key.clone();
+    let server = TelegramMcp::new(env).await.unwrap();
+    (f, server, reply, original_ref)
+}
+
+#[tokio::test]
+async fn quoted_document_is_downloadable_across_a_reply_thread_boundary() {
+    let (f, server, reply, original_ref) = quoted_document_fixture().await;
+    assert_ne!(reply.route.key, f.env.route_key);
+    let reference = reply.reply.as_ref().unwrap()["attachment_refs"][0]
+        .as_str()
+        .unwrap();
+    let result = server
+        .execute("download_attachment", json!({"attachment_ref":reference}))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(result["path"].as_str().unwrap()).unwrap(),
+        b"original unmodified image bytes"
+    );
+    assert!(
+        server
+            .execute(
+                "download_attachment",
+                json!({"attachment_ref":original_ref})
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn quoted_document_remains_in_its_observing_threads_history() {
+    let (f, server, reply, _) = quoted_document_fixture().await;
+    let reference = reply.reply.as_ref().unwrap()["attachment_refs"][0]
+        .as_str()
+        .unwrap();
+    let mut later = reply.clone();
+    later.update_id = 3;
+    later.message_id = "13".into();
+    later.message_ref = "msg_later".into();
+    later.context_ref = "ctx_later".into();
+    later.attachments.clear();
+    later.reply = None;
+    later.raw = json!({"message":{"message_id":13,"text":"read it again"}});
+    f.state.register_inbound(&mut later, true).unwrap();
+    f.state.history.record_inbound(&mut later).unwrap();
+    f.state
+        .history
+        .snapshot(&later.route.key, &later.context_ref)
+        .unwrap();
+    let result = server
+        .execute("download_attachment", json!({"attachment_ref":reference}))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(result["path"].as_str().unwrap()).unwrap(),
+        b"original unmodified image bytes"
+    );
+    let history = server.execute("read_history", json!({})).await.unwrap();
+    assert_eq!(
+        history["messages"][0]["reply_attachment_refs"],
+        json!([reference])
+    );
+    assert!(
+        history["messages"][0]["attachments"][0]
+            .get("fileId")
+            .is_none()
+    );
+    assert!(
+        f.server
+            .execute("download_attachment", json!({"attachment_ref":reference}))
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn original_attachments_remain_downloadable_without_a_preview() {
     let f = Fixture::new(false).await;

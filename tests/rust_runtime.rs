@@ -1895,6 +1895,40 @@ fn image_prompt(r: &Running) -> Vec<Value> {
         .unwrap()
         .clone()
 }
+
+#[tokio::test]
+async fn quoted_document_reaches_fx_without_an_observed_original_message() {
+    let r = Running::start("final").await;
+    r.updates
+        .send(json!({"update_id":12,"message":{
+            "message_id":12,"message_thread_id":11,"date":1,
+            "chat":{"id":-9,"type":"supergroup"},
+            "from":{"id":42,"first_name":"Ada"},
+            "text":"@fixture_bot read this",
+            "entities":[{"type":"mention","offset":0,"length":12}],
+            "reply_to_message":{"message_id":11,"date":1,
+                "chat":{"id":-9,"type":"supergroup"},
+                "from":{"id":43,"first_name":"Grace"},
+                "document":{"file_id":"quoted-file","file_name":"receipt.pdf","mime_type":"application/pdf"}}
+        }}))
+        .unwrap();
+    r.call(|m, _| m == "sendRichMessage").await;
+    let blocks = image_prompt(&r);
+    let envelope: Value = serde_json::from_str(
+        blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .find(|s| s.contains("telegram_message"))
+            .unwrap(),
+    )
+    .unwrap();
+    let message = &envelope["telegram_message"];
+    let reference = message["attachments"][0]["ref"].as_str().unwrap();
+    assert_eq!(message["reply"]["attachment_refs"], json!([reference]));
+    assert_eq!(message["scope"]["topic_id"], "11");
+    r.stop().await;
+}
+
 #[tokio::test]
 async fn album_previews_share_one_limit_and_keep_all_original_refs() {
     let r = Running::start("final").await;

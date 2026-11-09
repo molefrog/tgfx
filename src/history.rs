@@ -120,6 +120,13 @@ impl History {
             None
         };
         let mut details = json!({"from":{"kind":m.sender.kind,"id":m.sender.id,"display_name":m.sender.display_name},"attachments":m.attachments.iter().map(|a|{let mut v=serde_json::to_value(a).unwrap();v.as_object_mut().unwrap().remove("localPath");v}).collect::<Vec<_>>()});
+        if let Some(refs) = m
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.get("attachment_refs"))
+        {
+            details["reply_attachment_refs"] = refs.clone();
+        }
         if let Some(r) = reply {
             details["reply_to"] = r["ref"].clone();
         }

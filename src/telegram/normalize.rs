@@ -133,7 +133,7 @@ pub fn normalize_with_lookup(
         .as_str()
         .or(m["caption"].as_str())
         .map(str::to_owned);
-    let attachments = attachment_refs(m);
+    let mut attachments = attachment_refs(m);
     let location = m
         .get("location")
         .or_else(|| m["venue"].get("location"))
@@ -156,12 +156,20 @@ pub fn normalize_with_lookup(
         if let Some(t) = r["text"].as_str().or(r["caption"].as_str()) {
             p["text_excerpt"] = json!(t.chars().take(1000).collect::<String>())
         }
-        let kinds = attachment_refs(r)
+        let quoted_attachments = attachment_refs(r);
+        let kinds = quoted_attachments
             .iter()
             .map(|a| a.kind.clone())
             .collect::<Vec<_>>();
         if !kinds.is_empty() {
-            p["attachment_kinds"] = json!(kinds)
+            p["attachment_kinds"] = json!(kinds);
+            p["attachment_refs"] = json!(
+                quoted_attachments
+                    .iter()
+                    .map(|a| &a.reference)
+                    .collect::<Vec<_>>()
+            );
+            attachments.extend(quoted_attachments);
         }
         if let Some(loc) = r.get("location").or_else(|| r["venue"].get("location")) {
             p["location"] = loc.clone()
