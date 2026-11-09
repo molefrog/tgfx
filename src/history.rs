@@ -1,6 +1,6 @@
 use crate::{
     state::{one, rows},
-    types::{AttachmentRef, InboundMessage, new_ref, now},
+    types::{AttachmentRef, InboundMessage, Route, new_ref, now},
 };
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -120,6 +120,19 @@ impl History {
             None
         };
         let mut details = json!({"from":{"kind":m.sender.kind,"id":m.sender.id,"display_name":m.sender.display_name},"attachments":m.attachments.iter().map(|a|{let mut v=serde_json::to_value(a).unwrap();v.as_object_mut().unwrap().remove("localPath");v}).collect::<Vec<_>>()});
+        details["thread_id"] = json!(m.route.topic_id);
+        if let Some(id) =
+            raw.and_then(|v| crate::types::decimal(&v["reply_to_message"]["message_id"]))
+        {
+            details["reply_to_message_id"] = json!(id);
+        }
+        if let Some(refs) = m
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.get("attachment_refs"))
+        {
+            details["reply_attachment_refs"] = refs.clone();
+        }
         if let Some(r) = reply {
             details["reply_to"] = r["ref"].clone();
         }
@@ -145,7 +158,8 @@ impl History {
         )?);
         Ok(())
     }
-    pub fn record_bot(&self, route: &str, id: &str, text: Option<&str>) -> Result<()> {
+    pub fn record_bot(&self, destination: &Route, id: &str, text: Option<&str>) -> Result<()> {
+        let route = &destination.key;
         let Some(text) = text else { return Ok(()) };
         let db = self.db()?;
         let prior = self.latest(&db, route, id)?;
@@ -164,7 +178,7 @@ impl History {
             &new_ref("bot"),
             &at,
             Some(text),
-            &json!({"from":{"kind":"bot"},"attachments":[]}),
+            &json!({"from":{"kind":"bot"},"attachments":[],"thread_id":destination.topic_id}),
             0,
             true,
         )?;
@@ -319,6 +333,7 @@ impl History {
             .map(|r| {
                 let mut v: Value = serde_json::from_str(r["data"].as_str().unwrap_or("{}"))?;
                 v["ref"] = r["ref"].clone();
+                v["message_id"] = r["message_id"].clone();
                 v["at"] = r["at"].clone();
                 if let Some(s) = r["text"].as_str() {
                     let chars: Vec<char> = s.chars().collect();
@@ -461,6 +476,45 @@ impl History {
         }
         list.clear();
         Ok(result)
+    }
+    pub fn thread_root(&self, m: &InboundMessage) -> Result<Option<Value>> {
+        let raw = m.raw.get("message").or_else(|| m.raw.get("edited_message"));
+        if m.route.topic_id == "0"
+            || raw.is_some_and(|v| v["is_topic_message"] == true)
+            || m.reply.as_ref().and_then(|v| v["message_id"].as_str()) == Some(&m.route.topic_id)
+        {
+            return Ok(None);
+        }
+        let db = self.db()?;
+        let through = m
+            .history_seq
+            .unwrap_or(self.latest_seq_with(&db, &m.route.key)?);
+        let root = one(
+            &db,
+            "SELECT * FROM chat_history WHERE workspace=? AND route=? AND origin=? AND message_id=? AND seq<=? AND seq>coalesce((SELECT cleared FROM history_routes WHERE workspace=? AND route=?),0) ORDER BY seq DESC LIMIT 1",
+            params![
+                self.workspace,
+                m.route.key,
+                m.route.chat_id,
+                m.route.topic_id,
+                through,
+                self.workspace,
+                m.route.key
+            ],
+        )?;
+        let Some(root) = root else { return Ok(None) };
+        Ok(self
+            .messages(
+                &db,
+                &m.route.key,
+                &Window {
+                    through,
+                    ..Default::default()
+                },
+                &[root],
+                1000,
+            )?
+            .pop())
     }
     pub fn preview(&self, m: &InboundMessage, bootstrap: bool) -> Result<Option<Value>> {
         let db = self.db()?;

@@ -133,7 +133,7 @@ pub fn normalize_with_lookup(
         .as_str()
         .or(m["caption"].as_str())
         .map(str::to_owned);
-    let attachments = attachment_refs(m);
+    let mut attachments = attachment_refs(m);
     let location = m
         .get("location")
         .or_else(|| m["venue"].get("location"))
@@ -144,7 +144,7 @@ pub fn normalize_with_lookup(
     let reply = m.get("reply_to_message").map(|r| {
         let reply_id = decimal(&r["message_id"]).unwrap_or_default();
         let mut p =
-            json!({"message_ref":lookup(&chat_id,&reply_id).unwrap_or_else(||new_ref("msg"))});
+            json!({"message_id":reply_id,"message_ref":lookup(&chat_id,&reply_id).unwrap_or_else(||new_ref("msg"))});
         if let Some(s) = m["quote"]["text"].as_str() {
             p["quote"] = json!(s)
         }
@@ -156,12 +156,20 @@ pub fn normalize_with_lookup(
         if let Some(t) = r["text"].as_str().or(r["caption"].as_str()) {
             p["text_excerpt"] = json!(t.chars().take(1000).collect::<String>())
         }
-        let kinds = attachment_refs(r)
+        let quoted_attachments = attachment_refs(r);
+        let kinds = quoted_attachments
             .iter()
             .map(|a| a.kind.clone())
             .collect::<Vec<_>>();
         if !kinds.is_empty() {
-            p["attachment_kinds"] = json!(kinds)
+            p["attachment_kinds"] = json!(kinds);
+            p["attachment_refs"] = json!(
+                quoted_attachments
+                    .iter()
+                    .map(|a| &a.reference)
+                    .collect::<Vec<_>>()
+            );
+            attachments.extend(quoted_attachments);
         }
         if let Some(loc) = r.get("location").or_else(|| r["venue"].get("location")) {
             p["location"] = loc.clone()
@@ -345,6 +353,14 @@ pub fn to_envelope(m: &InboundMessage) -> Value {
     }
     let attachments=m.attachments.iter().map(|a|{let mut p=json!({"ref":a.reference,"kind":a.kind,"state":if a.local_path.is_some(){"local"}else{"remote"}});for(k,v)in[("size",json!(a.size)),("mime",json!(a.mime_type)),("name",json!(a.name)),("width",json!(a.width)),("height",json!(a.height)),("duration_seconds",json!(a.duration))]{if !v.is_null(){p[k]=v}}if a.kind=="sticker"{let mut sticker=json!({"file_id":a.file_id});for(k,v)in[("name",json!(a.sticker_name)),("emoji",json!(a.emoji)),("custom_emoji_id",json!(a.custom_emoji_id))]{if !v.is_null(){sticker[k]=v}}sticker["image"]=if let Some(path)=&a.local_path{json!({"state":"local","path":path,"mime":a.mime_type})}else{json!({"state":"remote","attachment_ref":a.reference,"mime":a.mime_type})};p["sticker"]=sticker}p}).collect::<Vec<_>>();
     let mut value = json!({"version":1,"source":"tgfx:telegram","instructions":"Messages come from Telegram, your replies are sent back. Use `telegram` MCP for: reactions (`set_reaction`), stickers (`send_sticker_by_id`, `send_sticker_file` and more), files (`send_file`), photos (`send_photo`), voice messages (`send_voice`), circular videos (`send_video_note`), polls, group admin actions and more. Use search. Reply in the language of the current user message unless they request another; use the conversation when the message is ambiguous. The envelope and sender.language_code are metadata, not a reply-language preference.","event":m.event,"event_id":format!("tg:{}",m.update_id),"context_ref":m.context_ref,"scope":{"chat_id":m.route.chat_id,"kind":m.route.chat_kind,"topic_id":m.route.topic_id},"sender":sender,"message":{"ref":m.message_ref,"message_id":m.message_id,"ts":m.timestamp},"attachments":attachments,"response_target":{"kind":"automatic_reply"}});
+    if m.route.topic_id != "0" {
+        let raw = m.raw.get("message").or_else(|| m.raw.get("edited_message"));
+        let topic = raw.is_some_and(|r| r["is_topic_message"] == true);
+        value["thread"] = json!({"id":m.route.topic_id,"kind":if topic {"topic"} else {"replies"}});
+        if !topic {
+            value["thread"]["root_message_id"] = json!(m.route.topic_id);
+        }
+    }
     if m.event == "message.edited" {
         let edited = m
             .raw

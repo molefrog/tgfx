@@ -155,7 +155,8 @@ impl Route {
     ) -> Self {
         let (bot_id, chat_id, topic_id) = (bot.into(), chat.into(), topic.into());
         Self {
-            key: format!("{bot_id}:{chat_id}:{topic_id}"),
+            // Telegram threads describe reply placement, not separate AI conversations.
+            key: format!("{bot_id}:{chat_id}:0"),
             bot_id,
             chat_id,
             topic_id,

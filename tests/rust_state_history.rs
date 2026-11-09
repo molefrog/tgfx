@@ -37,6 +37,137 @@ fn ingest(s: &State, m: &mut InboundMessage) -> i64 {
     .unwrap()
 }
 #[test]
+fn thread_roots_are_bounded_context_and_respect_cleared_history() {
+    let (_d, s) = fixture();
+    let mut root = message(1, 10, "Invoice discussion", false);
+    ingest(&s, &mut root);
+    let mut reply = message(2, 12, "Please review", false);
+    reply.route = Route::new("100", "-9", "10", "supergroup");
+    reply.raw["message"]["reply_to_message"] = json!({"message_id":11});
+    reply.reply = Some(json!({"message_id":"11"}));
+    ingest(&s, &mut reply);
+    let context = s.history.thread_root(&reply).unwrap().unwrap();
+    assert_eq!(context["message_id"], "10");
+    assert_eq!(context["text"], "Invoice discussion");
+    let page = s
+        .history
+        .read(
+            &reply.route.key,
+            reply.history_seq.unwrap(),
+            HistoryInput::default(),
+        )
+        .unwrap();
+    assert_eq!(page["messages"][1]["thread_id"], "10");
+    assert_eq!(page["messages"][1]["reply_to_message_id"], "11");
+    s.history.reset(&root.route.key, root.history_seq).unwrap();
+    assert!(s.history.thread_root(&reply).unwrap().is_none());
+    reply.route = Route::new("100", "-10", "10", "supergroup");
+    assert!(s.history.thread_root(&reply).unwrap().is_none());
+}
+
+#[test]
+fn legacy_thread_history_joins_the_main_session_without_replaying_work() {
+    let (d, s) = fixture();
+    let mut main = message(1, 1, "Main chat", false);
+    ingest(&s, &mut main);
+    s.register_inbound(&mut main, false).unwrap();
+    s.set_route_session(&main.route.key, "keep-main", false)
+        .unwrap();
+    let mut old = message(2, 2, "Old thread", false);
+    old.route = Route::new("100", "-9", "8", "supergroup");
+    old.route.key = "100:-9:8".into();
+    let inbox = ingest(&s, &mut old);
+    s.register_inbound(&mut old, true).unwrap();
+    s.set_route_session(&old.route.key, "archive-thread", false)
+        .unwrap();
+    s.mark_inbox(inbox, "done", None).unwrap();
+    let mut queued = message(3, 3, "Queued thread request", false);
+    queued.route = old.route.clone();
+    let queued_id = ingest(&s, &mut queued);
+    let out = s
+        .create_outbox(
+            "thread-answer",
+            &old.route,
+            None,
+            "rich_final",
+            &json!({"plain":"Thread reply"}),
+        )
+        .unwrap();
+    // Reproduce a pre-upgrade outbox without its own route snapshot.
+    s.connection()
+        .unwrap()
+        .execute(
+            "UPDATE telegram_outbox SET payload_json=? WHERE id=?",
+            rusqlite::params![json!({"plain":"Thread reply"}).to_string(), out],
+        )
+        .unwrap();
+    s.connection()
+        .unwrap()
+        .execute(
+            "UPDATE routes SET topic_id='8' WHERE route_key='100:-9:8'",
+            [],
+        )
+        .unwrap();
+    s.connection()
+        .unwrap()
+        .execute("DELETE FROM runtime_meta WHERE key='chat_sessions_v1'", [])
+        .unwrap();
+    drop(s);
+    let s = State::open(&d.path().join("state.db"), d.path()).unwrap();
+    assert_eq!(
+        s.route("100:-9:0").unwrap().unwrap().session_id.as_deref(),
+        Some("keep-main")
+    );
+    assert!(s.route("100:-9:8").unwrap().is_none());
+    assert_eq!(s.inbox(inbox).unwrap().unwrap().status, "done");
+    let queued = s.inbox(queued_id).unwrap().unwrap();
+    assert_eq!(queued.route_key, "100:-9:0");
+    let payload: serde_json::Value =
+        serde_json::from_str(queued.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["message"]["route"]["key"], "100:-9:0");
+    assert_eq!(payload["message"]["route"]["topicId"], "8");
+    let outbox = s.recoverable_outbox().unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&outbox[0].payload_json).unwrap();
+    assert_eq!(payload["route"]["topicId"], "8");
+    assert!(
+        s.message_reference(&old.message_ref, "100:-9:0")
+            .unwrap()
+            .is_some()
+    );
+    let history = s
+        .history
+        .read(
+            "100:-9:0",
+            s.history.latest_seq("100:-9:0").unwrap(),
+            HistoryInput::default(),
+        )
+        .unwrap();
+    assert_eq!(history["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(history["messages"][1]["thread_id"], "8");
+    assert_eq!(
+        s.query(
+            "SELECT * FROM telegram_principals WHERE route_key='100:-9:0'",
+            []
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    drop(s);
+    let s = State::open(&d.path().join("state.db"), d.path()).unwrap();
+    assert_eq!(
+        s.history
+            .read(
+                "100:-9:0",
+                s.history.latest_seq("100:-9:0").unwrap(),
+                HistoryInput::default()
+            )
+            .unwrap()["messages"],
+        history["messages"]
+    );
+}
+
+#[test]
 fn cursor_and_authorized_payload_commit_and_deduplicate() {
     let (_d, s) = fixture();
     s.ingest_update("100", 1, None, None, None, false).unwrap();
