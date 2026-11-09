@@ -723,7 +723,7 @@ fn group_migration_keeps_whisper_sessions_separate() {
         state.set_route_session(&route.key, session, false).unwrap();
     }
     state.migrate_chat("100", "-9", "-1009").unwrap();
-    let group = Route::new("100", "-1009", "7", "supergroup");
+    let group = Route::new("100", "-1009", "0", "supergroup");
     for (route, session) in [
         (group.clone(), "public"),
         (group.whisper(42), "alice"),
