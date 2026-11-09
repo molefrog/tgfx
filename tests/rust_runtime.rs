@@ -2561,7 +2561,7 @@ async fn whisper_shares_the_group_session_but_delivers_to_each_requester() {
         .iter()
         .filter(|r| r["method"] == "session/new")
         .collect();
-    assert_eq!(sessions.len(), 2, "One shared session per group/topic");
+    assert_eq!(sessions.len(), 1, "One shared session per group");
     for session in &sessions {
         assert_eq!(session["params"]["mcpServers"].as_array().unwrap().len(), 1);
         assert!(
@@ -2846,9 +2846,9 @@ async fn whisper_replies_preserve_unrecognized_slash_text() {
 }
 
 #[tokio::test]
-async fn whisper_receives_only_current_public_topic_history() {
+async fn whisper_receives_public_history_across_the_current_chats_threads() {
     let r = Running::start("final").await;
-    for (id, topic, message) in [(1, 7, "PUBLIC_TOPIC_FACT"), (2, 8, "OTHER_TOPIC_SECRET")] {
+    for (id, topic, message) in [(1, 7, "PUBLIC_TOPIC_FACT"), (2, 8, "OTHER_THREAD_FACT")] {
         r.updates
             .send(json!({"update_id":id,"message":{
                 "message_id":id,"date":1,"chat":{"id":-9,"type":"supergroup"},
@@ -2877,7 +2877,7 @@ async fn whisper_receives_only_current_public_topic_history() {
             .await;
         let result = text(&reply);
         assert!(!result.contains("PRIVATE_USER_SECRET"));
-        assert!(!result.contains("OTHER_TOPIC_SECRET"));
+        assert!(result.contains("OTHER_THREAD_FACT"));
         if id == 6 {
             assert!(result.contains("NEW_PUBLIC_FACT"));
         }
