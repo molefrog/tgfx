@@ -1935,7 +1935,7 @@ async fn group_usage_is_private_to_each_requester_and_excluded_from_shared_histo
     let shared: i64 = r
         .db()
         .query_row(
-            "SELECT count(*) FROM chat_history WHERE route='100:-9:7'",
+            "SELECT count(*) FROM chat_history WHERE route='100:-9:0'",
             [],
             |row| row.get(0),
         )
@@ -2031,6 +2031,167 @@ fn image_prompt(r: &Running) -> Vec<Value> {
         .unwrap()
         .clone()
 }
+
+#[tokio::test]
+async fn group_threads_share_fx_history_and_reply_to_the_triggering_message() {
+    let r = Running::start("final").await;
+    r.updates
+        .send(json!({"update_id":1,"message":{
+            "message_id":1,"date":1,"chat":{"id":-9,"type":"supergroup"},
+            "from":{"id":42,"first_name":"Ada"},"text":"@fixture_bot Main conversation",
+            "entities":[{"type":"mention","offset":0,"length":12}]
+        }}))
+        .unwrap();
+    r.call(|method, _| method == "sendRichMessage").await;
+    r.updates
+        .send(json!({"update_id":2,"message":{
+            "message_id":2,"date":2,"chat":{"id":-9,"type":"supergroup"},
+            "from":{"id":43,"first_name":"Grace"},"caption":"Invoice for review",
+            "document":{"file_id":"receipt","file_name":"receipt.pdf"}
+        }}))
+        .unwrap();
+    for (id, thread, parent, sender) in [(3, 2, 2, 42), (4, 2, 3, 43), (5, 99, 99, 42)] {
+        let before = r.mock.calls.lock().unwrap().len();
+        r.updates.send(json!({"update_id":id,"message":{
+            "message_id":id,"message_thread_id":thread,"date":id,
+            "chat":{"id":-9,"type":"supergroup"},
+            "from":{"id":sender,"first_name":"Person"},
+            "text":"@fixture_bot Review this","entities":[{"type":"mention","offset":0,"length":12}],
+            "reply_to_message":{"message_id":parent,"from":{"id":43,"first_name":"Grace"},"text":"Earlier question"}
+        }})).unwrap();
+        let (_, reply) = r
+            .call_after(before, |method, _| method == "sendRichMessage")
+            .await;
+        assert_eq!(reply["message_thread_id"], thread);
+        assert_eq!(reply["reply_parameters"]["message_id"], id);
+    }
+    let requests = r.fx();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|v| v["method"] == "session/new")
+            .count(),
+        1
+    );
+    let nested = requests
+        .iter()
+        .filter(|v| v["method"] == "session/prompt")
+        .flat_map(|v| v["params"]["prompt"].as_array().unwrap())
+        .filter_map(|b| b["text"].as_str())
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .find(|v| v["telegram_message"]["message"]["message_id"] == "4")
+        .unwrap();
+    let nested = &nested["telegram_message"];
+    assert_eq!(nested["reply"]["message_id"], "3");
+    assert_eq!(nested["thread"]["root"]["message_id"], "2");
+    assert_eq!(
+        nested["thread"]["root"]["attachments"][0]["name"],
+        "receipt.pdf"
+    );
+    assert_eq!(nested["thread"]["root"]["from"]["display_name"], "Grace");
+    assert!(
+        nested["thread"]["root"]["attachments"][0]
+            .get("fileId")
+            .is_none()
+    );
+    let state = tgfx::state::State::open(
+        &r.root.path().join("home/state/100.db"),
+        &r.root.path().join("workspace"),
+    )
+    .unwrap();
+    let history = state
+        .history
+        .read(
+            "100:-9:0",
+            state.history.latest_seq("100:-9:0").unwrap(),
+            tgfx::history::HistoryInput::default(),
+        )
+        .unwrap();
+    assert!(
+        history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["message_id"] == "4" && v["thread_id"] == "2")
+    );
+    assert!(
+        history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["message_id"] == "5" && v["thread_id"] == "99")
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn forwarded_batches_in_different_threads_keep_separate_reply_targets() {
+    let r = Running::start_with_defaults("final", &[], json!({"groupReply":"all"})).await;
+    for id in [1, 2] {
+        r.updates
+            .send(json!({"update_id":id,"message":{
+                "message_id":id,"date":id,"chat":{"id":-9,"type":"supergroup"},
+                "message_thread_id":id+10,"from":{"id":42,"first_name":"Ada"},
+                "forward_origin":{"type":"hidden_user","sender_user_name":"Original","date":1},
+                "text":format!("Forwarded {id}")
+            }}))
+            .unwrap();
+    }
+    r.call(|method, params| method == "sendRichMessage" && params["message_thread_id"] == 12)
+        .await;
+    let calls = r.mock.calls.lock().unwrap().clone();
+    for id in [1, 2] {
+        assert!(
+            calls
+                .iter()
+                .any(|(method, params)| method == "sendRichMessage"
+                    && params["message_thread_id"] == id + 10
+                    && params["reply_parameters"]["message_id"] == id)
+        );
+    }
+    assert_eq!(
+        r.fx()
+            .iter()
+            .filter(|v| v["method"] == "session/new")
+            .count(),
+        1
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn quoted_document_reaches_fx_without_an_observed_original_message() {
+    let r = Running::start("final").await;
+    r.updates
+        .send(json!({"update_id":12,"message":{
+            "message_id":12,"message_thread_id":11,"date":1,
+            "chat":{"id":-9,"type":"supergroup"},
+            "from":{"id":42,"first_name":"Ada"},
+            "text":"@fixture_bot read this",
+            "entities":[{"type":"mention","offset":0,"length":12}],
+            "reply_to_message":{"message_id":11,"date":1,
+                "chat":{"id":-9,"type":"supergroup"},
+                "from":{"id":43,"first_name":"Grace"},
+                "document":{"file_id":"quoted-file","file_name":"receipt.pdf","mime_type":"application/pdf"}}
+        }}))
+        .unwrap();
+    r.call(|m, _| m == "sendRichMessage").await;
+    let blocks = image_prompt(&r);
+    let envelope: Value = serde_json::from_str(
+        blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .find(|s| s.contains("telegram_message"))
+            .unwrap(),
+    )
+    .unwrap();
+    let message = &envelope["telegram_message"];
+    let reference = message["attachments"][0]["ref"].as_str().unwrap();
+    assert_eq!(message["reply"]["attachment_refs"], json!([reference]));
+    assert_eq!(message["scope"]["topic_id"], "11");
+    r.stop().await;
+}
+
 #[tokio::test]
 async fn album_previews_share_one_limit_and_keep_all_original_refs() {
     let r = Running::start("final").await;

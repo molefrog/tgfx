@@ -76,7 +76,7 @@ impl ExternalEvent {
 pub fn event_destination(e: &ExternalEvent, bot: &str) -> String {
     e.chat_id
         .as_ref()
-        .map(|c| format!("{bot}:{c}:{}", e.topic_id.as_deref().unwrap_or("0")))
+        .map(|c| format!("{bot}:{c}:0"))
         .unwrap_or_else(|| format!("{bot}:background"))
 }
 pub fn event_prompt(e: &ExternalEvent) -> Vec<Value> {

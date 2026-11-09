@@ -55,6 +55,9 @@ Set `TELEGRAM_BOT_TOKEN` to override the saved token.
 
 ## How it works
 
+Each Telegram chat has one shared conversation, including its reply threads and
+forum topics. Replies retain their original thread and message context.
+
 That's it. `tgfx` starts an `fx acp` process in that folder, with your current
 𝒇x provider and model, and bridges it to your Telegram bot. Pass `--yolo` to
 skip 𝒇x's permission checks.

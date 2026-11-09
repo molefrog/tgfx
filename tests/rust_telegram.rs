@@ -71,6 +71,96 @@ fn bot() -> BotIdentity {
     }
 }
 #[test]
+fn quoted_document_uses_the_same_attachment_format_as_a_direct_upload() {
+    let document = json!({"file_id":"receipt-file","file_unique_id":"receipt-unique",
+        "file_name":"receipt.pdf","mime_type":"application/pdf","file_size":1234});
+    let original = json!({"message_id":11,"date":100,"chat":{"id":-100,"type":"supergroup"},
+        "from":{"id":42,"first_name":"Ada"},"document":document,"caption":"Receipt"});
+    let direct = normalize_with_lookup(
+        &json!({"update_id":1,"message":original}),
+        &bot(),
+        |_, _| None,
+    )
+    .unwrap();
+    let reply = normalize_with_lookup(
+        &json!({"update_id":2,"message":{"message_id":12,"message_thread_id":11,"date":101,
+            "chat":{"id":-100,"type":"supergroup"},"from":{"id":42,"first_name":"Ada"},
+            "text":"@test_bot summarize this","reply_to_message":original}}),
+        &bot(),
+        |_, _| None,
+    )
+    .unwrap();
+    let direct_envelope = to_envelope(&direct);
+    let reply_envelope = to_envelope(&reply);
+    let file = &reply_envelope["telegram_message"]["attachments"][0];
+    for key in ["kind", "name", "mime", "size", "state"] {
+        assert_eq!(
+            file[key],
+            direct_envelope["telegram_message"]["attachments"][0][key]
+        );
+    }
+    assert_eq!(reply.attachments[0].file_id, "receipt-file");
+    assert_eq!(
+        reply_envelope["telegram_message"]["reply"]["attachment_refs"],
+        json!([file["ref"]])
+    );
+    assert_eq!(reply.reply.as_ref().unwrap()["text_excerpt"], "Receipt");
+}
+
+#[test]
+fn direct_and_quoted_attachments_keep_distinct_sources() {
+    let message = normalize_with_lookup(
+        &json!({"update_id":1,"message":{"message_id":12,"date":101,
+            "chat":{"id":-100,"type":"supergroup"},"from":{"id":42},"caption":"Compare these",
+            "document":{"file_id":"new","file_name":"report.pdf"},
+            "reply_to_message":{"message_id":11,"document":{"file_id":"old","file_name":"report.pdf"}}}}),
+        &bot(), |_, _| None,
+    ).unwrap();
+    assert_eq!(message.attachments.len(), 2);
+    assert_eq!(message.attachments[0].file_id, "new");
+    assert_eq!(message.attachments[1].file_id, "old");
+    assert_eq!(
+        message.reply.as_ref().unwrap()["attachment_refs"],
+        json!([message.attachments[1].reference])
+    );
+    assert_ne!(
+        message.attachments[0].reference,
+        message.attachments[1].reference
+    );
+}
+
+#[test]
+fn threads_share_a_chat_session_but_keep_their_message_context() {
+    let mut update = json!({"update_id":1,"message":{"message_id":12,"date":101,
+        "chat":{"id":-100,"type":"supergroup"},"from":{"id":42},
+        "text":"@test_bot review","message_thread_id":11,
+        "reply_to_message":{"message_id":10,"from":{"id":43,"first_name":"Grace"},"text":"What about this?"}}});
+    let first = normalize(&update, &bot()).unwrap();
+    update["message"]["message_thread_id"] = json!(55);
+    let second = normalize(&update, &bot()).unwrap();
+    assert_eq!(first.route.key, second.route.key);
+    assert_eq!(first.route.key, "123:-100:0");
+    assert_eq!(first.route.topic_id, "11");
+    let envelope = to_envelope(&first);
+    assert_eq!(
+        envelope["telegram_message"]["thread"],
+        json!({"id":"11","kind":"replies","root_message_id":"11"})
+    );
+    assert_eq!(envelope["telegram_message"]["reply"]["message_id"], "10");
+    update["message"]["is_topic_message"] = json!(true);
+    let topic = to_envelope(&normalize(&update, &bot()).unwrap());
+    assert_eq!(
+        topic["telegram_message"]["thread"],
+        json!({"id":"55","kind":"topic"})
+    );
+    update["message"]["chat"]["id"] = json!(-200);
+    assert_ne!(
+        normalize(&update, &bot()).unwrap().route.key,
+        first.route.key
+    );
+}
+
+#[test]
 fn normalization_retains_media_location_reply_forward_and_anonymous_identity() {
     let mut m = json!({"message_id":12,"date":100,"chat":{"id":-100,"type":"supergroup"},"message_thread_id":2,"from":{"id":99,"is_bot":true},"sender_chat":{"id":-100,"title":"Anonymous admin"},"caption":"caption","forward_origin":{"type":"hidden_user","sender_user_name":"Source"},"media_group_id":"album","venue":{"title":"Office","address":"Road","location":{"latitude":1,"longitude":2}},"reply_to_message":{"message_id":11,"from":{"id":5,"first_name":"User"},"text":"previous"}});
     for k in [
@@ -134,9 +224,9 @@ async fn raw_updates_and_sticker_sets_accept_future_schema() {
 #[tokio::test]
 async fn rich_failure_splits_plain_without_losing_unicode() {
     let (mock, api, task) = mock(true).await;
-    let route = Route::new("123", "42", "0", "private");
+    let route = Route::new("123", "42", "7", "private");
     let text = "🦀".repeat(5000);
-    let sent = deliver(&api, &route, json!({"blocks":[]}), &text)
+    let sent = deliver_reply(&api, &route, json!({"blocks":[]}), &text, Some("17"))
         .await
         .unwrap();
     assert!(sent.len() > 1);
@@ -148,6 +238,13 @@ async fn rich_failure_splits_plain_without_losing_unicode() {
         .collect::<Vec<_>>();
     assert_eq!(parts.concat(), text);
     assert!(parts.iter().all(|s| s.encode_utf16().count() <= 4000));
+    assert!(
+        calls
+            .iter()
+            .filter(|(method, _)| method == "sendMessage" || method == "sendRichMessage")
+            .all(|(_, params)| params["message_thread_id"] == 7
+                && params["reply_parameters"]["message_id"] == 17)
+    );
     task.abort();
 }
 #[test]
