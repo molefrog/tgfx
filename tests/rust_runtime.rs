@@ -1513,6 +1513,121 @@ async fn rejected_private_model_picker_never_falls_back_to_public_message() {
     r.stop().await;
 }
 
+async fn wait_for_model_picker_card(r: &Running) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let recorded: bool = r.db().query_row(
+                "SELECT EXISTS(SELECT 1 FROM telegram_interactions WHERE kind='model_picker' AND json_type(payload_json,'$.card')='object')",
+                [], |row| row.get(0)).unwrap();
+            if recorded { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_model_picker_notifies_then_deletes_its_message() {
+    let r = Running::start("final").await;
+    r.message(1, 42, "/model");
+    let (_, menu) = r
+        .call(|m, p| m == "sendMessage" && callback_data(p, "model:").is_some())
+        .await;
+    let data = callback_data(&menu, "model:").unwrap();
+    wait_for_model_picker_card(&r).await;
+    r.db().execute("UPDATE telegram_interactions SET expires_at='2000-01-01T00:00:00Z' WHERE kind='model_picker'", []).unwrap();
+    r.callback(2, &data, 1000);
+    let (_, deleted) = r.call(|m, _| m == "deleteMessage").await;
+    assert_eq!(deleted["message_id"], 1000);
+    let calls = r.mock.calls.lock().unwrap().clone();
+    let notification = calls
+        .iter()
+        .position(|(m, p)| m == "answerCallbackQuery" && text(p).contains("expired"))
+        .unwrap();
+    let deletion = calls
+        .iter()
+        .position(|(m, _)| m == "deleteMessage")
+        .unwrap();
+    assert!(notification < deletion);
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn expired_private_picker_is_deleted_only_for_its_requester() {
+    let r = Running::start("final").await;
+    r.message(1, -9, "/model");
+    let (_, menu) = r
+        .call(|m, p| m == "sendMessage" && callback_data(p, "model:").is_some())
+        .await;
+    let data = callback_data(&menu, "model:").unwrap();
+    wait_for_model_picker_card(&r).await;
+    r.db()
+        .execute(
+            "UPDATE telegram_interactions SET state='expired' WHERE kind='model_picker'",
+            [],
+        )
+        .unwrap();
+    for (id, user) in [(2, 43), (3, 42)] {
+        r.updates
+            .send(json!({"update_id":id,"callback_query":{
+                "id":format!("cb{id}"),"from":{"id":user,"is_bot":false},"data":data,
+                "message":{"ephemeral_message_id":1000,"chat":{"id":-9,"type":"supergroup"}}
+            }}))
+            .unwrap();
+        r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == format!("cb{id}"))
+            .await;
+        if user == 43 {
+            assert!(
+                !r.mock
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(m, _)| m == "deleteEphemeralMessage")
+            );
+        }
+    }
+    let (_, deleted) = r.call(|m, _| m == "deleteEphemeralMessage").await;
+    assert_eq!(deleted["receiver_user_id"], 42);
+    assert_eq!(deleted["ephemeral_message_id"], 1000);
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn pruned_model_picker_is_deleted_using_its_original_keyboard() {
+    let r = Running::start("final").await;
+    r.updates.send(json!({"update_id":1,"callback_query":{
+        "id":"old-picker","from":{"id":42,"is_bot":false},"data":"model:old:n",
+        "message":{"message_id":55,"from":{"id":100,"is_bot":true},
+            "chat":{"id":42,"type":"private"},
+            "reply_markup":{"inline_keyboard":[[{"text":"Next","callback_data":"model:old:n"}]]}}
+    }})).unwrap();
+    let (_, deleted) = r.call(|m, _| m == "deleteMessage").await;
+    assert_eq!(deleted["message_id"], 55);
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn missing_picker_state_does_not_allow_deleting_unrelated_messages() {
+    let r = Running::start("final").await;
+    r.updates.send(json!({"update_id":1,"callback_query":{
+        "id":"unrelated","from":{"id":42,"is_bot":false},"data":"model:old:n",
+        "message":{"message_id":55,"from":{"id":100,"is_bot":true},
+            "chat":{"id":42,"type":"private"},
+            "reply_markup":{"inline_keyboard":[[{"text":"Approve","callback_data":"mcp:other:approve"}]]}}
+    }})).unwrap();
+    r.call(|m, p| m == "answerCallbackQuery" && p["callback_query_id"] == "unrelated")
+        .await;
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "deleteMessage")
+    );
+    r.stop().await;
+}
+
 #[tokio::test]
 async fn group_model_picker_keeps_navigation_results_and_close_private() {
     for (action, expected_method) in [

@@ -2935,7 +2935,7 @@ impl Inner {
                 let control = self.model_control(&route.key);
                 let _control = control.lock().await;
                 let interaction = self.state.interaction(id)?;
-                let Some(i) = interaction.filter(|i| {
+                let Some(i) = interaction.as_ref().filter(|i| {
                     i["kind"] == "model_picker"
                         && i["route_key"] == route.key
                         && i["state"] == "pending"
@@ -2943,6 +2943,63 @@ impl Inner {
                 }) else {
                     self.answer_callback(callback_id, "This model picker expired")
                         .await?;
+                    let message = &cb["message"];
+                    let card = match interaction.as_ref() {
+                        Some(i) if i["kind"] == "model_picker" && i["route_key"] == route.key => {
+                            serde_json::from_str::<Value>(i["payload_json"].as_str().unwrap_or(""))
+                                .ok()
+                                .and_then(|p| {
+                                    serde_json::from_value::<SessionCard>(p["card"].clone()).ok()
+                                })
+                                .filter(|card| match &card.recipient {
+                                    Some(recipient) => {
+                                        card.message_id == message["ephemeral_message_id"]
+                                            && Some(recipient.user_id) == cb["from"]["id"].as_i64()
+                                    }
+                                    None => card.message_id == message["message_id"],
+                                })
+                        }
+                        // Expired records may have been pruned on restart. Only
+                        // delete a bot-owned message whose keyboard confirms the picker ID.
+                        None if decimal(&message["from"]["id"]).as_deref()
+                            == Some(self.options.bot.id.as_str())
+                            && message["reply_markup"]["inline_keyboard"]
+                                .as_array()
+                                .is_some_and(|rows| {
+                                    rows.iter().filter_map(Value::as_array).flatten().any(
+                                        |button| {
+                                            button["callback_data"].as_str().is_some_and(|data| {
+                                                data.starts_with(&format!("model:{id}:"))
+                                            })
+                                        },
+                                    )
+                                }) =>
+                        {
+                            if let Some(ephemeral) = message["ephemeral_message_id"].as_i64() {
+                                cb["from"]["id"].as_i64().map(|user_id| SessionCard {
+                                    message_id: json!(ephemeral),
+                                    recipient: Some(PrivateRecipient {
+                                        user_id,
+                                        reply_to: None,
+                                    }),
+                                })
+                            } else {
+                                message["message_id"].as_i64().map(|id| SessionCard {
+                                    message_id: json!(id),
+                                    recipient: None,
+                                })
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(card) = card
+                        && let Err(error) = self.delete_model_picker(id, route, &card).await
+                    {
+                        self.log(
+                            "model.expired_cleanup_failed",
+                            json!({"error":error.to_string()}),
+                        );
+                    }
                     return Ok(false);
                 };
                 let mut stored: Value = serde_json::from_str(i["payload_json"].as_str().unwrap())?;
