@@ -27,6 +27,7 @@ struct Mock {
     reject_ephemeral: Arc<std::sync::atomic::AtomicBool>,
     reject_ephemeral_replies: Arc<std::sync::atomic::AtomicBool>,
     release_callbacks: Arc<Notify>,
+    bot_status: Arc<Mutex<String>>,
     command_menus: Arc<Mutex<std::collections::HashMap<String, Value>>>,
     command_failures: Arc<std::sync::atomic::AtomicUsize>,
     command_mismatches: Arc<std::sync::atomic::AtomicUsize>,
@@ -130,7 +131,13 @@ async fn api(
         }
         "getStickerSet" => json!({"stickers":[]}),
         "getFile" => json!({"file_path":"stickers/fixture.webp"}),
-        "getChatMember" => json!({"status":"member"}),
+        "getChatMember" => {
+            let status = mock.bot_status.lock().unwrap().clone();
+            if status == "unavailable" {
+                return Json(json!({"ok":false,"error_code":503,"description":"Unavailable"}));
+            }
+            json!({"status":status})
+        }
         "sendMessage" | "sendRichMessage" if body.get("ephemeral_message_parameters").is_some() => {
             json!({"ephemeral_message_id":mock.next.fetch_add(1,std::sync::atomic::Ordering::AcqRel),
                 "receiver_user":{"id":body["ephemeral_message_parameters"]["receiver_user_id"]}})
@@ -188,6 +195,7 @@ impl Running {
             reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reject_ephemeral_replies: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             release_callbacks: Arc::new(Notify::new()),
+            bot_status: Arc::new(Mutex::new("member".into())),
             command_menus: Arc::default(),
             command_failures: Arc::default(),
             command_mismatches: Arc::default(),
@@ -1132,6 +1140,7 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
         reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reject_ephemeral_replies: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release_callbacks: Arc::new(Notify::new()),
+        bot_status: Arc::new(Mutex::new("member".into())),
         command_menus: Arc::default(),
         command_failures: Arc::default(),
         command_mismatches: Arc::default(),
@@ -2793,6 +2802,42 @@ async fn whisper_shares_the_group_session_but_delivers_to_each_requester() {
             .iter()
             .any(|e| e.to_string().contains("PRIVATE_"))
     );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn administrator_private_commands_omit_the_reply_quote() {
+    let r = Running::start("final").await;
+    for (id, status) in [(1, "administrator"), (2, "creator")] {
+        *r.mock.bot_status.lock().unwrap() = status.into();
+        let after = r.mock.calls.lock().unwrap().len();
+        r.updates
+            .send(json!({"update_id":id,"message":{
+                "ephemeral_message_id":id,"date":1,"chat":{"id":-9,"type":"supergroup"},
+                "from":{"id":42,"is_bot":false},"text":"/whisper"
+            }}))
+            .unwrap();
+        let (_, reply) = r.call_after(after, |m, _| m == "sendMessage").await;
+        assert_eq!(
+            reply["ephemeral_message_parameters"]["receiver_user_id"],
+            42
+        );
+        assert!(reply.get("reply_parameters").is_none());
+    }
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn private_commands_keep_the_reply_target_when_admin_lookup_fails() {
+    let r = Running::start("final").await;
+    *r.mock.bot_status.lock().unwrap() = "unavailable".into();
+    whisper(&r, 1, 42, 7, "");
+    let (_, reply) = r.call(|m, _| m == "sendMessage").await;
+    assert_eq!(
+        reply["ephemeral_message_parameters"]["receiver_user_id"],
+        42
+    );
+    assert_eq!(reply["reply_parameters"]["ephemeral_message_id"], 1);
     r.stop().await;
 }
 

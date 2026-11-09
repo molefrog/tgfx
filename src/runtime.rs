@@ -2548,7 +2548,21 @@ impl Inner {
                 params["ephemeral_message_parameters"] =
                     json!({"receiver_user_id":recipient.user_id});
                 if let Some(reply_to) = recipient.reply_to {
-                    params["reply_parameters"] = json!({"ephemeral_message_id":reply_to});
+                    let membership = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        self.options.telegram.call(
+                            "getChatMember",
+                            json!({
+                                "chat_id":route.chat_id,"user_id":self.options.bot.id
+                            }),
+                        ),
+                    )
+                    .await;
+                    let is_admin = matches!(membership, Ok(Ok(ref member))
+                        if matches!(member["status"].as_str(), Some("administrator" | "creator")));
+                    if !is_admin {
+                        params["reply_parameters"] = json!({"ephemeral_message_id":reply_to});
+                    }
                 }
                 send_method
             }
