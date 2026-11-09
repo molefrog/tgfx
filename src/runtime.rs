@@ -234,7 +234,7 @@ impl Runtime {
             inner.state.prune()?;
             crate::files::prune_files(&inner.options.paths.files, Duration::from_secs(7 * 86400))?;
             let chats = inner.menu_chats()?;
-            futures::future::join_all(chats.iter().map(|chat| inner.menu(chat, true))).await;
+            futures::future::try_join_all(chats.iter().map(|chat| inner.menu(chat, true))).await?;
             let (received, interrupted) = inner.state.recover_inbox()?;
             if interrupted > 0 {
                 let route = inner.approvals_route();
@@ -428,23 +428,85 @@ impl Inner {
             )
             .collect())
     }
-    async fn menu(&self, chat: &str, install: bool) {
+    async fn menu(&self, chat: &str, install: bool) -> Result<()> {
         let mut params = json!({"scope":{"type":"chat","chat_id":chat}});
         if install {
             params["commands"] = command_list(chat.starts_with('-'));
         }
-        let _ = tokio::time::timeout(
-            Duration::from_secs(3),
-            self.options.telegram.call(
+        for attempt in 1..=3 {
+            let result = tokio::time::timeout(Duration::from_secs(10), async {
+                let response = self
+                    .options
+                    .telegram
+                    .call(
+                        if install {
+                            "setMyCommands"
+                        } else {
+                            "deleteMyCommands"
+                        },
+                        params.clone(),
+                    )
+                    .await?;
+                ensure!(
+                    response == true,
+                    "Telegram did not confirm command registration"
+                );
                 if install {
-                    "setMyCommands"
-                } else {
-                    "deleteMyCommands"
-                },
-                params,
-            ),
-        )
-        .await;
+                    let actual = self
+                        .options
+                        .telegram
+                        .call("getMyCommands", json!({"scope":params["scope"]}))
+                        .await?;
+                    let actual = actual
+                        .as_array()
+                        .context("Telegram returned an invalid command menu")?;
+                    let expected = params["commands"].as_array().unwrap();
+                    ensure!(
+                        actual.len() == expected.len()
+                            && expected.iter().all(|command| {
+                                actual.iter().any(|registered| {
+                                    registered["command"] == command["command"]
+                                        && registered["description"] == command["description"]
+                                        && registered["is_ephemeral"].as_bool().unwrap_or(false)
+                                            == command["is_ephemeral"].as_bool().unwrap_or(false)
+                                })
+                            }),
+                        "Telegram command menu did not match registration"
+                    );
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .context("Telegram command registration timed out")
+            .and_then(|r| r);
+            match result {
+                Ok(()) => {
+                    self.log(
+                        if install {
+                            "commands.verified"
+                        } else {
+                            "commands.deleted"
+                        },
+                        json!({"chatId":chat,"attempt":attempt}),
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.log(
+                        "commands.failed",
+                        json!({"chatId":chat,"attempt":attempt,
+                        "install":install,"error":error.to_string()}),
+                    );
+                    if attempt == 3 {
+                        return Err(
+                            error.context(format!("Could not configure commands for chat {chat}"))
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
+                }
+            }
+        }
+        unreachable!()
     }
     async fn wait_poll_gate(&self) -> bool {
         let mut announced = false;
@@ -767,7 +829,9 @@ impl Inner {
             } else {
                 None
             };
-            let payload = json!({"kind":"whisper", "route":route, "text":text,"reply":reply,
+            let payload = json!({"kind":"whisper", "route":route,
+                "text":if ephemeral.is_some() { text } else { "" },"reply":reply,
+                "public_submission":ephemeral.is_none(),
                 "sender":{"user_id":user,"name":raw["from"]["first_name"]},
                 "recipient":PrivateRecipient { user_id:user.unwrap(), reply_to:ephemeral }});
             if let Some(inbox) = self.state.ingest_update(
@@ -1664,6 +1728,12 @@ impl Inner {
             route.chat_id.starts_with('-') && recipient.user_id > 0,
             "Invalid whisper recipient"
         );
+        if payload["public_submission"] == true {
+            self.send_control_view(&route, Some(&recipient), None, &json!({
+                "text":"Telegram posted your /whisper message publicly. I haven't processed it. Choose /whisper from the group's command menu or message me directly."
+            })).await?;
+            return Ok(());
+        }
         let text = payload["text"]
             .as_str()
             .context("Missing private question")?;
@@ -3262,8 +3332,13 @@ impl Inner {
             }
             config::save_settings(&self.options.workspace, &config, &["chatReplies"])?;
         }
-        self.menu(old, false).await;
-        self.menu(new, true).await;
+        if let Err(error) = self.menu(old, false).await {
+            self.log(
+                "commands.migration_cleanup_failed",
+                json!({"error":error.to_string()}),
+            );
+        }
+        self.menu(new, true).await?;
         let route = Route::new(&self.options.bot.id, new, "0", "supergroup");
         self.options.telegram.send_text(&route,"Group migration detected. tgfx preserved this group's workspace session under the new supergroup ID.").await?;
         Ok(())
@@ -3453,9 +3528,8 @@ impl Inner {
         if let Some(broker) = self.broker.lock().await.take() {
             let _ = broker.close().await;
         }
-        if let Ok(chats) = self.menu_chats() {
-            futures::future::join_all(chats.iter().map(|chat| self.menu(chat, false))).await;
-        }
+        // Command metadata belongs to the bot, not this process. Keep it installed
+        // across restarts so clients retain ephemeral-command information.
         lock(&self.broker_directory).take();
     }
 }

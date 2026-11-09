@@ -27,6 +27,9 @@ struct Mock {
     reject_ephemeral: Arc<std::sync::atomic::AtomicBool>,
     reject_ephemeral_replies: Arc<std::sync::atomic::AtomicBool>,
     release_callbacks: Arc<Notify>,
+    command_menus: Arc<Mutex<std::collections::HashMap<String, Value>>>,
+    command_failures: Arc<std::sync::atomic::AtomicUsize>,
+    command_mismatches: Arc<std::sync::atomic::AtomicUsize>,
 }
 async fn api(
     AxumState(mock): AxumState<Mock>,
@@ -75,7 +78,47 @@ async fn api(
             json!({"ok":false,"error_code":400,"description":"Bad Request: REPLY_TO_INVALID"}),
         );
     }
+    let take_one = |count: &std::sync::atomic::AtomicUsize| {
+        count
+            .try_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
+    };
+    if method == "setMyCommands" && take_one(&mock.command_failures) {
+        return Json(
+            json!({"ok":false,"error_code":500,"description":"Temporary registration failure"}),
+        );
+    }
     let result = match method.as_str() {
+        "setMyCommands" => {
+            mock.command_menus
+                .lock()
+                .unwrap()
+                .insert(body["scope"].to_string(), body["commands"].clone());
+            json!(true)
+        }
+        "getMyCommands" => {
+            if take_one(&mock.command_mismatches) {
+                json!([])
+            } else {
+                mock.command_menus
+                    .lock()
+                    .unwrap()
+                    .get(&body["scope"].to_string())
+                    .cloned()
+                    .unwrap_or(json!([]))
+            }
+        }
+        "deleteMyCommands" => {
+            mock.command_menus
+                .lock()
+                .unwrap()
+                .remove(&body["scope"].to_string());
+            json!(true)
+        }
         "getMe" => json!({"id":100,"is_bot":true,"first_name":"Bot","username":"fixture_bot"}),
         "getWebhookInfo" => json!({"url":""}),
         "getUpdates" => {
@@ -145,7 +188,20 @@ impl Running {
             reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reject_ephemeral_replies: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             release_callbacks: Arc::new(Notify::new()),
+            command_menus: Arc::default(),
+            command_failures: Arc::default(),
+            command_mismatches: Arc::default(),
         };
+        for (key, value) in extra_env {
+            let target = match *key {
+                "RUNTIME_COMMAND_FAILURES" => Some(&mock.command_failures),
+                "RUNTIME_COMMAND_MISMATCHES" => Some(&mock.command_mismatches),
+                _ => None,
+            };
+            if let Some(target) = target {
+                target.store(value.parse().unwrap(), std::sync::atomic::Ordering::Release);
+            }
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = Router::new()
@@ -235,7 +291,11 @@ impl Running {
             event_changed: changed,
             command,
         };
-        if !recovery {
+        if !recovery
+            && !extra_env
+                .iter()
+                .any(|(key, _)| *key == "RUNTIME_EXPECT_START_FAILURE")
+        {
             running
                 .event(|v| v["type"] == "boot" && v["step"] == "polling")
                 .await;
@@ -1072,6 +1132,9 @@ async fn pausing_during_long_poll_preserves_the_returned_batch_until_resume() {
         reject_ephemeral: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reject_ephemeral_replies: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release_callbacks: Arc::new(Notify::new()),
+        command_menus: Arc::default(),
+        command_failures: Arc::default(),
+        command_mismatches: Arc::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -2504,6 +2567,130 @@ fn whisper(r: &Running, id: i64, user: i64, topic: i64, question: &str) {
             "text":format!("/whisper@fixture_bot {question}")
         }}))
         .unwrap();
+}
+
+#[tokio::test]
+async fn command_registration_retries_api_errors_before_polling() {
+    let r = Running::start_with_env("final", &[("RUNTIME_COMMAND_FAILURES", "1")]).await;
+    r.call(|m, _| m == "getUpdates").await;
+    let calls = r.mock.calls.lock().unwrap().clone();
+    let first_poll = calls.iter().position(|(m, _)| m == "getUpdates").unwrap();
+    assert_eq!(
+        calls[..first_poll]
+            .iter()
+            .filter(|(m, _)| m == "setMyCommands")
+            .count(),
+        4
+    );
+    assert_eq!(
+        r.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v["event"] == "commands.verified")
+            .count(),
+        3
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn command_registration_failure_prevents_polling() {
+    let mut r = Running::start_with_env(
+        "final",
+        &[
+            ("RUNTIME_COMMAND_FAILURES", "99"),
+            ("RUNTIME_EXPECT_START_FAILURE", "1"),
+        ],
+    )
+    .await;
+    let status = tokio::time::timeout(Duration::from_secs(10), r.child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!status.success());
+    assert!(
+        !r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "getUpdates")
+    );
+    assert!(
+        r.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["event"] == "commands.failed" && v["attempt"] == 3)
+    );
+    r.server.abort();
+}
+
+#[tokio::test]
+async fn command_registration_retries_readback_mismatches() {
+    let r = Running::start_with_env("final", &[("RUNTIME_COMMAND_MISMATCHES", "1")]).await;
+    assert_eq!(
+        r.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == "setMyCommands")
+            .count(),
+        4
+    );
+    assert!(
+        r.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["event"] == "commands.failed")
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn command_registration_survives_shutdown() {
+    let r = Running::start("final").await;
+    let calls = r.mock.calls.clone();
+    r.stop().await;
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "deleteMyCommands")
+    );
+}
+
+#[tokio::test]
+async fn public_whisper_warns_privately_without_running_fx() {
+    let r = Running::start("final").await;
+    r.message(1, -9, "/whisper PUBLIC_SUBMISSION_SECRET");
+    let (_, warning) = r
+        .call(|m, p| m == "sendMessage" && text(p).contains("publicly"))
+        .await;
+    assert_eq!(
+        warning["ephemeral_message_parameters"]["receiver_user_id"],
+        42
+    );
+    assert!(r.fx().is_empty());
+    assert_eq!(
+        r.db()
+            .query_row("SELECT count(*) FROM chat_history", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(
+        !r.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v.to_string().contains("PUBLIC_SUBMISSION_SECRET"))
+    );
+    r.stop().await;
 }
 
 #[tokio::test]
