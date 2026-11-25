@@ -13,6 +13,11 @@ enum Entry {
     },
     Tool(String),
 }
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct McpIdentity {
+    pub server: String,
+    pub tool: String,
+}
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolState {
@@ -23,16 +28,27 @@ pub struct ToolState {
     pub kind: String,
     pub status: String,
     pub input: Value,
+    pub internal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpIdentity>,
     pub started_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
 }
 impl ToolState {
     fn description(&self) -> ToolDescription {
+        if let Some(mcp) = &self.mcp {
+            return describe_tool(
+                &format!("mcp_{}_{}", mcp.server, mcp.tool),
+                &self.title,
+                &self.kind,
+                &self.input,
+            );
+        }
         describe_tool(&self.name, &self.title, &self.kind, &self.input)
     }
     fn visible(&self) -> bool {
-        !self.name.is_empty() || terminal(&self.status)
+        !self.internal && (!self.name.is_empty() || terminal(&self.status))
     }
 }
 fn terminal(s: &str) -> bool {
@@ -169,7 +185,11 @@ impl Projector {
                 if u["content"]["type"] != "text" {
                     return "none";
                 }
-                if !self.tools.values().any(|t| !terminal(&t.status)) {
+                if !self
+                    .tools
+                    .values()
+                    .any(|t| !t.internal && !terminal(&t.status))
+                {
                     self.wanted_phrase = "Thinking…".into();
                 }
                 let id = u["messageId"].as_str().map(str::to_owned);
@@ -198,6 +218,8 @@ impl Projector {
                         kind: String::new(),
                         status: "pending".into(),
                         input: json!({}),
+                        internal: false,
+                        mcp: None,
                         started_at: now,
                         finished_at: None,
                     }
@@ -214,6 +236,18 @@ impl Projector {
                 if u["rawInput"].is_object() {
                     t.input = u["rawInput"].clone()
                 }
+                let meta = &u["_meta"]["fx"]["toolCall"];
+                if let Some(internal) = meta["internal"].as_bool() {
+                    t.internal = internal;
+                }
+                if let (Some(server), Some(tool)) =
+                    (meta["mcp"]["server"].as_str(), meta["mcp"]["tool"].as_str())
+                {
+                    t.mcp = Some(McpIdentity {
+                        server: server.into(),
+                        tool: tool.into(),
+                    });
+                }
                 if let Some(status) = u["status"].as_str()
                     && (!terminal(&t.status) || terminal(status))
                 {
@@ -221,6 +255,13 @@ impl Projector {
                 }
                 if terminal(&t.status) {
                     t.finished_at.get_or_insert(now);
+                }
+                if t.internal {
+                    if previous.as_ref().is_some_and(ToolState::visible) {
+                        self.wanted_phrase = "Thinking…".into();
+                        return "tool";
+                    }
+                    return "none";
                 }
                 self.wanted_phrase = progress_phrase(t.description().activity).into();
                 if !t.visible() {
@@ -231,6 +272,7 @@ impl Projector {
                         || old.name != t.name
                         || old.title != t.title
                         || old.input != t.input
+                        || old.mcp != t.mcp
                 }) {
                     "tool"
                 } else {
@@ -454,6 +496,13 @@ if let Some(at)=t.finished_at{v["finishedAt"]=json!(at)}v}).collect();
         }
         if let Some(id) = self.icons.get(&format!("tool:{}", normalize_icon(&t.name))) {
             return Some((id, true));
+        }
+        if let Some(identity) = &t.mcp {
+            return self
+                .icons
+                .get(&normalize_icon(&identity.server))
+                .or_else(|| self.icons.get("mcp"))
+                .map(|id| (id.as_str(), false));
         }
         mcp(&t.name).map(|id| (id, false))
     }
