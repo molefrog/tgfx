@@ -88,6 +88,40 @@ pub fn describe_tool(name: &str, title: &str, kind: &str, input: &Value) -> Tool
             &input["query"],
             Some("searched_capabilities"),
         ),
+        "toolbox" => {
+            if input["search"].is_string() {
+                (
+                    "Finding tools and skills",
+                    if input["search"]
+                        .as_str()
+                        .is_some_and(|s| s.trim().is_empty())
+                    {
+                        &input["server"]
+                    } else {
+                        &input["search"]
+                    },
+                    Some("searched_capabilities"),
+                )
+            } else if input["open"].is_string() {
+                (
+                    match input["kind"].as_str() {
+                        Some("skill") => "Loading skill",
+                        Some("mcp_server") => "Opening MCP server",
+                        Some("tool") => "Reading tool instructions",
+                        _ => "Opening toolbox item",
+                    },
+                    &input["open"],
+                    Some(if input["kind"] == "skill" {
+                        "used_skills"
+                    } else {
+                        "searched_capabilities"
+                    }),
+                )
+            } else {
+                // FX exposes toolbox runs as the underlying tool over ACP.
+                ("Using toolbox", &Value::Null, Some("searched_capabilities"))
+            }
+        }
         "skill" => ("Loading skill", &input["name"], Some("used_skills")),
         "install_skill" => (
             "Installing skill",
@@ -233,7 +267,7 @@ pub fn activity_summary(activity: &str, count: usize) -> String {
     }
 }
 
-pub const FX_TOOL_NAMES: [&str; 17] = [
+pub const FX_TOOL_NAMES: [&str; 18] = [
     "read_file",
     "glob_files",
     "grep_files",
@@ -242,6 +276,7 @@ pub const FX_TOOL_NAMES: [&str; 17] = [
     "shell",
     "subagent",
     "capability_search",
+    "toolbox",
     "skill",
     "install_skill",
     "mcp_select_tool",
